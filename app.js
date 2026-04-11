@@ -6,8 +6,7 @@
     const { createClient } = window.supabase;
     const sb = createClient(SUPABASE_URL, SUPABASE_KEY);
 
-    // TODO: Generate a real VAPID keypair (e.g. via web-push library) and replace this placeholder
-    const VAPID_PUBLIC_KEY = 'YOUR_VAPID_PUBLIC_KEY_HERE';
+    const VAPID_PUBLIC_KEY = 'BJJCTmZAXDO_VN6svOa-AqC0990KFAo2cqaZAWjJpKsnSm7se6JFwsITHbuAv4OLYr3bsV36m317tCAEdRDitAg';
 
     const COLORS = ['#689562', '#336026', '#3498db', '#9b59b6', '#e67e22', '#e74c3c'];
     const SPECIES_EMOJI = { dog: '🐕', cat: '🐈', bird: '🦜', rabbit: '🐇', other: '🐾' };
@@ -700,7 +699,11 @@ Looking forward to being part of [Pet Name]'s care team!</div>
         // Route by role
         // Load notification preferences + check permission state for all roles
         await loadNotificationSettings();
-        if ('Notification' in window) state.notificationPermission = Notification.permission;
+        if ('Notification' in window) {
+          state.notificationPermission = Notification.permission;
+          // Auto-subscribe to push if permission already granted
+          if (Notification.permission === 'granted') subscribeToPush();
+        }
 
         if (data.role === 'client') {
           // Auto-link any pending co-owner invites to this user
@@ -8174,7 +8177,14 @@ function renderVaccineDueAlerts(vaccines) {
                 if (state.profile.role === 'client') {
                   await sb.from('cases').update({ last_client_message_at: new Date().toISOString() }).eq('id', state.caseId);
                 }
-                // TODO: Trigger server-side push notification to the other party here
+                // Trigger push notification to the other party (best-effort, don't block)
+                callEdgeFunction('send-push-notification', {
+                  sender_id: state.profile.id,
+                  sender_role: state.profile.role,
+                  case_id: state.caseId,
+                  content: content || '',
+                  sender_name: state.profile.name,
+                }).catch(e => console.warn('Push notification failed:', e));
                 // Mark client messages as read when staff views/sends in the case
                 if (['vet_buddy','admin'].includes(state.profile.role)) {
                   await sb.from('messages').update({ is_read_by_staff: true }).eq('case_id', state.caseId).eq('sender_role', 'client').eq('is_read_by_staff', false);
