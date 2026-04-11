@@ -7937,7 +7937,9 @@ END:VCALENDAR`;
         // Document vault upload
         if (e.target.id === 'doc-upload-input' && e.target.files?.[0]) {
           const file = e.target.files[0];
-          if (!state.caseId) { showToast('No active case', 'error'); return; }
+          if (!state.caseId) { showToast('No active case', 'error'); e.target.value = ''; return; }
+          const maxSize = 25 * 1024 * 1024; // 25 MB
+          if (file.size > maxSize) { showToast('File too large — max 25 MB', 'error'); e.target.value = ''; return; }
           try {
             showToast('Uploading...', 'success');
             const ext = file.name.split('.').pop();
@@ -7959,6 +7961,7 @@ END:VCALENDAR`;
           } catch(err) {
             console.error('Doc upload error:', err);
             showToast('Upload failed: ' + (err.message || 'Unknown error'), 'error');
+            e.target.value = '';
           }
           return;
         }
