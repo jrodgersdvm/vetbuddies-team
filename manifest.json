@@ -1,0 +1,21 @@
+{
+  "name": "Vet Buddies",
+  "short_name": "VetBuddies",
+  "description": "Your pet's personalized veterinary care portal",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#EDE8E0",
+  "theme_color": "#336026",
+  "icons": [
+    {
+      "src": "/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png"
+    },
+    {
+      "src": "/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    }
+  ]
+}
