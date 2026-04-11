@@ -127,7 +127,7 @@
 
     function renderAvatar(initials, color, size = '') {
       const sizeClass = size ? ` ${size}` : '';
-      return `<div class="avatar${sizeClass}" style="background: ${color};">${initials}</div>`;
+      return `<div class="avatar${sizeClass}" style="background: ${esc(color)};">${esc(initials)}</div>`;
     }
 
     // ── Pet Photo Helpers ─────────────────────────────────────────────────
@@ -139,7 +139,7 @@
       if (size === 'hero') {
         if (imgSrc) {
           return `<div style="position:relative; display:inline-block; text-align:center;">
-            <img src="${imgSrc}" alt="${pet?.name}" class="pet-photo-hero">
+            <img src="${esc(imgSrc)}" alt="${esc(pet?.name)}" class="pet-photo-hero">
             ${changeBtn}
           </div>`;
         }
@@ -150,12 +150,12 @@
       }
 
       if (size === 'card') {
-        if (imgSrc) return `<img src="${imgSrc}" alt="${pet?.name}" class="pet-photo-card">`;
+        if (imgSrc) return `<img src="${esc(imgSrc)}" alt="${esc(pet?.name)}" class="pet-photo-card">`;
         return `<div class="pet-photo-card-placeholder">${emoji}</div>`;
       }
 
       if (size === 'thumb') {
-        if (imgSrc) return `<img src="${imgSrc}" alt="${pet?.name}" class="pet-photo-thumb">`;
+        if (imgSrc) return `<img src="${esc(imgSrc)}" alt="${esc(pet?.name)}" class="pet-photo-thumb">`;
         return `<div class="pet-photo-thumb-placeholder">${emoji}</div>`;
       }
 
@@ -167,6 +167,7 @@
       return new Promise((resolve, reject) => {
         const img = new Image();
         img.onload = () => {
+          URL.revokeObjectURL(img.src);
           let w = img.width, h = img.height;
           if (w > maxDim || h > maxDim) {
             const ratio = Math.min(maxDim / w, maxDim / h);
@@ -250,7 +251,7 @@
       backdrop.className = 'modal-backdrop';
       backdrop.innerHTML = `
         <div class="modal-card">
-          <div class="modal-title">${title}</div>
+          <div class="modal-title">${esc(title)}</div>
           <div class="modal-body">${bodyHTML}</div>
           <div class="modal-actions">${actionsHTML}</div>
         </div>
@@ -270,7 +271,8 @@
     }
 
     function getFirstInitials(name) {
-      return name.split(' ').map(n => n[0]).join('').toUpperCase().slice(0, 2);
+      if (!name) return '??';
+      return name.split(' ').filter(n => n).map(n => n[0]).join('').toUpperCase().slice(0, 2);
     }
 
     function getRandomColor() {
@@ -428,7 +430,7 @@
 
         // Route by role
         // Load notification preferences + check permission state for all roles
-        loadNotificationSettings();
+        await loadNotificationSettings();
         if ('Notification' in window) state.notificationPermission = Notification.permission;
 
         if (data.role === 'client') {
@@ -441,7 +443,7 @@
             navigate('onboarding');
           } else if ((data.subscription_status === 'trialing' || data.subscription_status === 'active') && state.cases.length === 0) {
             // Trial or paid user who hasn't added a pet yet — resume onboarding at step 2
-            loadAvailableBuddies();
+            await loadAvailableBuddies();
             state.onboardingStep = 2;
             navigate('onboarding');
           } else {
@@ -639,7 +641,7 @@
           user_id: userId || state.profile.id, // placeholder if user doesn't exist yet
           invited_by: state.profile.id,
           invited_email: email,
-          status: userId ? 'pending' : 'pending',
+          status: 'pending',
         };
 
         // If user exists, set user_id properly; if not, we'll match on email when they sign up
@@ -1315,9 +1317,17 @@ async function generateCarePlanPDF(carePlan, currentCase) {
     doc.text(`Owner: ${currentCase.pets?.owner?.name || 'Unknown'}`, margin, yPosition);
     yPosition += 15;
 
-    // Care Plan Sections
-    if (carePlan && carePlan.sections) {
-      carePlan.sections.forEach(section => {
+    // Care Plan Sections (living plan structure)
+    const lp = carePlan ? parseLivingCarePlan(carePlan) : null;
+    if (lp) {
+      const sections = [
+        { title: 'Pet Profile', content: lp.pet_profile },
+        { title: 'Active Care Goals', content: (lp.active_care_goals || []).map(g => '• ' + (g.goal_text || '')).join('\n') },
+        { title: 'Engagement Log', content: (lp.engagement_log || []).map(e => '• ' + (e.entry_text || '')).join('\n') },
+        { title: 'Milestones & Wins', content: (lp.milestones_and_wins || []).map(m => '• ' + (m.title || '')).join('\n') },
+      ];
+      sections.forEach(section => {
+        if (!section.content) return;
         if (yPosition > pageHeight - 30) {
           doc.addPage();
           yPosition = 20;
@@ -1768,9 +1778,9 @@ async function calculateBuddyScorecard(buddyId) {
               <button data-action="switch-active-pet" data-idx="${i}"
                 style="display:flex; align-items:center; gap:8px; padding:8px 14px 8px 8px; border-radius:30px; border:2px solid ${i===idx ? 'var(--primary)' : 'var(--border)'}; background:${i===idx ? 'rgba(42,157,143,0.08)' : 'white'}; cursor:pointer; font-size:13px; font-weight:500; color:#336026; transition:all 0.2s;">
                 ${c.pets?.photo_url
-                  ? `<img src="${c.pets.photo_url}" style="width:32px;height:32px;border-radius:50%;object-fit:cover;border:2px solid ${i===idx ? 'var(--primary)' : 'var(--border)'};" alt="${c.pets?.name}">`
+                  ? `<img src="${esc(c.pets.photo_url)}" style="width:32px;height:32px;border-radius:50%;object-fit:cover;border:2px solid ${i===idx ? 'var(--primary)' : 'var(--border)'};" alt="${esc(c.pets?.name)}">`
                   : `<div style="width:32px;height:32px;border-radius:50%;background:linear-gradient(135deg,var(--primary),#336026);display:flex;align-items:center;justify-content:center;font-size:16px;">${SPECIES_EMOJI[c.pets?.species?.toLowerCase()] || '🐾'}</div>`}
-                ${c.pets?.name || 'Pet'}${c._coOwned ? '<span class="co-owner-badge-inline">Shared</span>' : ''}
+                ${esc(c.pets?.name) || 'Pet'}${c._coOwned ? '<span class="co-owner-badge-inline">Shared</span>' : ''}
               </button>`).join('')}
           </div>
         </div>` : '';
@@ -1811,8 +1821,8 @@ async function calculateBuddyScorecard(buddyId) {
       const welcomeBanner = state._showWelcomeBanner ? `
         <div class="card" style="border:2px solid var(--primary);background:linear-gradient(135deg,#f0faf9 0%,#fff 100%);margin-bottom:16px;text-align:center;">
           <div style="font-size:36px;margin-bottom:8px;">🎉</div>
-          <div style="font-size:20px;font-weight:700;color:#336026;margin-bottom:8px;">Welcome to Vet Buddies, ${state.profile.name}!</div>
-          <div style="color:var(--text-secondary);margin-bottom:16px;">Your Buddy ${buddy ? '(' + buddy.name + ') ' : ''}will reach out within 48 hours to start building your Living Care Plan together. In the meantime, feel free to explore!</div>
+          <div style="font-size:20px;font-weight:700;color:#336026;margin-bottom:8px;">Welcome to Vet Buddies, ${esc(state.profile.name)}!</div>
+          <div style="color:var(--text-secondary);margin-bottom:16px;">Your Buddy ${buddy ? '(' + esc(buddy.name) + ') ' : ''}will reach out within 48 hours to start building your Living Care Plan together. In the meantime, feel free to explore!</div>
           <div style="display:flex;gap:12px;justify-content:center;flex-wrap:wrap;">
             <button class="btn btn-primary" data-action="nav-client-case" data-case-id="${petCase.id}" data-tab="messages">Send a Message</button>
             <button class="btn btn-secondary" data-action="nav-client-case" data-case-id="${petCase.id}" data-tab="careplan">View Care Plan</button>
@@ -1832,8 +1842,8 @@ async function calculateBuddyScorecard(buddyId) {
         <div class="hero" style="display:flex; gap:24px; align-items:center; flex-wrap:wrap;">
           ${renderPetPhoto(pet, 'hero')}
           <div style="flex:1; min-width:0;">
-            <div class="hero-title" style="margin-bottom:4px;">👋 Welcome back, ${state.profile.name}</div>
-            <div class="hero-subtitle" style="margin-bottom:12px; font-size:18px; font-weight:500; color:#336026;">${emoji} ${pet.name}</div>
+            <div class="hero-title" style="margin-bottom:4px;">👋 Welcome back, ${esc(state.profile.name)}</div>
+            <div class="hero-subtitle" style="margin-bottom:12px; font-size:18px; font-weight:500; color:#336026;">${emoji} ${esc(pet.name)}</div>
             <div style="font-size:13px; color:var(--text-secondary);">${tier}</div>
           </div>
         </div>
@@ -1846,9 +1856,9 @@ async function calculateBuddyScorecard(buddyId) {
             ${buddy ? `<div style="display: flex; gap: 16px; align-items: center; margin-top: 16px;">
               ${renderAvatar(buddy.avatar_initials, buddy.avatar_color, 'md')}
               <div>
-                <div style="font-weight: 600; color: #336026;">${buddy.name}</div>
-                <div style="font-size: 13px; color: var(--text-secondary); margin-bottom: 8px;">${buddy.bio || 'Caring vet buddy'}</div>
-                <div style="font-size: 12px; color: var(--text-secondary);">Response time: ${buddy.response_time || 'Within 24 hours'}</div>
+                <div style="font-weight: 600; color: #336026;">${esc(buddy.name)}</div>
+                <div style="font-size: 13px; color: var(--text-secondary); margin-bottom: 8px;">${esc(buddy.bio) || 'Caring vet buddy'}</div>
+                <div style="font-size: 12px; color: var(--text-secondary);">Response time: ${esc(buddy.response_time) || 'Within 24 hours'}</div>
               </div>
             </div>` : '<div style="padding: 16px; color: var(--text-secondary);">No buddy assigned yet — one will be assigned shortly!</div>'}
           </div>
@@ -2422,15 +2432,15 @@ async function calculateBuddyScorecard(buddyId) {
       const todayAppts = (state.buddyAppointments || []).filter(a => new Date(a.scheduled_at).toDateString() === todayStr);
       const unreadBadge = state.unreadCount > 0 ? `<span style="background:var(--red);color:white;border-radius:10px;font-size:11px;font-weight:700;padding:1px 8px;margin-left:8px;">${state.unreadCount} unread</span>` : '';
 
-      let html = `<div style="font-family:'Fraunces',serif;font-size:20px;font-weight:700;margin-bottom:16px;">Good ${today.getHours()<12?'morning':today.getHours()<17?'afternoon':'evening'}, ${state.profile.name.split(' ')[0]}! 👋</div>`;
+      let html = `<div style="font-family:'Fraunces',serif;font-size:20px;font-weight:700;margin-bottom:16px;">Good ${today.getHours()<12?'morning':today.getHours()<17?'afternoon':'evening'}, ${esc(state.profile.name.split(' ')[0])}! 👋</div>`;
       html += `<div class="card" style="margin-bottom:16px;background:linear-gradient(135deg,#336026,#689562);color:white;">
         <div style="font-weight:700;margin-bottom:12px;font-size:15px;">📅 Today's Agenda</div>
         ${todayAppts.length === 0
           ? `<div style="opacity:0.8;font-size:13px;">No appointments today — ${state.cases.length} active case${state.cases.length!==1?'s':''}</div>`
           : todayAppts.map(a => `<div style="background:rgba(255,255,255,0.15);border-radius:8px;padding:8px 12px;margin-bottom:6px;font-size:13px;">
-              <strong>${new Date(a.scheduled_at).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'})}</strong> — ${a.title}
-              ${a.case?.pets?.name ? `<span style="opacity:0.75;font-size:11px;margin-left:6px;">(${a.case.pets.name})</span>` : ''}
-              ${a.video_url ? `<a href="${a.video_url}" target="_blank" style="color:#a8e6cf;font-size:11px;display:block;margin-top:2px;">🎥 Join Call</a>` : ''}
+              <strong>${new Date(a.scheduled_at).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'})}</strong> — ${esc(a.title)}
+              ${a.case?.pets?.name ? `<span style="opacity:0.75;font-size:11px;margin-left:6px;">(${esc(a.case.pets.name)})</span>` : ''}
+              ${a.video_url && /^https?:\/\//i.test(a.video_url) ? `<a href="${esc(a.video_url)}" target="_blank" style="color:#a8e6cf;font-size:11px;display:block;margin-top:2px;">🎥 Join Call</a>` : ''}
             </div>`).join('')}
         <div style="margin-top:10px;font-size:12px;opacity:0.8;">Inbox${unreadBadge} · ${state.cases.length} case${state.cases.length!==1?'s':''} assigned</div>
       </div>`;
@@ -2446,7 +2456,7 @@ async function calculateBuddyScorecard(buddyId) {
             <div style="font-size:12px;color:var(--text-secondary);margin-top:2px;">~40% of collected revenue · ${state.cases.length} active client${state.cases.length !== 1 ? 's' : ''}</div>
           </div>
           <div style="text-align:right;">
-            ${state.cases.map(c => `<div style="font-size:11px;color:var(--text-secondary);">${c.pets?.name || '?'}: $${(earningsByTier[c.subscription_tier] || 39.60).toFixed(2)}/mo</div>`).join('')}
+            ${state.cases.map(c => `<div style="font-size:11px;color:var(--text-secondary);">${esc(c.pets?.name) || '?'}: $${(earningsByTier[c.subscription_tier] || 39.60).toFixed(2)}/mo</div>`).join('')}
           </div>
         </div>
         <div style="font-size:11px;color:var(--text-secondary);margin-top:8px;padding-top:8px;border-top:1px solid var(--border);">Earnings are calculated at ~38–42% of collected subscription revenue per assigned client. No hidden deductions. No arbitrary caps.</div>
@@ -2470,7 +2480,7 @@ async function calculateBuddyScorecard(buddyId) {
             const tier = c.subscription_tier || 'Buddy';
             const target = ['Buddy+', 'Buddy VIP'].includes(tier) ? 4 : 1;
             return `<div style="display:flex;justify-content:space-between;align-items:center;padding:6px 0;border-bottom:1px solid #fff3cd;">
-              <span style="font-size:13px;">${SPECIES_EMOJI[c.pets?.species?.toLowerCase()] || '🐾'} <strong>${c.pets?.name || 'Unknown'}</strong> — ${monthlyDone}/${target} check-ins this month</span>
+              <span style="font-size:13px;">${SPECIES_EMOJI[c.pets?.species?.toLowerCase()] || '🐾'} <strong>${esc(c.pets?.name) || 'Unknown'}</strong> — ${monthlyDone}/${target} check-ins this month</span>
               <button class="btn btn-primary btn-small" data-action="nav-buddy-case" data-case-id="${c.id}" style="font-size:11px;">Open Case</button>
             </div>`;
           }).join('')}
@@ -2491,8 +2501,8 @@ async function calculateBuddyScorecard(buddyId) {
           <div class="buddy-case-card">
             ${renderPetPhoto(pet, 'card')}
             <div class="buddy-case-content">
-              <div class="buddy-case-pet">${pet?.name || 'Unknown'}</div>
-              <div class="buddy-case-owner">Owner: ${state.cases.find(c => c.id === petCase.id)?.pets?.owner?.name || 'Unknown'}</div>
+              <div class="buddy-case-pet">${esc(pet?.name) || 'Unknown'}</div>
+              <div class="buddy-case-owner">Owner: ${esc(state.cases.find(c => c.id === petCase.id)?.pets?.owner?.name) || 'Unknown'}</div>
               <div class="buddy-case-tier">${tier}</div>
               <div class="buddy-case-progress">Check-ins: ${buddyCount}/${maxTouchpoints}</div>
               ${renderProgressBar(buddyCount, maxTouchpoints)}
@@ -2524,11 +2534,11 @@ async function calculateBuddyScorecard(buddyId) {
         html += `
           <div class="case-list-item ${isActive ? 'active' : ''}" data-action="select-case" data-case-id="${c.id}" style="display:flex; align-items:center; gap:10px;">
             ${c.pets?.photo_url
-              ? `<img src="${c.pets.photo_url}" class="pet-photo-thumb" alt="${c.pets?.name}" style="flex-shrink:0;">`
+              ? `<img src="${esc(c.pets.photo_url)}" class="pet-photo-thumb" alt="${esc(c.pets?.name)}" style="flex-shrink:0;">`
               : `<div class="pet-photo-thumb-placeholder" style="flex-shrink:0;">${sidebarEmoji}</div>`}
             <div style="min-width:0;">
-              <div class="case-list-pet-name" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${c.pets?.name || 'Unknown'}</div>
-              <div class="case-list-owner" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${c.pets?.owner?.name || 'Unknown Owner'}</div>
+              <div class="case-list-pet-name" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(c.pets?.name) || 'Unknown'}</div>
+              <div class="case-list-owner" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(c.pets?.owner?.name) || 'Unknown Owner'}</div>
             </div>
           </div>
         `;
@@ -2546,8 +2556,8 @@ async function calculateBuddyScorecard(buddyId) {
             <div style="display:flex; align-items:center; gap:16px;">
               ${renderPetPhoto(pet, 'hero', canChangePhoto)}
               <div>
-                <div style="font-weight: 600; font-size: 18px;">${pet?.name || 'Unknown'}</div>
-                <div style="font-size: 13px; color: var(--text-secondary);">${pet?.species || ''} ${pet?.breed ? '· ' + pet.breed : ''} ${pet?.weight ? '· ' + pet.weight : ''}</div>
+                <div style="font-weight: 600; font-size: 18px;">${esc(pet?.name) || 'Unknown'}</div>
+                <div style="font-size: 13px; color: var(--text-secondary);">${esc(pet?.species)} ${pet?.breed ? '· ' + esc(pet.breed) : ''} ${pet?.weight ? '· ' + esc(pet.weight) : ''}</div>
               </div>
             </div>
             <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
@@ -2615,10 +2625,10 @@ async function calculateBuddyScorecard(buddyId) {
         html += `<div class="card" style="margin-bottom:16px; background:#f0faf8; border:1px solid var(--primary);">
           <div class="card-title" style="margin-bottom:12px;">✏️ Edit Pet Profile</div>
           <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px;">
-            <div class="form-group"><label>Weight</label><input type="text" data-field="pet-weight" value="${p?.weight || ''}" placeholder="e.g. 12 lbs" style="width:100%;"></div>
+            <div class="form-group"><label>Weight</label><input type="text" data-field="pet-weight" value="${esc(p?.weight)}" placeholder="e.g. 12 lbs" style="width:100%;"></div>
             <div class="form-group"><label>Date of Birth</label><input type="date" data-field="pet-dob" value="${p?.dob || ''}" style="width:100%;"></div>
           </div>
-          <div class="form-group"><label>Notes (behavior, preferences…)</label><textarea data-field="pet-notes" placeholder="Any notes about your pet..." style="width:100%;height:70px;">${p?.notes || ''}</textarea></div>
+          <div class="form-group"><label>Notes (behavior, preferences…)</label><textarea data-field="pet-notes" placeholder="Any notes about your pet..." style="width:100%;height:70px;">${esc(p?.notes)}</textarea></div>
           <div style="display:flex;gap:8px;">
             <button class="btn btn-primary btn-small" data-action="save-pet-profile" data-pet-id="${p?.id}">Save</button>
             <button class="btn btn-secondary btn-small" data-action="toggle-edit-pet">Cancel</button>
@@ -2666,10 +2676,10 @@ async function calculateBuddyScorecard(buddyId) {
           ${(canEdit || isClient) ? `<button class="section-edit-btn" data-action="edit-careplan-section" data-section="pet_profile">Edit</button>` : ''}
         </div>
         <div class="section-content">
-          ${lp.pet_profile || '<em style="color: var(--text-secondary);">No pet profile details yet — your Buddy will help fill this in.</em>'}
+          ${esc(lp.pet_profile) || '<em style="color: var(--text-secondary);">No pet profile details yet — your Buddy will help fill this in.</em>'}
         </div>
         <div class="section-form">
-          <textarea data-field="section-pet_profile" placeholder="Name, species, breed, age, conditions, medications, sensitivities, dietary needs...">${lp.pet_profile || ''}</textarea>
+          <textarea data-field="section-pet_profile" placeholder="Name, species, breed, age, conditions, medications, sensitivities, dietary needs...">${esc(lp.pet_profile)}</textarea>
           <div style="display:flex;gap:8px;">
             <button class="btn btn-primary btn-small" data-action="save-living-plan-section" data-section="pet_profile">Save</button>
             <button class="btn btn-secondary btn-small" data-action="cancel-careplan-section">Cancel</button>
@@ -2691,9 +2701,9 @@ async function calculateBuddyScorecard(buddyId) {
           const ct = lp.care_team[i];
           html += `<div style="background:var(--bg);border-radius:8px;padding:12px;margin-bottom:8px;display:flex;justify-content:space-between;align-items:center;">
             <div>
-              <div style="font-weight:600;">${ct.name || 'Unknown'}</div>
-              <div style="font-size:13px;color:var(--text-secondary);">${ct.role || ''} ${ct.clinic ? '· ' + ct.clinic : ''}</div>
-              <div style="font-size:12px;color:var(--text-secondary);">${ct.phone ? '📞 ' + ct.phone : ''} ${ct.email ? '✉️ ' + ct.email : ''}</div>
+              <div style="font-weight:600;">${esc(ct.name) || 'Unknown'}</div>
+              <div style="font-size:13px;color:var(--text-secondary);">${esc(ct.role)} ${ct.clinic ? '· ' + esc(ct.clinic) : ''}</div>
+              <div style="font-size:12px;color:var(--text-secondary);">${ct.phone ? '📞 ' + esc(ct.phone) : ''} ${ct.email ? '✉️ ' + esc(ct.email) : ''}</div>
             </div>
             ${(canEdit || isClient) ? `<button class="btn btn-secondary btn-small" data-action="remove-care-team" data-index="${i}" style="font-size:11px;">✕</button>` : ''}
           </div>`;
@@ -2733,7 +2743,7 @@ async function calculateBuddyScorecard(buddyId) {
           html += `<div style="background:var(--bg);border-radius:8px;padding:12px;margin-bottom:8px;border-left:3px solid ${g.status === 'completed' ? 'var(--green)' : 'var(--amber)'};">
             <div style="display:flex;justify-content:space-between;align-items:flex-start;">
               <div style="flex:1;">
-                <div style="font-weight:500;">${g.goal_text}</div>
+                <div style="font-weight:500;">${esc(g.goal_text)}</div>
                 <div style="font-size:12px;color:var(--text-secondary);margin-top:4px;">
                   ${g.set_by_owner ? '✍️ Set by owner' : '📋 Set by Buddy'} · ${g.created_at ? formatDate(g.created_at) : ''}
                   ${g.reviewed_at ? ' · Last reviewed: ' + formatDate(g.reviewed_at) : ''}
@@ -2771,8 +2781,8 @@ async function calculateBuddyScorecard(buddyId) {
         const sortedLog = [...lp.engagement_log].sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
         for (const entry of sortedLog) {
           html += `<div style="padding:10px 0;border-bottom:1px solid var(--border);">
-            <div style="font-size:14px;line-height:1.5;">${entry.entry_text}</div>
-            <div style="font-size:11px;color:var(--text-secondary);margin-top:4px;">— ${entry.created_by || 'Buddy'} · ${entry.created_at ? formatDate(entry.created_at) : ''}</div>
+            <div style="font-size:14px;line-height:1.5;">${esc(entry.entry_text)}</div>
+            <div style="font-size:11px;color:var(--text-secondary);margin-top:4px;">— ${esc(entry.created_by) || 'Buddy'} · ${entry.created_at ? formatDate(entry.created_at) : ''}</div>
           </div>`;
         }
       }
@@ -2795,9 +2805,9 @@ async function calculateBuddyScorecard(buddyId) {
       } else {
         for (const m of lp.milestones_and_wins) {
           html += `<div style="background:white;border-radius:8px;padding:12px;margin-bottom:8px;border:1px solid #ffe082;">
-            <div style="font-weight:600;color:#f57f17;">🌟 ${m.title}</div>
-            ${m.description ? `<div style="font-size:13px;margin-top:4px;">${m.description}</div>` : ''}
-            <div style="font-size:11px;color:var(--text-secondary);margin-top:4px;">— ${m.created_by || 'Team'} · ${m.created_at ? formatDate(m.created_at) : ''}</div>
+            <div style="font-weight:600;color:#f57f17;">🌟 ${esc(m.title)}</div>
+            ${m.description ? `<div style="font-size:13px;margin-top:4px;">${esc(m.description)}</div>` : ''}
+            <div style="font-size:11px;color:var(--text-secondary);margin-top:4px;">— ${esc(m.created_by) || 'Team'} · ${m.created_at ? formatDate(m.created_at) : ''}</div>
           </div>`;
         }
       }
@@ -2819,10 +2829,10 @@ async function calculateBuddyScorecard(buddyId) {
               <button class="section-edit-btn" data-action="edit-careplan-section" data-section="internal_notes">Edit</button>
             </div>
             <div class="section-content">
-              ${internalNotes || '<em style="color: var(--text-secondary);">No internal notes</em>'}
+              ${internalNotes ? esc(internalNotes) : '<em style="color: var(--text-secondary);">No internal notes</em>'}
             </div>
             <div class="section-form">
-              <textarea data-field="section-internal_notes">${internalNotes}</textarea>
+              <textarea data-field="section-internal_notes">${esc(internalNotes)}</textarea>
               <div style="display: flex; gap: 8px;">
                 <button class="btn btn-primary btn-small" data-action="save-careplan-section" data-section="internal_notes">Save</button>
                 <button class="btn btn-secondary btn-small" data-action="cancel-careplan-section" data-section="internal_notes">Cancel</button>
@@ -2843,14 +2853,14 @@ async function calculateBuddyScorecard(buddyId) {
         html += '</div>';
         for (const insight of patientInsights) {
           html += '<div style="margin-bottom:16px;">';
-          html += '<div style="font-weight:600;font-size:14px;margin-bottom:6px;">' + insight.title + '</div>';
-          html += '<div style="font-size:13px;line-height:1.7;color:#444;margin-bottom:10px;white-space:pre-wrap;">' + insight.content + '</div>';
+          html += '<div style="font-weight:600;font-size:14px;margin-bottom:6px;">' + esc(insight.title) + '</div>';
+          html += '<div style="font-size:13px;line-height:1.7;color:#444;margin-bottom:10px;white-space:pre-wrap;">' + esc(insight.content) + '</div>';
           if (insight.breed_risk_flags && insight.breed_risk_flags.length > 0) {
             html += '<div style="margin-bottom:8px;">';
             html += '<div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.5px;color:#854F0B;margin-bottom:4px;">Risk Flags</div>';
             html += '<div style="display:flex;flex-wrap:wrap;gap:6px;">';
             for (const flag of insight.breed_risk_flags) {
-              html += '<span style="font-size:12px;background:#FFF4E0;color:#854F0B;padding:3px 10px;border-radius:10px;">' + flag + '</span>';
+              html += '<span style="font-size:12px;background:#FFF4E0;color:#854F0B;padding:3px 10px;border-radius:10px;">' + esc(flag) + '</span>';
             }
             html += '</div></div>';
           }
@@ -2859,7 +2869,7 @@ async function calculateBuddyScorecard(buddyId) {
             html += '<div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.5px;color:#336026;margin-bottom:6px;">Recommendations</div>';
             html += '<ul style="margin:0;padding-left:18px;">';
             for (const rec of insight.recommendations) {
-              html += '<li style="font-size:13px;color:#444;line-height:1.7;">' + rec + '</li>';
+              html += '<li style="font-size:13px;color:#444;line-height:1.7;">' + esc(rec) + '</li>';
             }
             html += '</ul></div>';
           }
@@ -2907,14 +2917,14 @@ async function calculateBuddyScorecard(buddyId) {
           html += `
             <div class="chat-bubble ${isOwn ? 'own' : ''}" style="${isUrgent ? 'border-left:3px solid var(--amber);background:#fff8e1;' : ''}">
               <div class="chat-content">
-                <div class="chat-sender">${isUrgent ? '<span style="color:var(--amber);font-weight:700;font-size:11px;margin-right:4px;">🔶 URGENT</span>' : ''}${msg.sender?.name || 'Unknown'} ${msg.sender?.role ? renderBadge(msg.sender.role) : ''}</div>
+                <div class="chat-sender">${isUrgent ? '<span style="color:var(--amber);font-weight:700;font-size:11px;margin-right:4px;">🔶 URGENT</span>' : ''}${esc(msg.sender?.name) || 'Unknown'} ${msg.sender?.role ? renderBadge(msg.sender.role) : ''}</div>
                 ${msg.content ? `<div class="chat-text">${esc(msg.content)}</div>` : ''}
                 ${msg.attachment_url ? `<div class="chat-attachment">
                   ${isVoice
-                    ? `<audio controls class="voice-preview" src="${msg.attachment_url}"></audio>`
+                    ? `<audio controls class="voice-preview" src="${esc(msg.attachment_url)}"></audio>`
                     : isImage
-                      ? `<img src="${msg.attachment_url}" alt="${msg.attachment_name}">`
-                      : `<a href="${msg.attachment_url}" target="_blank" rel="noopener">📎 ${msg.attachment_name || 'Attachment'}</a>`}
+                      ? `<img src="${esc(msg.attachment_url)}" alt="${esc(msg.attachment_name)}">`
+                      : `<a href="${esc(msg.attachment_url)}" target="_blank" rel="noopener">📎 ${esc(msg.attachment_name) || 'Attachment'}</a>`}
                 </div>` : ''}
                 <div class="chat-time">${formatDateTime(msg.created_at)}</div>
                 ${isRead ? '<div class="msg-seen">✓✓ Seen by client</div>' : ''}
@@ -2949,7 +2959,7 @@ async function calculateBuddyScorecard(buddyId) {
               </div>
             </div>
           </div>
-          ${window._pendingAttachment ? `<div style="font-size:12px; color:var(--primary); padding:4px 0;">📎 Ready: ${window._pendingAttachment.name} <button class="btn btn-secondary btn-small" data-action="clear-attachment" style="font-size:10px;">✕</button></div>` : ''}
+          ${window._pendingAttachment ? `<div style="font-size:12px; color:var(--primary); padding:4px 0;">📎 Ready: ${esc(window._pendingAttachment.name)} <button class="btn btn-secondary btn-small" data-action="clear-attachment" style="font-size:10px;">✕</button></div>` : ''}
           ${window._pendingVoice ? `<div style="font-size:12px; color:var(--red); padding:4px 0;">🎙️ Voice memo ready <button class="btn btn-secondary btn-small" data-action="clear-voice" style="font-size:10px;">✕</button></div>` : ''}
           ${isBuddy ? `<div style="font-size:12px;color:#999;padding:6px 0;line-height:1.4;">Reminder: provide guidance and support only. Do not diagnose, prescribe, or recommend specific medications. Escalate to Dr. Rodgers for any clinical decisions.</div>
           <div id="scope-warning" style="display:none;font-size:12px;color:var(--amber);background:#fff8e1;padding:6px 10px;border-radius:6px;margin-top:4px;">Heads up — does this message stay within your guidance scope? Escalate to Dr. Rodgers if a clinical decision is needed.</div>` : ''}
@@ -3011,7 +3021,7 @@ async function calculateBuddyScorecard(buddyId) {
               <div class="timeline-dot"></div>
               <div class="timeline-content">
                 <div><span class="timeline-icon">${icons[entry.type] || '📌'}</span> ${esc(entry.content)}</div>
-                <div class="timeline-author">By ${entry.author?.name || 'Unknown'} on ${formatDate(entry.created_at)}</div>
+                <div class="timeline-author">By ${esc(entry.author?.name) || 'Unknown'} on ${formatDate(entry.created_at)}</div>
               </div>
             </div>
           `;
@@ -3126,13 +3136,13 @@ async function calculateBuddyScorecard(buddyId) {
           html += `
             <div class="appointment-item" style="border-left-color: ${typeColors[appt.type] || 'var(--blue)'};">
               <div class="appointment-info">
-                <div class="appointment-title">${appt.title}</div>
+                <div class="appointment-title">${esc(appt.title)}</div>
                 <div class="appointment-datetime">${formatDateTime(appt.scheduled_at)}</div>
-                ${appt.notes ? `<div style="font-size:12px;color:var(--text-secondary);margin-top:4px;">${appt.notes}</div>` : ''}
+                ${appt.notes ? `<div style="font-size:12px;color:var(--text-secondary);margin-top:4px;">${esc(appt.notes)}</div>` : ''}
               </div>
               <div style="display:flex; align-items:center; gap:8px; flex-shrink:0; flex-wrap:wrap;">
                 ${appt.video_url
-                  ? `<a href="${appt.video_url}" target="_blank" rel="noopener" class="btn btn-primary btn-small" style="text-decoration:none;" onclick="event.stopPropagation();">🎥 Join</a>`
+                  ? `<a href="${esc(appt.video_url)}" target="_blank" rel="noopener" class="btn btn-primary btn-small" style="text-decoration:none;" onclick="event.stopPropagation();">🎥 Join</a>`
                   : canEdit && appt.type === 'Video Call'
                     ? `<button class="btn btn-secondary btn-small" data-action="generate-video-link" data-appt-id="${appt.id}">🔗 Get Link</button>`
                     : ''}
@@ -3168,10 +3178,10 @@ async function calculateBuddyScorecard(buddyId) {
           html += `<div class="doc-item">
             <span class="doc-icon">${icon}</span>
             <div style="flex:1;min-width:0;">
-              <div class="doc-name">${doc.name}</div>
-              <div class="doc-meta">${size ? size + ' · ' : ''}Uploaded by ${doc.uploaded_by_user?.name || 'Unknown'} · ${formatDate(doc.created_at)}</div>
+              <div class="doc-name">${esc(doc.name)}</div>
+              <div class="doc-meta">${size ? size + ' · ' : ''}Uploaded by ${esc(doc.uploaded_by_user?.name) || 'Unknown'} · ${formatDate(doc.created_at)}</div>
             </div>
-            <a href="${doc.url}" target="_blank" rel="noopener" class="btn btn-secondary btn-small" onclick="event.stopPropagation();">⬇️</a>
+            <a href="${esc(doc.url)}" target="_blank" rel="noopener" class="btn btn-secondary btn-small" onclick="event.stopPropagation();">⬇️</a>
             ${['admin','vet_buddy'].includes(state.profile.role) ? `
               <button class="btn btn-secondary btn-small" data-action="toggle-genetic-flag" data-doc-id="${doc.id}" data-is-genetic="${doc.is_genetic ? '1' : '0'}" style="${doc.is_genetic ? 'background:#EEEDFE;border-color:#534AB7;color:#534AB7;' : ''}">&#x1F9EC; ${doc.is_genetic ? 'Genetic' : 'Mark Genetic'}</button>
               <button class="btn btn-secondary btn-small" data-action="delete-doc" data-doc-id="${doc.id}" style="border-color:var(--red);color:var(--red);">✕</button>
@@ -3296,7 +3306,7 @@ async function calculateBuddyScorecard(buddyId) {
           const rows = surveysDue.map(function(s) {
             return '<div style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid var(--border);">'
               + '<div>'
-              + '<div style="font-weight:600;font-size:14px;">' + s.owner + ' \u00b7 ' + s.pet + '</div>'
+              + '<div style="font-weight:600;font-size:14px;">' + esc(s.owner) + ' \u00b7 ' + esc(s.pet) + '</div>'
               + '<div style="font-size:12px;color:var(--text-secondary);">Day ' + s.milestone + ' check-in survey \u2014 send via Messages</div>'
               + '</div>'
               + '<button class="btn btn-secondary btn-small" data-action="select-case" data-case-id="' + s.caseId + '">Open case</button>'
@@ -3324,9 +3334,9 @@ async function calculateBuddyScorecard(buddyId) {
             <tbody>
               ${state.cases.slice(0, 5).map(c => `
                 <tr>
-                  <td><div style="display:flex;align-items:center;gap:8px;">${c.pets?.photo_url ? `<img src="${c.pets.photo_url}" style="width:28px;height:28px;border-radius:50%;object-fit:cover;border:2px solid var(--border);" alt="${c.pets?.name}">` : `<div style="width:28px;height:28px;border-radius:50%;background:linear-gradient(135deg,var(--primary),#336026);display:flex;align-items:center;justify-content:center;font-size:14px;">${SPECIES_EMOJI[c.pets?.species?.toLowerCase()] || '🐾'}</div>`}<span class="case-table-pet">${c.pets?.name || 'Unknown'}</span></div></td>
-                  <td><span class="case-table-owner">${c.pets?.owner?.name || 'Unknown'}</span></td>
-                  <td>${c.assigned_buddy?.name || 'Unassigned'}</td>
+                  <td><div style="display:flex;align-items:center;gap:8px;">${c.pets?.photo_url ? `<img src="${esc(c.pets.photo_url)}" style="width:28px;height:28px;border-radius:50%;object-fit:cover;border:2px solid var(--border);" alt="${esc(c.pets?.name)}">` : `<div style="width:28px;height:28px;border-radius:50%;background:linear-gradient(135deg,var(--primary),#336026);display:flex;align-items:center;justify-content:center;font-size:14px;">${SPECIES_EMOJI[c.pets?.species?.toLowerCase()] || '🐾'}</div>`}<span class="case-table-pet">${esc(c.pets?.name || 'Unknown')}</span></div></td>
+                  <td><span class="case-table-owner">${esc(c.pets?.owner?.name || 'Unknown')}</span></td>
+                  <td>${esc(c.assigned_buddy?.name || 'Unassigned')}</td>
                   <td>${TIER_DISPLAY[c.subscription_tier] || c.subscription_tier}</td>
                   <td>${renderStatusDot(c.status)} ${c.status}</td>
                   <td><a class="case-table-link" data-action="nav-admin-case" data-case-id="${c.id}">View</a></td>
@@ -3384,8 +3394,8 @@ async function calculateBuddyScorecard(buddyId) {
             html += `<div class="med-row">
               <div style="width:8px;height:8px;border-radius:50%;background:var(--green);flex-shrink:0;"></div>
               <div style="flex:1;">
-                <div style="font-weight:600;">${med.name}</div>
-                <div style="font-size:12px;color:var(--text-secondary);">${med.dose || ''} ${med.dose && med.frequency ? '·' : ''} ${med.frequency || ''}</div>
+                <div style="font-weight:600;">${esc(med.name)}</div>
+                <div style="font-size:12px;color:var(--text-secondary);">${esc(med.dose || '')} ${med.dose && med.frequency ? '·' : ''} ${esc(med.frequency || '')}</div>
               </div>
               <div style="font-size:11px;color:var(--text-secondary);">${med.start_date ? 'Since ' + formatDate(med.start_date) : ''}</div>
               ${canEdit ? `<button class="btn btn-secondary btn-small" data-action="deactivate-med" data-med-id="${med.id}" style="font-size:11px;padding:3px 8px;">Discontinue</button>` : ''}
@@ -3397,7 +3407,7 @@ async function calculateBuddyScorecard(buddyId) {
           for (const med of pastMeds) {
             html += `<div class="med-row med-inactive">
               <div style="width:8px;height:8px;border-radius:50%;background:#ccc;flex-shrink:0;"></div>
-              <div style="flex:1;"><div style="font-weight:600;">${med.name}</div><div style="font-size:12px;color:var(--text-secondary);">${med.dose || ''} ${med.frequency || ''}</div></div>
+              <div style="flex:1;"><div style="font-weight:600;">${esc(med.name)}</div><div style="font-size:12px;color:var(--text-secondary);">${esc(med.dose || '')} ${esc(med.frequency || '')}</div></div>
             </div>`;
           }
         }
@@ -3505,7 +3515,7 @@ async function calculateBuddyScorecard(buddyId) {
           html += `<div class="vaccine-row">
             <div class="vaccine-status ${statusClass}"></div>
             <div style="flex:1;">
-              <div style="font-weight:600;">${v.name}</div>
+              <div style="font-weight:600;">${esc(v.name)}</div>
               <div style="font-size:11px;color:var(--text-secondary);">
                 ${v.administered_date ? 'Given: ' + formatDate(v.administered_date) : ''}
                 ${v.due_date ? ' · Due: ' + formatDate(v.due_date) : ''}
@@ -3547,7 +3557,7 @@ async function calculateBuddyScorecard(buddyId) {
         for (const note of state.caseNotes) {
           html += `<div class="card" style="margin-bottom:10px;">
             <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:6px;">
-              <div style="font-size:12px;font-weight:600;">${renderAvatar(note.author?.avatar_initials, note.author?.avatar_color, 'xs')} ${note.author?.name || 'Staff'}</div>
+              <div style="font-size:12px;font-weight:600;">${renderAvatar(note.author?.avatar_initials, note.author?.avatar_color, 'xs')} ${esc(note.author?.name || 'Staff')}</div>
               <div style="font-size:11px;color:var(--text-secondary);">${formatDateTime(note.created_at)}</div>
             </div>
             <div style="font-size:13px;white-space:pre-wrap;">${esc(note.content)}</div>
@@ -3620,11 +3630,11 @@ async function calculateBuddyScorecard(buddyId) {
         html += `
           <div class="case-list-item ${isActive ? 'active' : ''}" data-action="select-case" data-case-id="${c.id}" style="display:flex; align-items:center; gap:10px;">
             ${c.pets?.photo_url
-              ? `<img src="${c.pets.photo_url}" class="pet-photo-thumb" alt="${c.pets?.name}" style="flex-shrink:0;">`
+              ? `<img src="${esc(c.pets.photo_url)}" class="pet-photo-thumb" alt="${esc(c.pets?.name)}" style="flex-shrink:0;">`
               : `<div class="pet-photo-thumb-placeholder" style="flex-shrink:0;">${adminSidebarEmoji}</div>`}
             <div style="min-width:0; flex:1;">
-              <div class="case-list-pet-name" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${c.pets?.name || 'Unknown'}</div>
-              <div class="case-list-owner" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${c.pets?.owner?.name || 'Unknown Owner'}</div>
+              <div class="case-list-pet-name" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(c.pets?.name || 'Unknown')}</div>
+              <div class="case-list-owner" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(c.pets?.owner?.name || 'Unknown Owner')}</div>
               ${c.subscription_tier ? `<div style="font-size: 10px; color: var(--text-secondary); margin-top: 2px;">${c.subscription_tier}</div>` : ''}
             </div>
           </div>
@@ -3647,8 +3657,8 @@ async function calculateBuddyScorecard(buddyId) {
             <div style="margin-bottom: 14px; display:flex; align-items:center; gap:16px;">
               ${renderPetPhoto(pet, 'card')}
               <div>
-                <div style="font-size: 19px; font-weight: 700; color: var(--text-primary);">${pet?.name || 'Unknown Pet'}</div>
-                <div style="font-size: 13px; color: var(--text-secondary); margin-top: 2px;">${pet?.breed || ''} · Owner: ${ownerName}</div>
+                <div style="font-size: 19px; font-weight: 700; color: var(--text-primary);">${esc(pet?.name) || 'Unknown Pet'}</div>
+                <div style="font-size: 13px; color: var(--text-secondary); margin-top: 2px;">${esc(pet?.breed)} · Owner: ${esc(ownerName)}</div>
               </div>
             </div>
             <div class="case-header-dropdowns">
@@ -3664,7 +3674,7 @@ async function calculateBuddyScorecard(buddyId) {
                 <div style="font-size: 10px; font-weight: 700; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 5px;">Assigned Buddy</div>
                 <select data-field="assign-buddy" data-case-id="${state.currentCase.id}" style="width:100%; font-size:13px; padding: 6px 8px;">
                   <option value="">Unassigned</option>
-                  ${buddies.map(m => `<option value="${m.id}" ${m.id === state.currentCase.assigned_buddy_id ? 'selected' : ''}>${m.name}</option>`).join('')}
+                  ${buddies.map(m => `<option value="${m.id}" ${m.id === state.currentCase.assigned_buddy_id ? 'selected' : ''}>${esc(m.name)}</option>`).join('')}
                 </select>
               </div>
               <div>
@@ -3729,18 +3739,18 @@ async function calculateBuddyScorecard(buddyId) {
           html += `<div class="card">
             <div style="display:flex;align-items:center;gap:12px;margin-bottom:10px;">
               ${petCase?.pets?.photo_url
-                ? `<img src="${petCase.pets.photo_url}" class="pet-photo-thumb" alt="${petName}">`
+                ? `<img src="${petCase.pets.photo_url}" class="pet-photo-thumb" alt="${esc(petName)}">`
                 : `<div class="pet-photo-thumb-placeholder">${SPECIES_EMOJI[species] || '🐾'}</div>`}
               <div>
-                <div style="font-weight:600;">${SPECIES_EMOJI[species] || '🐾'} ${petName} <span style="font-size:12px;color:var(--text-secondary);font-weight:400;">· ${msgs.length} unread</span></div>
-                <div style="font-size:12px;color:var(--text-secondary);">Owner: ${ownerName} · ${buddyLabel}</div>
+                <div style="font-weight:600;">${SPECIES_EMOJI[species] || '🐾'} ${esc(petName)} <span style="font-size:12px;color:var(--text-secondary);font-weight:400;">· ${msgs.length} unread</span></div>
+                <div style="font-size:12px;color:var(--text-secondary);">Owner: ${esc(ownerName)} · ${esc(buddyLabel)}</div>
               </div>
             </div>`;
           for (const msg of msgs.slice(0, 3)) {
             const preview = (msg.content || '').substring(0, 100);
             html += `<div style="padding:8px 10px;background:var(--bg);border-radius:6px;margin-bottom:6px;cursor:pointer;" data-action="nav-admin-case" data-case-id="${caseId}">
-              <div style="font-size:11px;color:var(--text-secondary);margin-bottom:2px;">${msg.sender?.name || ownerName} · ${formatDateTime(msg.created_at)}</div>
-              <div style="font-size:13px;">${preview}${(msg.content||'').length > 100 ? '…' : ''}</div>
+              <div style="font-size:11px;color:var(--text-secondary);margin-bottom:2px;">${esc(msg.sender?.name || ownerName)} · ${formatDateTime(msg.created_at)}</div>
+              <div style="font-size:13px;">${esc(preview)}${(msg.content||'').length > 100 ? '…' : ''}</div>
             </div>`;
           }
           if (msgs.length > 3) html += `<div style="font-size:12px;color:var(--text-secondary);padding:4px 0;">+${msgs.length - 3} more…</div>`;
@@ -3770,37 +3780,37 @@ async function calculateBuddyScorecard(buddyId) {
           <div class="health-summary-header">
             ${renderPetPhoto(pet, 'card')}
             <div>
-              <h2>${pet?.name || 'Unknown'}</h2>
-              <div style="color:var(--text-secondary);font-size:13px;">${pet?.breed || pet?.species || ''} ${pet?.dob ? '· Born ' + formatDate(pet.dob) : ''}</div>
-              ${pet?.weight ? `<div style="font-size:13px;">⚖️ ${pet.weight}</div>` : ''}
+              <h2>${esc(pet?.name) || 'Unknown'}</h2>
+              <div style="color:var(--text-secondary);font-size:13px;">${esc(pet?.breed || pet?.species)} ${pet?.dob ? '· Born ' + formatDate(pet.dob) : ''}</div>
+              ${pet?.weight ? `<div style="font-size:13px;">⚖️ ${esc(pet.weight)}</div>` : ''}
             </div>
           </div>
 
           ${buddy ? `<div style="margin-bottom:16px;padding:12px;background:var(--bg);border-radius:8px;font-size:13px;">
             <div style="font-weight:600;margin-bottom:4px;">🩺 Vet Buddy</div>
-            ${renderAvatar(buddy.avatar_initials, buddy.avatar_color, 'sm')} ${buddy.name}
+            ${renderAvatar(buddy.avatar_initials, buddy.avatar_color, 'sm')} ${esc(buddy.name)}
           </div>` : ''}
 
           ${activeMeds.length > 0 ? `<div style="margin-bottom:16px;">
             <div style="font-weight:600;margin-bottom:8px;">💊 Current Medications</div>
             ${activeMeds.map(m => `<div style="padding:6px 0;font-size:13px;border-bottom:1px solid var(--bg);">
-              <strong>${m.name}</strong> ${m.dose ? '– ' + m.dose : ''} ${m.frequency ? '(' + m.frequency + ')' : ''}
+              <strong>${esc(m.name)}</strong> ${m.dose ? '– ' + esc(m.dose) : ''} ${m.frequency ? '(' + esc(m.frequency) + ')' : ''}
             </div>`).join('')}
           </div>` : ''}
 
           ${state.petVaccines.length > 0 ? `<div style="margin-bottom:16px;">
             <div style="font-weight:600;margin-bottom:8px;">💉 Vaccines ${overdueVaccines.length > 0 ? '<span style="color:var(--red);font-size:12px;">⚠️ ' + overdueVaccines.length + ' overdue</span>' : ''}</div>
-            ${state.petVaccines.slice(0, 5).map(v => `<div style="font-size:13px;padding:4px 0;">${v.name} ${v.due_date ? '– Due ' + formatDate(v.due_date) : ''}</div>`).join('')}
+            ${state.petVaccines.slice(0, 5).map(v => `<div style="font-size:13px;padding:4px 0;">${esc(v.name)} ${v.due_date ? '– Due ' + formatDate(v.due_date) : ''}</div>`).join('')}
           </div>` : ''}
 
           ${state.carePlan?.diagnoses ? `<div style="margin-bottom:16px;">
             <div style="font-weight:600;margin-bottom:6px;">🩻 Current Diagnoses</div>
-            <div style="font-size:13px;color:var(--text-secondary);">${state.carePlan.diagnoses}</div>
+            <div style="font-size:13px;color:var(--text-secondary);">${esc(state.carePlan.diagnoses)}</div>
           </div>` : ''}
 
           ${upcomingAppts.length > 0 ? `<div style="margin-bottom:16px;">
             <div style="font-weight:600;margin-bottom:8px;">🗓️ Upcoming Appointments</div>
-            ${upcomingAppts.map(a => `<div style="font-size:13px;padding:4px 0;">${a.title} – ${new Date(a.scheduled_at).toLocaleString()}</div>`).join('')}
+            ${upcomingAppts.map(a => `<div style="font-size:13px;padding:4px 0;">${esc(a.title)} – ${new Date(a.scheduled_at).toLocaleString()}</div>`).join('')}
           </div>` : ''}
 
           <div style="font-size:11px;color:var(--text-secondary);margin-top:16px;padding-top:12px;border-top:1px solid var(--border);">
@@ -3824,13 +3834,13 @@ async function calculateBuddyScorecard(buddyId) {
           <div style="color:var(--text-secondary);margin-bottom:24px;">Share the love! When a friend signs up and activates their subscription, you'll both get a discount.</div>
           <div class="referral-code-box">
             <div style="font-size:12px;color:var(--text-secondary);margin-bottom:6px;">YOUR REFERRAL CODE</div>
-            <div class="referral-code">${code}</div>
+            <div class="referral-code">${esc(code)}</div>
           </div>
           <div class="card" style="margin-top:16px;">
             <div style="font-weight:600;margin-bottom:8px;">Share your link</div>
             <div style="display:flex;gap:8px;align-items:center;">
-              <input type="text" id="referral-link-input" value="${link}" style="flex:1;font-size:12px;" readonly>
-              <button class="btn btn-primary btn-small" onclick="navigator.clipboard.writeText('${link}').then(()=>document.getElementById('referral-link-input').style.background='#e8f8f5')">Copy</button>
+              <input type="text" id="referral-link-input" value="${esc(link)}" style="flex:1;font-size:12px;" readonly>
+              <button class="btn btn-primary btn-small" onclick="navigator.clipboard.writeText('${esc(link)}').then(()=>document.getElementById('referral-link-input').style.background='#e8f8f5')">Copy</button>
             </div>
           </div>
           <div class="card" style="margin-top:12px;background:#f0faf8;">
@@ -3875,7 +3885,7 @@ async function calculateBuddyScorecard(buddyId) {
               <span style="font-size:20px;">🏖️</span>
               <div style="flex:1;">
                 <div style="font-weight:600;">${formatDate(a.start_date)} → ${formatDate(a.end_date)}</div>
-                ${a.reason ? `<div style="font-size:12px;color:var(--text-secondary);">${a.reason}</div>` : ''}
+                ${a.reason ? `<div style="font-size:12px;color:var(--text-secondary);">${esc(a.reason)}</div>` : ''}
               </div>
               <button class="btn btn-secondary btn-small" data-action="delete-availability" data-avail-id="${a.id}" style="font-size:11px;">Remove</button>
             </div>`).join('')
@@ -3892,7 +3902,7 @@ async function calculateBuddyScorecard(buddyId) {
           <button class="btn btn-primary" data-action="show-add-canned" style="margin-bottom:16px;">+ New Response</button>
           ${state.cannedResponses.map(cr => `<div class="card" style="margin-bottom:10px;display:flex;align-items:flex-start;gap:12px;">
             <div style="flex:1;">
-              <div style="font-weight:600;color:var(--primary);font-size:13px;">${cr.shortcut}</div>
+              <div style="font-weight:600;color:var(--primary);font-size:13px;">${esc(cr.shortcut)}</div>
               <div style="font-size:13px;margin-top:4px;">${esc(cr.content)}</div>
             </div>
             <button class="btn btn-secondary btn-small" data-action="delete-canned" data-canned-id="${cr.id}" style="font-size:11px;flex-shrink:0;">Delete</button>
@@ -3908,10 +3918,10 @@ async function calculateBuddyScorecard(buddyId) {
           <div style="color:var(--text-secondary);font-size:13px;margin-bottom:20px;">Pre-written scripts for common check-ins. Click "Use" to pre-fill a touchpoint note.</div>
           ${state.touchpointTemplates.map(t => `<div class="card" style="margin-bottom:12px;">
             <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:6px;">
-              <div style="font-weight:600;">${t.name}</div>
-              <span style="font-size:11px;background:var(--bg);padding:2px 8px;border-radius:10px;color:var(--text-secondary);">${t.type}</span>
+              <div style="font-weight:600;">${esc(t.name)}</div>
+              <span style="font-size:11px;background:var(--bg);padding:2px 8px;border-radius:10px;color:var(--text-secondary);">${esc(t.type)}</span>
             </div>
-            <div style="font-size:13px;color:var(--text-secondary);margin-bottom:10px;">${t.content}</div>
+            <div style="font-size:13px;color:var(--text-secondary);margin-bottom:10px;">${esc(t.content)}</div>
             <button class="btn btn-secondary btn-small" data-action="use-template" data-template-id="${t.id}">Use Template</button>
           </div>`).join('')}
         </div>
@@ -3985,8 +3995,8 @@ async function calculateBuddyScorecard(buddyId) {
                 <div class="kanban-col-title">${s.icon} ${s.label} <span style="background:var(--primary);color:white;border-radius:10px;padding:1px 7px;font-size:10px;">${stageClients[s.key]?.length || 0}</span></div>
                 ${(stageClients[s.key] || []).map(c => `
                   <div class="kanban-card" data-action="select-case" data-case-id="${c.id}">
-                    <div style="font-weight:600;font-size:12px;">${c.pets?.name || 'No pet yet'}</div>
-                    <div style="font-size:11px;color:var(--text-secondary);">${c.pets?.owner?.name || ''}</div>
+                    <div style="font-weight:600;font-size:12px;">${esc(c.pets?.name) || 'No pet yet'}</div>
+                    <div style="font-size:11px;color:var(--text-secondary);">${esc(c.pets?.owner?.name)}</div>
                     ${c.subscription_tier === 'Trial' ? `<div style="font-size:10px;color:#e67e22;margin-top:3px;font-weight:600;">🎉 Free Trial</div>` : c.subscription_tier ? `<div style="font-size:10px;color:var(--primary);margin-top:3px;">${c.subscription_tier}</div>` : ''}
                   </div>
                 `).join('')}
@@ -4018,8 +4028,8 @@ async function calculateBuddyScorecard(buddyId) {
             <div style="font-weight:600;color:var(--red);margin-bottom:10px;">🔴 Needs Attention (${breached.length})</div>
             ${breached.map(c => `
               <div class="sla-alert" data-action="select-case" data-case-id="${c.id}" style="cursor:pointer;">
-                <div style="font-weight:600;">${SPECIES_EMOJI[c.pets?.species?.toLowerCase()] || '🐾'} ${c.pets?.name}</div>
-                <div style="font-size:12px;color:var(--text-secondary);">No update for ${Math.floor(c.hoursSince)}h · ${c.pets?.owner?.name || ''} · Buddy: ${c.assigned_buddy?.name || 'Unassigned'}</div>
+                <div style="font-weight:600;">${SPECIES_EMOJI[c.pets?.species?.toLowerCase()] || '🐾'} ${esc(c.pets?.name)}</div>
+                <div style="font-size:12px;color:var(--text-secondary);">No update for ${Math.floor(c.hoursSince)}h · ${esc(c.pets?.owner?.name)} · Buddy: ${esc(c.assigned_buddy?.name) || 'Unassigned'}</div>
               </div>`).join('')}
           ` : '<div style="color:var(--green);margin-bottom:16px;">✅ All cases updated within SLA</div>'}
 
@@ -4027,8 +4037,8 @@ async function calculateBuddyScorecard(buddyId) {
             <div style="font-weight:600;color:var(--green);margin-bottom:10px;margin-top:16px;">🟢 Within SLA (${ok.length})</div>
             ${ok.map(c => `
               <div class="sla-alert sla-ok" data-action="select-case" data-case-id="${c.id}" style="cursor:pointer;">
-                <div style="font-weight:600;">${SPECIES_EMOJI[c.pets?.species?.toLowerCase()] || '🐾'} ${c.pets?.name}</div>
-                <div style="font-size:12px;color:var(--text-secondary);">Updated ${Math.floor(c.hoursSince)}h ago · ${c.assigned_buddy?.name || 'Unassigned'}</div>
+                <div style="font-weight:600;">${SPECIES_EMOJI[c.pets?.species?.toLowerCase()] || '🐾'} ${esc(c.pets?.name)}</div>
+                <div style="font-size:12px;color:var(--text-secondary);">Updated ${Math.floor(c.hoursSince)}h ago · ${esc(c.assigned_buddy?.name) || 'Unassigned'}</div>
               </div>`).join('')}
           ` : ''}
         </div>
@@ -4053,9 +4063,9 @@ async function calculateBuddyScorecard(buddyId) {
               return `<div class="card" style="margin-bottom:10px;display:flex;align-items:center;gap:12px;">
                 ${renderPetPhoto(c.pets, 'card')}
                 <div style="flex:1;">
-                  <div style="font-weight:600;">${c.pets?.name} – ${c.pets?.owner?.name}</div>
+                  <div style="font-weight:600;">${esc(c.pets?.name)} – ${esc(c.pets?.owner?.name)}</div>
                   <div style="font-size:12px;color:var(--red);">No activity for ${daysSince} days</div>
-                  <div style="font-size:12px;color:var(--text-secondary);">Buddy: ${c.assigned_buddy?.name || 'Unassigned'}</div>
+                  <div style="font-size:12px;color:var(--text-secondary);">Buddy: ${esc(c.assigned_buddy?.name) || 'Unassigned'}</div>
                 </div>
                 <button class="btn btn-primary btn-small" data-action="nav-buddy-case" data-case-id="${c.id}">View Case</button>
               </div>`;
@@ -4085,18 +4095,18 @@ async function calculateBuddyScorecard(buddyId) {
           html += `<div class="card" style="cursor:pointer;" data-action="nav-buddy-case" data-case-id="${caseId}">
             <div style="display:flex;align-items:center;gap:12px;margin-bottom:10px;">
               ${petCase?.pets?.photo_url
-                ? `<img src="${petCase.pets.photo_url}" class="pet-photo-thumb" alt="${petName}">`
+                ? `<img src="${petCase.pets.photo_url}" class="pet-photo-thumb" alt="${esc(petName)}">`
                 : `<div class="pet-photo-thumb-placeholder">${SPECIES_EMOJI[species] || '🐾'}</div>`}
               <div>
-                <div style="font-weight:600;">${SPECIES_EMOJI[species] || '🐾'} ${petName}</div>
-                <div style="font-size:12px;color:var(--text-secondary);">Owner: ${ownerName} · ${msgs.length} unread</div>
+                <div style="font-weight:600;">${SPECIES_EMOJI[species] || '🐾'} ${esc(petName)}</div>
+                <div style="font-size:12px;color:var(--text-secondary);">Owner: ${esc(ownerName)} · ${msgs.length} unread</div>
               </div>
             </div>`;
           for (const msg of msgs.slice(0, 3)) {
             const preview = (msg.content || '').substring(0, 100);
             html += `<div style="padding:8px 10px;background:var(--bg);border-radius:6px;margin-bottom:6px;">
-              <div style="font-size:11px;color:var(--text-secondary);margin-bottom:2px;">${msg.sender?.name || ownerName} · ${formatDateTime(msg.created_at)}</div>
-              <div style="font-size:13px;">${preview}${(msg.content||'').length > 100 ? '…' : ''}</div>
+              <div style="font-size:11px;color:var(--text-secondary);margin-bottom:2px;">${esc(msg.sender?.name || ownerName)} · ${formatDateTime(msg.created_at)}</div>
+              <div style="font-size:13px;">${esc(preview)}${(msg.content||'').length > 100 ? '…' : ''}</div>
             </div>`;
           }
           if (msgs.length > 3) html += `<div style="font-size:12px;color:var(--text-secondary);padding:4px 0;">+${msgs.length - 3} more…</div>`;
@@ -4116,21 +4126,21 @@ async function calculateBuddyScorecard(buddyId) {
         const clinicalEscalations = state.escalations.filter(e => e.escalation_type !== 'adverse_outcome');
         const statusBg = { open: 'var(--red)', acknowledged: 'var(--amber)', resolved: 'var(--green)' };
 
-        function renderEscCard(esc, isAdverse) {
+        function renderEscCard(escalation, isAdverse) {
           return `
             <div class="escalation-card" style="${isAdverse ? 'border:2px solid var(--red);background:#fef2f2;' : ''}">
               <div class="escalation-header">
-                <div class="escalation-pet">${isAdverse ? '🔴 ' : ''}${SPECIES_EMOJI[esc.case?.pets?.species] || '🐾'} ${esc.case?.pets?.name}</div>
-                <span class="escalation-status" style="background: ${statusBg[esc.status]}20; color: ${statusBg[esc.status]};">${esc.status.toUpperCase()}</span>
+                <div class="escalation-pet">${isAdverse ? '🔴 ' : ''}${SPECIES_EMOJI[escalation.case?.pets?.species] || '🐾'} ${esc(escalation.case?.pets?.name)}</div>
+                <span class="escalation-status" style="background: ${statusBg[escalation.status]}20; color: ${statusBg[escalation.status]};">${esc(escalation.status?.toUpperCase())}</span>
               </div>
               ${isAdverse ? '<div style="font-size:11px;font-weight:700;color:var(--red);text-transform:uppercase;margin-bottom:4px;">Adverse Outcome</div>' : ''}
-              <div class="escalation-reason">${esc.reason}</div>
-              ${esc.incident_notes ? `<div style="margin-top:8px;padding:8px;background:#fff5f5;border-radius:6px;border-left:3px solid var(--red);font-size:13px;"><strong>Incident Notes:</strong> ${esc.incident_notes}</div>` : ''}
-              <div class="escalation-date">Raised by ${esc.raised_by_user?.name} on ${formatDate(esc.created_at)}</div>
-              ${esc.status !== 'resolved' ? `
+              <div class="escalation-reason">${esc(escalation.reason)}</div>
+              ${escalation.incident_notes ? `<div style="margin-top:8px;padding:8px;background:#fff5f5;border-radius:6px;border-left:3px solid var(--red);font-size:13px;"><strong>Incident Notes:</strong> ${esc(escalation.incident_notes)}</div>` : ''}
+              <div class="escalation-date">Raised by ${esc(escalation.raised_by_user?.name)} on ${formatDate(escalation.created_at)}</div>
+              ${escalation.status !== 'resolved' ? `
                 <div style="margin-top: 8px; display: flex; gap: 8px;">
-                  ${esc.status === 'open' ? `<button class="btn btn-secondary btn-small" data-action="escalation-ack" data-escalation-id="${esc.id}">Acknowledge</button>` : ''}
-                  <button class="btn btn-primary btn-small" data-action="escalation-resolve" data-escalation-id="${esc.id}">Mark Resolved</button>
+                  ${escalation.status === 'open' ? `<button class="btn btn-secondary btn-small" data-action="escalation-ack" data-escalation-id="${escalation.id}">Acknowledge</button>` : ''}
+                  <button class="btn btn-primary btn-small" data-action="escalation-resolve" data-escalation-id="${escalation.id}">Mark Resolved</button>
                 </div>
               ` : ''}
             </div>
@@ -4141,14 +4151,14 @@ async function calculateBuddyScorecard(buddyId) {
         if (adverseOutcomes.length > 0) {
           html += `<div style="margin-bottom:24px;">
             <div style="font-size:16px;font-weight:700;color:var(--red);margin-bottom:12px;padding:8px 12px;background:#fef2f2;border-radius:8px;border-left:4px solid var(--red);">🔴 Adverse Outcomes — Requires Immediate Review</div>`;
-          for (const esc of adverseOutcomes) html += renderEscCard(esc, true);
+          for (const escItem of adverseOutcomes) html += renderEscCard(escItem, true);
           html += '</div>';
         }
 
         // Clinical escalations
         if (clinicalEscalations.length > 0) {
           html += `<div style="margin-bottom:16px;font-size:16px;font-weight:600;">Clinical Escalations</div>`;
-          for (const esc of clinicalEscalations) html += renderEscCard(esc, false);
+          for (const escItem of clinicalEscalations) html += renderEscCard(escItem, false);
         }
       }
       html += '</div>';
@@ -4212,7 +4222,7 @@ async function calculateBuddyScorecard(buddyId) {
         html += `<div style="background:${isToday ? '#f0faf8' : 'white'};border:${isToday ? '2px solid #336026' : '1px solid var(--border)'};border-radius:8px;padding:10px 8px;min-height:80px;">
           <div style="font-size:11px;font-weight:700;text-transform:uppercase;color:${isToday ? '#336026' : 'var(--text-secondary)'};">${dayNames[day.getDay()]}</div>
           <div style="font-size:18px;font-weight:700;color:${isToday ? '#336026' : 'var(--text-primary)'};">${day.getDate()}</div>
-          ${appts.map(a => `<div style="margin-top:4px;font-size:10px;background:${typeColors[a.type] || '#3498db'};color:white;border-radius:3px;padding:2px 4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${a.title}</div>`).join('')}
+          ${appts.map(a => `<div style="margin-top:4px;font-size:10px;background:${typeColors[a.type] || '#3498db'};color:white;border-radius:3px;padding:2px 4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(a.title)}</div>`).join('')}
           ${appts.length === 0 && isToday ? '<div style="font-size:10px;color:var(--text-secondary);margin-top:4px;">Nothing scheduled</div>' : ''}
         </div>`;
       }
@@ -4232,10 +4242,10 @@ async function calculateBuddyScorecard(buddyId) {
           const dt = new Date(appt.scheduled_at);
           html += `<div style="display:flex;justify-content:space-between;align-items:center;padding:10px 0;border-bottom:1px solid var(--border);">
             <div>
-              <div style="font-weight:600;font-size:14px;">${appt.title}</div>
+              <div style="font-weight:600;font-size:14px;">${esc(appt.title)}</div>
               <div style="font-size:12px;color:var(--text-secondary);">${dt.toLocaleDateString([], {weekday:'short',month:'short',day:'numeric'})} · ${dt.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'})}</div>
             </div>
-            <span style="font-size:11px;font-weight:600;padding:3px 8px;border-radius:10px;background:${typeColors[appt.type] || '#3498db'}22;color:${typeColors[appt.type] || '#3498db'};">${appt.type}</span>
+            <span style="font-size:11px;font-weight:600;padding:3px 8px;border-radius:10px;background:${typeColors[appt.type] || '#3498db'}22;color:${typeColors[appt.type] || '#3498db'};">${esc(appt.type)}</span>
           </div>`;
         }
       }
@@ -4248,8 +4258,8 @@ async function calculateBuddyScorecard(buddyId) {
         for (const tp of touchpointsDue) {
           html += `<div style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid var(--border);">
             <div>
-              <div style="font-weight:600;font-size:14px;">${tp.pet} · ${tp.owner || 'Unknown owner'}</div>
-              <div style="font-size:12px;color:var(--text-secondary);">Buddy: ${tp.buddy || 'Unassigned'} · Last contact ${tp.daysSince === 999 ? 'never' : tp.daysSince + ' days ago'}</div>
+              <div style="font-weight:600;font-size:14px;">${esc(tp.pet)} · ${esc(tp.owner) || 'Unknown owner'}</div>
+              <div style="font-size:12px;color:var(--text-secondary);">Buddy: ${esc(tp.buddy) || 'Unassigned'} · Last contact ${tp.daysSince === 999 ? 'never' : tp.daysSince + ' days ago'}</div>
             </div>
             <button class="btn btn-secondary btn-small" data-action="select-case" data-case-id="${tp.caseId}">View case</button>
           </div>`;
@@ -4270,13 +4280,13 @@ async function calculateBuddyScorecard(buddyId) {
         html += `
           <div class="team-card">
             <div class="team-card-avatar">${renderAvatar(member.avatar_initials, member.avatar_color, 'md')}</div>
-            <div class="team-card-name">${member.name}</div>
+            <div class="team-card-name">${esc(member.name)}</div>
             <div class="team-card-role">${member.role === 'admin' ? 'Supervising DVM' : member.role.replace('_', ' ')}</div>
-            <div class="team-card-bio">${member.bio || 'No bio'}</div>
+            <div class="team-card-bio">${esc(member.bio) || 'No bio'}</div>
             <div class="team-card-stat">${caseCount} assigned case${caseCount !== 1 ? 's' : ''}</div>
             <div style="display:flex;gap:6px;margin-top:8px;flex-wrap:wrap;">
               <button class="btn btn-secondary btn-small" data-action="edit-team-member" data-member-id="${member.id}">Edit</button>
-              ${isBuddy && caseCount > 0 ? `<button class="btn btn-secondary btn-small" data-action="initiate-transition" data-member-id="${member.id}" data-member-name="${member.name}" style="border-color:var(--amber);color:var(--amber);">🔄 Initiate Transition</button>` : ''}
+              ${isBuddy && caseCount > 0 ? `<button class="btn btn-secondary btn-small" data-action="initiate-transition" data-member-id="${member.id}" data-member-name="${esc(member.name)}" style="border-color:var(--amber);color:var(--amber);">🔄 Initiate Transition</button>` : ''}
               ${isBuddy ? `<button class="btn btn-secondary btn-small" data-action="deactivate-buddy" data-member-id="${member.id}" style="border-color:var(--red);color:var(--red);font-size:11px;">Deactivate</button>` : ''}
             </div>
           </div>
@@ -4288,7 +4298,7 @@ async function calculateBuddyScorecard(buddyId) {
       if (state.showTransitionPanel) {
         html += `<div class="card" style="margin-top:20px;border:2px solid var(--amber);background:#fffde7;">
           <div style="font-weight:700;margin-bottom:12px;font-size:16px;">🔄 Buddy Transition Protocol</div>
-          <div style="font-size:13px;color:var(--text-secondary);margin-bottom:12px;">Transitioning: <strong>${state.transitionBuddyName}</strong></div>
+          <div style="font-size:13px;color:var(--text-secondary);margin-bottom:12px;">Transitioning: <strong>${esc(state.transitionBuddyName)}</strong></div>
           <div style="display:flex;flex-direction:column;gap:8px;font-size:13px;margin-bottom:16px;">
             <div>1. ✅ Notify Dr. Rodgers (you're doing this now)</div>
             <div>2. Outgoing Buddy writes transition notes for each case</div>
@@ -4323,16 +4333,16 @@ async function calculateBuddyScorecard(buddyId) {
           <div class="card-title" style="margin-bottom: 20px;">Profile Settings</div>
           <div class="form-group">
             <label>Full Name</label>
-            <input type="text" data-field="profile-name" value="${state.profile.name || ''}" style="width:100%;">
+            <input type="text" data-field="profile-name" value="${esc(state.profile.name) || ''}" style="width:100%;">
           </div>
           ${['vet_buddy', 'admin'].includes(state.profile.role) ? `
           <div class="form-group">
             <label>Bio</label>
-            <textarea data-field="profile-bio" placeholder="Tell clients about yourself..." style="width:100%;height:80px;">${state.profile.bio || ''}</textarea>
+            <textarea data-field="profile-bio" placeholder="Tell clients about yourself..." style="width:100%;height:80px;">${esc(state.profile.bio) || ''}</textarea>
           </div>
           <div class="form-group">
             <label>Response Time</label>
-            <input type="text" data-field="profile-response-time" value="${state.profile.response_time || ''}" placeholder="e.g. Within 4 hours" style="width:100%;">
+            <input type="text" data-field="profile-response-time" value="${esc(state.profile.response_time) || ''}" placeholder="e.g. Within 4 hours" style="width:100%;">
           </div>` : ''}
           <div class="form-group">
             <label>Avatar Color</label>
@@ -4379,12 +4389,12 @@ async function calculateBuddyScorecard(buddyId) {
       html += '<div class="grid">';
       for (const res of resources) {
         const tag = res.url ? 'a' : 'div';
-        const href = res.url ? `href="${res.url}" target="_blank" rel="noopener"` : '';
+        const href = res.url ? `href="${esc(res.url)}" target="_blank" rel="noopener"` : '';
         html += `
           <${tag} ${href} class="resource-card" data-action="${res.url ? '' : 'open-resource'}" data-res-id="${res.id || ''}">
             <div class="resource-icon">${res.icon || '📄'}</div>
-            <div class="resource-title">${res.title}</div>
-            <div class="resource-description">${res.description || ''}</div>
+            <div class="resource-title">${esc(res.title)}</div>
+            <div class="resource-description">${esc(res.description) || ''}</div>
             ${res.url ? '<div style="font-size:11px;color:var(--primary);margin-top:6px;">🔗 Open link</div>' : '<div style="font-size:11px;color:var(--text-secondary);margin-top:6px;">No link yet</div>'}
             ${canEdit && res.id ? `<button class="btn btn-secondary btn-small" data-action="edit-resource-url" data-res-id="${res.id}" style="margin-top:8px;" onclick="event.preventDefault();event.stopPropagation();">Edit URL</button>` : ''}
           </${tag}>
@@ -4406,7 +4416,7 @@ async function calculateBuddyScorecard(buddyId) {
             <label>Client</label>
             <select data-field="new-case-client" style="width:100%;">
               <option value="">Select a client...</option>
-              ${clients.map(c => `<option value="${c.id}">${c.name} (${c.email})</option>`).join('')}
+              ${clients.map(c => `<option value="${c.id}">${esc(c.name)} (${esc(c.email)})</option>`).join('')}
             </select>
           </div>
           <div class="form-group">
@@ -4439,7 +4449,7 @@ async function calculateBuddyScorecard(buddyId) {
             <label>Assign Buddy (optional)</label>
             <select data-field="new-case-buddy" style="width:100%;">
               <option value="">Unassigned</option>
-              ${state.teamMembers.filter(m => m.role === 'vet_buddy').map(m => `<option value="${m.id}">${m.name}</option>`).join('')}
+              ${state.teamMembers.filter(m => m.role === 'vet_buddy').map(m => `<option value="${m.id}">${esc(m.name)}</option>`).join('')}
             </select>
           </div>
           <div style="display:flex;gap:12px;margin-top:8px;">
@@ -4559,14 +4569,14 @@ async function calculateBuddyScorecard(buddyId) {
         html += '<div class="card" style="cursor:pointer;" data-action="nav-geneticist-case" data-case-id="' + c.id + '">';
         html += '<div style="display:flex;align-items:center;gap:14px;margin-bottom:12px;">';
         if (pet?.photo_url) {
-          html += '<img src="' + pet.photo_url + '" style="width:52px;height:52px;border-radius:50%;object-fit:cover;" alt="' + (pet?.name || '') + '">';
+          html += '<img src="' + esc(pet.photo_url) + '" style="width:52px;height:52px;border-radius:50%;object-fit:cover;" alt="' + esc(pet?.name || '') + '">';
         } else {
           html += '<div style="width:52px;height:52px;border-radius:50%;background:linear-gradient(135deg,#534AB7,#7F77DD);display:flex;align-items:center;justify-content:center;font-size:22px;">' + emoji + '</div>';
         }
         html += '<div>';
-        html += '<div style="font-weight:700;font-size:16px;">' + (pet?.name || 'Unknown') + '</div>';
-        html += '<div style="font-size:12px;color:var(--text-secondary);">' + (pet?.species || '') + (pet?.breed ? ' \u00b7 ' + pet.breed : '') + '</div>';
-        html += '<div style="font-size:12px;color:var(--text-secondary);">Owner: ' + (pet?.owner?.name || 'Unknown') + '</div>';
+        html += '<div style="font-weight:700;font-size:16px;">' + esc(pet?.name || 'Unknown') + '</div>';
+        html += '<div style="font-size:12px;color:var(--text-secondary);">' + esc(pet?.species || '') + (pet?.breed ? ' \u00b7 ' + esc(pet.breed) : '') + '</div>';
+        html += '<div style="font-size:12px;color:var(--text-secondary);">Owner: ' + esc(pet?.owner?.name || 'Unknown') + '</div>';
         html += '</div></div>';
         html += '<div style="display:flex;justify-content:space-between;align-items:center;">';
         html += '<span style="font-size:12px;padding:3px 10px;border-radius:10px;background:' + (c.status === 'Active' ? '#E8F5E4' : '#f5f5f0') + ';color:' + (c.status === 'Active' ? '#336026' : '#888') + ';">' + (c.status || 'Unknown') + '</span>';
@@ -4603,14 +4613,14 @@ async function calculateBuddyScorecard(buddyId) {
       html += '<div class="card" style="margin-bottom:16px;">';
       html += '<div style="display:flex;align-items:center;gap:16px;">';
       if (pet?.photo_url) {
-        html += '<img src="' + pet.photo_url + '" style="width:64px;height:64px;border-radius:50%;object-fit:cover;">';
+        html += '<img src="' + esc(pet.photo_url) + '" style="width:64px;height:64px;border-radius:50%;object-fit:cover;">';
       } else {
         html += '<div style="width:64px;height:64px;border-radius:50%;background:linear-gradient(135deg,#534AB7,#7F77DD);display:flex;align-items:center;justify-content:center;font-size:28px;">' + emoji + '</div>';
       }
       html += '<div>';
-      html += '<div style="font-size:20px;font-weight:700;">' + (pet?.name || 'Unknown') + '</div>';
-      html += '<div style="font-size:13px;color:var(--text-secondary);">' + (pet?.species || '') + (pet?.breed ? ' \u00b7 ' + pet.breed : '') + (pet?.dob ? ' \u00b7 DOB ' + pet.dob : '') + (pet?.weight ? ' \u00b7 ' + pet.weight : '') + '</div>';
-      html += '<div style="font-size:12px;color:var(--text-secondary);margin-top:2px;">Owner: ' + (pet?.owner?.name || 'Unknown') + (pet?.owner?.email ? ' \u00b7 ' + pet.owner.email : '') + '</div>';
+      html += '<div style="font-size:20px;font-weight:700;">' + esc(pet?.name || 'Unknown') + '</div>';
+      html += '<div style="font-size:13px;color:var(--text-secondary);">' + esc(pet?.species || '') + (pet?.breed ? ' \u00b7 ' + esc(pet.breed) : '') + (pet?.dob ? ' \u00b7 DOB ' + esc(pet.dob) : '') + (pet?.weight ? ' \u00b7 ' + esc(pet.weight) : '') + '</div>';
+      html += '<div style="font-size:12px;color:var(--text-secondary);margin-top:2px;">Owner: ' + esc(pet?.owner?.name || 'Unknown') + (pet?.owner?.email ? ' \u00b7 ' + esc(pet.owner.email) : '') + '</div>';
       html += '</div></div></div>';
 
       // Tab bar
@@ -4635,7 +4645,7 @@ async function calculateBuddyScorecard(buddyId) {
           if (val) {
             html += '<div style="display:flex;gap:12px;padding:6px 0;border-bottom:1px solid var(--border);font-size:13px;">';
             html += '<div style="min-width:140px;color:var(--text-secondary);font-weight:500;">' + label + '</div>';
-            html += '<div>' + val + '</div></div>';
+            html += '<div>' + esc(val) + '</div></div>';
           }
         }
         html += '</div>';
@@ -4645,7 +4655,7 @@ async function calculateBuddyScorecard(buddyId) {
           html += '<div class="card-title" style="margin-bottom:8px;">Assigned Vet Buddy</div>';
           html += '<div style="display:flex;align-items:center;gap:10px;">';
           html += renderAvatar(buddy.avatar_initials, buddy.avatar_color, 'sm');
-          html += '<div style="font-size:14px;font-weight:500;">' + buddy.name + '</div>';
+          html += '<div style="font-size:14px;font-weight:500;">' + esc(buddy.name) + '</div>';
           html += '</div></div>';
         }
       }
@@ -4665,13 +4675,13 @@ async function calculateBuddyScorecard(buddyId) {
             html += '<div style="display:flex;align-items:center;gap:10px;padding:10px 0;border-bottom:1px solid var(--border);">';
             html += '<span style="font-size:20px;">' + icon + '</span>';
             html += '<div style="flex:1;min-width:0;">';
-            html += '<div style="font-size:13px;font-weight:500;">' + doc.name + '</div>';
+            html += '<div style="font-size:13px;font-weight:500;">' + esc(doc.name) + '</div>';
             html += '<div style="font-size:11px;color:var(--text-secondary);">';
             html += (doc.size_bytes ? (doc.size_bytes > 1024*1024 ? (doc.size_bytes/1024/1024).toFixed(1)+'MB' : (doc.size_bytes/1024).toFixed(0)+'KB') + ' \u00b7 ' : '');
             html += formatDate(doc.created_at);
             if (isGenetic) html += ' \u00b7 <span style="color:#534AB7;font-weight:600;">\u{1F9EC} Genetic Record</span>';
             html += '</div></div>';
-            html += '<a href="' + doc.url + '" target="_blank" rel="noopener" class="btn btn-secondary btn-small">\u2B07\uFE0F View</a>';
+            html += '<a href="' + esc(doc.url) + '" target="_blank" rel="noopener" class="btn btn-secondary btn-small">\u2B07\uFE0F View</a>';
             html += '</div>';
           }
         }
@@ -4688,8 +4698,8 @@ async function calculateBuddyScorecard(buddyId) {
         } else {
           for (const med of meds.filter(m => m.is_active)) {
             html += '<div style="padding:10px 0;border-bottom:1px solid var(--border);">';
-            html += '<div style="font-weight:600;font-size:14px;">' + med.name + '</div>';
-            html += '<div style="font-size:12px;color:var(--text-secondary);">' + (med.dose || '') + (med.frequency ? ' \u00b7 ' + med.frequency : '') + (med.start_date ? ' \u00b7 Started ' + med.start_date : '') + '</div>';
+            html += '<div style="font-weight:600;font-size:14px;">' + esc(med.name) + '</div>';
+            html += '<div style="font-size:12px;color:var(--text-secondary);">' + esc(med.dose || '') + (med.frequency ? ' \u00b7 ' + esc(med.frequency) : '') + (med.start_date ? ' \u00b7 Started ' + esc(med.start_date) : '') + '</div>';
             html += '</div>';
           }
         }
@@ -4708,8 +4718,8 @@ async function calculateBuddyScorecard(buddyId) {
             const overdue = v.due_date && new Date(v.due_date) < new Date();
             html += '<div style="display:flex;justify-content:space-between;align-items:center;padding:10px 0;border-bottom:1px solid var(--border);">';
             html += '<div>';
-            html += '<div style="font-weight:500;font-size:13px;">' + v.name + '</div>';
-            html += '<div style="font-size:11px;color:var(--text-secondary);">' + (v.administered_date ? 'Given: ' + v.administered_date : '') + (v.due_date ? ' \u00b7 Due: ' + v.due_date : '') + '</div>';
+            html += '<div style="font-weight:500;font-size:13px;">' + esc(v.name) + '</div>';
+            html += '<div style="font-size:11px;color:var(--text-secondary);">' + (v.administered_date ? 'Given: ' + esc(v.administered_date) : '') + (v.due_date ? ' \u00b7 Due: ' + esc(v.due_date) : '') + '</div>';
             html += '</div>';
             if (overdue) html += '<span style="font-size:11px;color:#c0392b;font-weight:600;">Overdue</span>';
             html += '</div>';
@@ -4736,7 +4746,7 @@ async function calculateBuddyScorecard(buddyId) {
             if (val && val !== '[]' && val !== 'null') {
               html += '<div style="margin-bottom:12px;">';
               html += '<div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.5px;color:var(--text-secondary);margin-bottom:4px;">' + label + '</div>';
-              html += '<div style="font-size:13px;line-height:1.6;">' + val + '</div>';
+              html += '<div style="font-size:13px;line-height:1.6;">' + esc(val) + '</div>';
               html += '</div>';
             }
           }
@@ -4751,10 +4761,10 @@ async function calculateBuddyScorecard(buddyId) {
         html += '<div class="card" style="margin-bottom:16px;">';
         html += '<div class="card-title" style="margin-bottom:4px;">\u{1F9EC} Your Genetic Insights</div>';
         html += '<div style="font-size:13px;color:var(--text-secondary);margin-bottom:16px;">Your findings will be visible to Dr. Rodgers, the assigned Vet Buddy, and the pet owner in their portal.</div>';
-        html += '<div class="form-group"><label>Title</label><input type="text" data-field="insight-title" value="' + (existing?.title || 'Genetic Insights') + '" style="width:100%;"></div>';
-        html += '<div class="form-group"><label>Findings & Analysis</label><textarea data-field="insight-content" style="width:100%;min-height:140px;" placeholder="Describe genetic findings, variant interpretations, breed-specific risk profile, and clinical relevance...">' + (existing?.content || '') + '</textarea></div>';
-        html += '<div class="form-group"><label>Breed Risk Flags <span style="font-weight:400;color:var(--text-secondary)">(comma-separated)</span></label><input type="text" data-field="insight-risks" value="' + (existing?.breed_risk_flags?.join(', ') || '') + '" style="width:100%;" placeholder="e.g. MDR1 mutation, degenerative myelopathy risk"></div>';
-        html += '<div class="form-group"><label>Recommendations <span style="font-weight:400;color:var(--text-secondary)">(one per line)</span></label><textarea data-field="insight-recs" style="width:100%;min-height:80px;" placeholder="e.g. Avoid acepromazine and ivermectin&#10;Annual cardiac screening recommended">' + (existing?.recommendations?.join('\n') || '') + '</textarea></div>';
+        html += '<div class="form-group"><label>Title</label><input type="text" data-field="insight-title" value="' + esc(existing?.title || 'Genetic Insights') + '" style="width:100%;"></div>';
+        html += '<div class="form-group"><label>Findings & Analysis</label><textarea data-field="insight-content" style="width:100%;min-height:140px;" placeholder="Describe genetic findings, variant interpretations, breed-specific risk profile, and clinical relevance...">' + esc(existing?.content || '') + '</textarea></div>';
+        html += '<div class="form-group"><label>Breed Risk Flags <span style="font-weight:400;color:var(--text-secondary)">(comma-separated)</span></label><input type="text" data-field="insight-risks" value="' + esc(existing?.breed_risk_flags?.join(', ') || '') + '" style="width:100%;" placeholder="e.g. MDR1 mutation, degenerative myelopathy risk"></div>';
+        html += '<div class="form-group"><label>Recommendations <span style="font-weight:400;color:var(--text-secondary)">(one per line)</span></label><textarea data-field="insight-recs" style="width:100%;min-height:80px;" placeholder="e.g. Avoid acepromazine and ivermectin&#10;Annual cardiac screening recommended">' + esc(existing?.recommendations?.join('\n') || '') + '</textarea></div>';
         html += '<button class="btn btn-primary" data-action="save-genetic-insight" data-case-id="' + c.id + '">' + (existing ? 'Update Insights' : 'Save Insights') + '</button>';
         if (existing) {
           html += '<div style="font-size:11px;color:var(--text-secondary);margin-top:8px;">Last updated: ' + formatDate(existing.updated_at) + '</div>';
@@ -4767,12 +4777,12 @@ async function calculateBuddyScorecard(buddyId) {
           html += '<div class="card-title" style="margin-bottom:12px;">Other Insights on File</div>';
           for (const insight of insights.slice(1)) {
             html += '<div style="padding:12px 0;border-bottom:1px solid var(--border);">';
-            html += '<div style="font-weight:600;font-size:14px;margin-bottom:4px;">' + insight.title + '</div>';
-            html += '<div style="font-size:13px;line-height:1.6;margin-bottom:6px;">' + insight.content + '</div>';
+            html += '<div style="font-weight:600;font-size:14px;margin-bottom:4px;">' + esc(insight.title) + '</div>';
+            html += '<div style="font-size:13px;line-height:1.6;margin-bottom:6px;">' + esc(insight.content) + '</div>';
             if (insight.breed_risk_flags?.length) {
-              html += '<div style="font-size:12px;color:#534AB7;margin-bottom:4px;">\u{1F6A9} Risk flags: ' + insight.breed_risk_flags.join(', ') + '</div>';
+              html += '<div style="font-size:12px;color:#534AB7;margin-bottom:4px;">\u{1F6A9} Risk flags: ' + esc(insight.breed_risk_flags.join(', ')) + '</div>';
             }
-            html += '<div style="font-size:11px;color:var(--text-secondary);">By ' + (insight.authored_by_user?.name || 'Unknown') + ' \u00b7 ' + formatDate(insight.updated_at) + '</div>';
+            html += '<div style="font-size:11px;color:var(--text-secondary);">By ' + esc(insight.authored_by_user?.name || 'Unknown') + ' \u00b7 ' + formatDate(insight.updated_at) + '</div>';
             html += '</div>';
           }
           html += '</div>';
@@ -4798,8 +4808,8 @@ async function calculateBuddyScorecard(buddyId) {
       for (const c of state.cases) {
         html += `
           <div class="card" style="cursor: pointer;" data-action="nav-external-case" data-case-id="${c.id}">
-            <div style="font-weight: 600; margin-bottom: 8px;">${SPECIES_EMOJI[c.pets?.species?.toLowerCase()] || '🐾'} ${c.pets?.name || 'Unknown'}</div>
-            <div style="font-size: 13px; color: var(--text-secondary); margin-bottom: 12px;">Owner: ${c.pets?.owner?.name || 'Unknown'}</div>
+            <div style="font-weight: 600; margin-bottom: 8px;">${SPECIES_EMOJI[c.pets?.species?.toLowerCase()] || '🐾'} ${esc(c.pets?.name || 'Unknown')}</div>
+            <div style="font-size: 13px; color: var(--text-secondary); margin-bottom: 12px;">Owner: ${esc(c.pets?.owner?.name || 'Unknown')}</div>
             <button class="btn btn-primary btn-small">View Case</button>
           </div>
         `;
@@ -4875,7 +4885,7 @@ async function calculateBuddyScorecard(buddyId) {
           <div class="sidebar-user" data-action="nav-profile" style="cursor:pointer;" title="Edit profile">
             ${renderAvatar(state.profile.avatar_initials, state.profile.avatar_color, 'sm')}
             <div>
-              <div class="sidebar-user-name">${state.profile.name}</div>
+              <div class="sidebar-user-name">${esc(state.profile.name)}</div>
               <div class="sidebar-user-role" style="font-size:11px;color:var(--text-secondary);">⚙️ Edit profile</div>
             </div>
           </div>
@@ -4968,11 +4978,11 @@ function renderKnowledgeBase() {
   const articlesHtml = filteredArticles.length > 0 ? filteredArticles.map((article, idx) => `
     <div class="kb-article card" data-article-id="${article.id}">
       <div class="kb-article-title" data-action="toggle-faq" data-article-id="${article.id}" style="cursor: pointer; padding: 16px; border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; align-items: center;">
-        <span style="font-weight: 600; color: var(--dark);">${article.title}</span>
+        <span style="font-weight: 600; color: var(--dark);">${esc(article.title)}</span>
         <span style="color: var(--text-secondary); font-size: 18px;" class="kb-toggle-icon">+</span>
       </div>
       <div class="kb-article-content" style="display: none; padding: 16px; color: #336026; line-height: 1.6;">
-        ${article.content}
+        ${esc(article.content)}
         <div style="font-size: 12px; color: var(--text-secondary); margin-top: 12px;">Last updated: ${formatDate(article.updated_at)}</div>
       </div>
     </div>
@@ -4992,7 +5002,7 @@ function renderKnowledgeBase() {
       </div>
 
       <div style="background: white; border-radius: 12px; padding: 12px; margin-bottom: 24px; border: 1px solid var(--border);">
-        <input type="text" class="search-input" data-action="search-faq" placeholder="Search articles..." style="width: 100%; border: none; padding: 8px; font-size: 14px; outline: none;" value="${state.faqSearch || ''}">
+        <input type="text" class="search-input" data-action="search-faq" placeholder="Search articles..." style="width: 100%; border: none; padding: 8px; font-size: 14px; outline: none;" value="${esc(state.faqSearch || '')}">
       </div>
 
       <div style="display: flex; gap: 8px; margin-bottom: 24px; overflow-x: auto; flex-wrap: wrap;">
@@ -5028,14 +5038,14 @@ function renderAuditLog() {
     <tr class="audit-row">
       <td style="padding: 12px; font-size: 13px; color: #336026;">${formatDateTime(log.created_at)}</td>
       <td style="padding: 12px; font-size: 13px;">
-        <span style="font-weight: 600;">${log.user?.name || 'Unknown'}</span>
-        <span style="background: ${log.user?.role === 'admin' ? 'var(--admin-accent)' : log.user?.role === 'vet_buddy' ? 'var(--buddy-accent)' : 'var(--client-accent)'}; color: white; font-size: 10px; padding: 2px 6px; border-radius: 4px; margin-left: 4px;">${log.user?.role?.replace('_', ' ') || 'User'}</span>
+        <span style="font-weight: 600;">${esc(log.user?.name || 'Unknown')}</span>
+        <span style="background: ${log.user?.role === 'admin' ? 'var(--admin-accent)' : log.user?.role === 'vet_buddy' ? 'var(--buddy-accent)' : 'var(--client-accent)'}; color: white; font-size: 10px; padding: 2px 6px; border-radius: 4px; margin-left: 4px;">${esc(log.user?.role?.replace('_', ' ') || 'User')}</span>
       </td>
       <td style="padding: 12px; font-size: 13px;">
         <span style="background: ${actionColorMap[log.action] || '#ccc'}; color: white; font-size: 11px; font-weight: 600; padding: 3px 8px; border-radius: 4px;">${log.action}</span>
       </td>
       <td style="padding: 12px; font-size: 13px; color: #336026; text-transform: capitalize;">${log.entity_type || '-'}</td>
-      <td style="padding: 12px; font-size: 12px; color: var(--text-secondary); max-width: 250px; overflow: hidden; text-overflow: ellipsis;"><code style="background: #f0f0f0; padding: 2px 4px; border-radius: 3px; font-size: 11px;">${JSON.stringify(log.details || {}).substring(0, 100)}...</code></td>
+      <td style="padding: 12px; font-size: 12px; color: var(--text-secondary); max-width: 250px; overflow: hidden; text-overflow: ellipsis;"><code style="background: #f0f0f0; padding: 2px 4px; border-radius: 3px; font-size: 11px;">${esc(JSON.stringify(log.details || {}).substring(0, 100))}...</code></td>
     </tr>
   `).join('') : `
     <tr><td colspan="5" style="padding: 32px; text-align: center; color: var(--text-secondary);">No audit logs found</td></tr>
@@ -5095,7 +5105,7 @@ function renderBuddyScorecard() {
         <div style="display: flex; align-items: center; gap: 12px; margin-bottom: 8px;">
           ${renderAvatar(buddy.avatar_initials, buddy.avatar_color, 'md')}
           <div style="flex: 1;">
-            <div style="font-weight: 600; color: #336026;">${buddy.name}</div>
+            <div style="font-weight: 600; color: #336026;">${esc(buddy.name)}</div>
             <div style="font-size: 12px; color: var(--text-secondary);">${buddy.role.replace('_', ' ')}</div>
           </div>
           <div style="width: 70px; height: 70px; border-radius: 50%; background: ${gradeColor}; display: flex; align-items: center; justify-content: center; color: white; font-family: 'Fraunces', serif; font-size: 36px; font-weight: 700; box-shadow: 0 2px 8px rgba(0,0,0,0.1);">
@@ -5156,9 +5166,9 @@ function renderClientSurveyView() {
     <div class="card" style="padding: 16px;">
       <div style="display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 12px;">
         <div>
-          <div style="font-weight: 600; color: #336026;">${survey.client?.name || 'Unknown Client'}</div>
+          <div style="font-weight: 600; color: #336026;">${esc(survey.client?.name || 'Unknown Client')}</div>
           <div style="font-size: 12px; color: var(--text-secondary); margin-top: 2px;">
-            🐾 ${survey.pet?.name || 'Unknown Pet'} · 👥 ${survey.buddy?.name || 'Unknown Buddy'}
+            🐾 ${esc(survey.pet?.name || 'Unknown Pet')} · 👥 ${esc(survey.buddy?.name || 'Unknown Buddy')}
           </div>
         </div>
         <div style="text-align: right;">
@@ -5167,7 +5177,7 @@ function renderClientSurveyView() {
         </div>
       </div>
       <div style="background: #f9f9f9; padding: 12px; border-radius: 6px; font-size: 13px; color: #336026; margin-bottom: 8px; line-height: 1.5;">
-        "${survey.feedback || 'No feedback provided'}"
+        "${esc(survey.feedback || 'No feedback provided')}"
       </div>
       <div style="font-size: 11px; color: var(--text-secondary);">${formatDate(survey.created_at)}</div>
     </div>
@@ -5213,9 +5223,9 @@ function renderHandoffNotesTab() {
     <div class="card" style="padding: 16px; border-left: 4px solid var(--primary);">
       <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px;">
         <div style="display: flex; align-items: center; gap: 12px; flex: 1;">
-          <span style="font-weight: 600; color: #336026;">${handoff.from_buddy?.name || 'Unknown'}</span>
+          <span style="font-weight: 600; color: #336026;">${esc(handoff.from_buddy?.name || 'Unknown')}</span>
           <span style="color: var(--text-secondary);">→</span>
-          <span style="font-weight: 600; color: #336026;">${handoff.to_buddy?.name || 'Unknown'}</span>
+          <span style="font-weight: 600; color: #336026;">${esc(handoff.to_buddy?.name || 'Unknown')}</span>
         </div>
         <div style="font-size: 12px; color: var(--text-secondary);">${formatDate(handoff.created_at)}</div>
       </div>
@@ -5223,19 +5233,19 @@ function renderHandoffNotesTab() {
       <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border);">
         <div>
           <div style="font-weight: 600; font-size: 12px; color: var(--text-secondary); margin-bottom: 6px;">Active Issues</div>
-          <div style="font-size: 13px; color: #336026; line-height: 1.4;">${handoff.active_issues || 'None noted'}</div>
+          <div style="font-size: 13px; color: #336026; line-height: 1.4;">${esc(handoff.active_issues || 'None noted')}</div>
         </div>
         <div>
           <div style="font-weight: 600; font-size: 12px; color: var(--text-secondary); margin-bottom: 6px;">Watch Items</div>
-          <div style="font-size: 13px; color: #336026; line-height: 1.4;">${handoff.watch_items || 'None'}</div>
+          <div style="font-size: 13px; color: #336026; line-height: 1.4;">${esc(handoff.watch_items || 'None')}</div>
         </div>
         <div style="grid-column: 1 / -1;">
           <div style="font-weight: 600; font-size: 12px; color: var(--text-secondary); margin-bottom: 6px;">Client Preferences</div>
-          <div style="font-size: 13px; color: #336026; line-height: 1.4;">${handoff.client_preferences || 'No preferences noted'}</div>
+          <div style="font-size: 13px; color: #336026; line-height: 1.4;">${esc(handoff.client_preferences || 'No preferences noted')}</div>
         </div>
         <div style="grid-column: 1 / -1;">
           <div style="font-weight: 600; font-size: 12px; color: var(--text-secondary); margin-bottom: 6px;">Notes</div>
-          <div style="font-size: 13px; color: #336026; line-height: 1.4;">${handoff.notes || 'No additional notes'}</div>
+          <div style="font-size: 13px; color: #336026; line-height: 1.4;">${esc(handoff.notes || 'No additional notes')}</div>
         </div>
       </div>
     </div>
@@ -5249,14 +5259,14 @@ function renderHandoffNotesTab() {
           <label style="font-weight: 500; font-size: 12px; color: var(--text-secondary); display: block; margin-bottom: 4px;">From Buddy</label>
           <select id="handoff-from" style="width: 100%; padding: 8px; border: 1px solid var(--border); border-radius: 6px; font-size: 13px;">
             <option>Select buddy</option>
-            ${(state.teamMembers || []).filter(m => m.role === 'vet_buddy').map(m => `<option value="${m.id}">${m.name}</option>`).join('')}
+            ${(state.teamMembers || []).filter(m => m.role === 'vet_buddy').map(m => `<option value="${m.id}">${esc(m.name)}</option>`).join('')}
           </select>
         </div>
         <div>
           <label style="font-weight: 500; font-size: 12px; color: var(--text-secondary); display: block; margin-bottom: 4px;">To Buddy</label>
           <select id="handoff-to" style="width: 100%; padding: 8px; border: 1px solid var(--border); border-radius: 6px; font-size: 13px;">
             <option>Select buddy</option>
-            ${(state.teamMembers || []).filter(m => m.role === 'vet_buddy').map(m => `<option value="${m.id}">${m.name}</option>`).join('')}
+            ${(state.teamMembers || []).filter(m => m.role === 'vet_buddy').map(m => `<option value="${m.id}">${esc(m.name)}</option>`).join('')}
           </select>
         </div>
       </div>
@@ -5315,8 +5325,8 @@ function renderReferralDashboard() {
     return `
       <div class="card" style="padding: 12px; display: flex; justify-content: space-between; align-items: center;">
         <div style="flex: 1;">
-          <div style="font-weight: 600; font-size: 14px; color: #336026;">${ref.referred_client?.name || 'Unknown'}</div>
-          <div style="font-size: 12px; color: var(--text-secondary); margin-top: 2px;">${ref.referred_client?.email || ''}</div>
+          <div style="font-weight: 600; font-size: 14px; color: #336026;">${esc(ref.referred_client?.name || 'Unknown')}</div>
+          <div style="font-size: 12px; color: var(--text-secondary); margin-top: 2px;">${esc(ref.referred_client?.email || '')}</div>
         </div>
         <div style="text-align: right;">
           <span style="background: ${statusColor[ref.status] || '#999'}; color: white; font-size: 11px; font-weight: 600; padding: 4px 8px; border-radius: 4px; text-transform: capitalize;">${ref.status}</span>
@@ -5401,7 +5411,7 @@ function renderHealthTimeline() {
         <div style="background: white; border: 1px solid var(--border); border-radius: 8px; padding: 12px;">
           <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 6px;">
             <span style="font-size: 20px;">${entryIconMap[entry.type] || '📋'}</span>
-            <span style="font-weight: 600; color: #336026;">${entry.title || entry.type}</span>
+            <span style="font-weight: 600; color: #336026;">${esc(entry.title || entry.type)}</span>
             <span style="background: ${entryColorMap[entry.type] || '#999'}; color: white; font-size: 10px; font-weight: 600; padding: 2px 6px; border-radius: 4px; text-transform: capitalize;">${entry.type}</span>
           </div>
           <div style="font-size: 13px; color: #336026; line-height: 1.5; margin-bottom: 8px;">${esc(entry.description || entry.content || 'No details')}</div>
@@ -5421,7 +5431,7 @@ function renderHealthTimeline() {
     <div style="max-width: 700px; margin: 0 auto; padding: 24px;">
       <div style="margin-bottom: 28px;">
         <h1 style="font-family: 'Fraunces', serif; font-size: 32px; font-weight: 700; color: var(--dark); margin-bottom: 4px;">Health Timeline</h1>
-        <p style="color: var(--text-secondary);">${pet ? `${SPECIES_EMOJI[pet.species?.toLowerCase()] || '🐾'} ${pet.name}` : 'No pet selected'}</p>
+        <p style="color: var(--text-secondary);">${pet ? `${SPECIES_EMOJI[pet.species?.toLowerCase()] || '🐾'} ${esc(pet.name)}` : 'No pet selected'}</p>
       </div>
 
       <div class="card" style="padding: 24px;">
@@ -5539,11 +5549,11 @@ function renderLightbox() {
       <button style="position: absolute; top: 20px; right: 20px; background: none; border: none; font-size: 32px; cursor: pointer; color: white;" data-action="close-lightbox">×</button>
 
       <div style="display: flex; align-items: center; justify-content: center; flex: 1; padding: 40px;">
-        <img src="${url}" alt="${title}" style="max-width: 90vw; max-height: 85vh; object-fit: contain; border-radius: 8px;">
+        <img src="${esc(url)}" alt="${esc(title)}" style="max-width: 90vw; max-height: 85vh; object-fit: contain; border-radius: 8px;">
       </div>
 
       <div style="color: white; text-align: center; padding: 20px; font-size: 14px;">
-        ${title}
+        ${esc(title)}
       </div>
     </div>
   `;
@@ -5576,7 +5586,7 @@ function renderPetSwitcher(pets) {
         font-size: 13px;
         transition: all 0.2s;
       ">
-        ${emoji} ${pet.name}
+        ${emoji} ${esc(pet.name)}
       </button>
     `;
   }).join('');
@@ -5711,9 +5721,9 @@ function renderPartnerClinicDashboard() {
         <div style="display: flex; gap: 12px; margin-bottom: 12px;">
           ${renderPetPhoto(pet, 'thumb')}
           <div style="flex: 1;">
-            <div style="font-weight: 600; color: #336026;">${emoji} ${pet.name || 'Unknown'}</div>
-            <div style="font-size: 12px; color: var(--text-secondary);">${c.client?.name || 'Unknown Client'}</div>
-            <div style="font-size: 11px; color: var(--text-secondary); margin-top: 4px;">Status: <span style="font-weight: 600;">${c.status || 'Active'}</span></div>
+            <div style="font-weight: 600; color: #336026;">${emoji} ${esc(pet.name) || 'Unknown'}</div>
+            <div style="font-size: 12px; color: var(--text-secondary);">${esc(c.client?.name) || 'Unknown Client'}</div>
+            <div style="font-size: 11px; color: var(--text-secondary); margin-top: 4px;">Status: <span style="font-weight: 600;">${esc(c.status) || 'Active'}</span></div>
           </div>
           ${c.pending_review ? '<span style="background: var(--amber); color: white; font-size: 10px; font-weight: 700; padding: 4px 8px; border-radius: 4px;">Review Pending</span>' : ''}
         </div>
@@ -5791,8 +5801,8 @@ function renderMedRefillAlerts(medications) {
         <div style="display: flex; align-items: center; gap: 12px; flex: 1;">
           <span style="font-size: 18px;">${icon}</span>
           <div>
-            <div style="font-weight: 600;">${med.name}</div>
-            <div style="font-size: 12px; opacity: 0.9;">${med.dosage || ''} · ${daysUntil < 0 ? 'Overdue' : daysUntil === 0 ? 'Due today' : daysUntil + ' days left'}</div>
+            <div style="font-weight: 600;">${esc(med.name)}</div>
+            <div style="font-size: 12px; opacity: 0.9;">${esc(med.dosage) || ''} · ${daysUntil < 0 ? 'Overdue' : daysUntil === 0 ? 'Due today' : daysUntil + ' days left'}</div>
           </div>
         </div>
         <button data-action="dismiss-refill-alert" data-med-id="${med.id}" style="background: rgba(255,255,255,0.2); border: none; color: white; padding: 4px 8px; border-radius: 4px; cursor: pointer; font-weight: 500; font-size: 12px;">✕</button>
@@ -5824,7 +5834,7 @@ function renderVaccineDueAlerts(vaccines) {
         <div style="display: flex; align-items: center; gap: 12px;">
           <span style="font-size: 18px;">${icon}</span>
           <div>
-            <div style="font-weight: 600;">${vaccine.name}</div>
+            <div style="font-weight: 600;">${esc(vaccine.name)}</div>
             <div style="font-size: 12px; opacity: 0.9;">Due: ${formatDate(vaccine.due_date)} · ${daysUntil < 0 ? 'Overdue' : daysUntil === 0 ? 'Due today' : 'Due in ' + daysUntil + ' days'}</div>
           </div>
         </div>
@@ -5885,7 +5895,7 @@ END:VCALENDAR`;
         html += `<div class="co-owner-item">
           <div class="co-owner-info">
             <div class="co-owner-avatar">${initials}</div>
-            <div><div class="co-owner-name">${pet.owner.name || 'Unknown'}</div></div>
+            <div><div class="co-owner-name">${esc(pet.owner.name) || 'Unknown'}</div></div>
           </div>
           <span class="co-owner-badge owner">Primary Owner</span>
         </div>`;
@@ -5903,8 +5913,8 @@ END:VCALENDAR`;
           <div class="co-owner-info">
             <div class="co-owner-avatar">${initials}</div>
             <div>
-              <div class="co-owner-name">${name}</div>
-              ${co.user?.name ? '<div class="co-owner-email">' + co.invited_email + '</div>' : ''}
+              <div class="co-owner-name">${esc(name)}</div>
+              ${co.user?.name ? '<div class="co-owner-email">' + esc(co.invited_email) + '</div>' : ''}
             </div>
           </div>
           <div style="display:flex; align-items:center; gap:8px;">
@@ -5918,7 +5928,7 @@ END:VCALENDAR`;
       // Invite form (if user can manage)
       if (canManage) {
         html += `<div class="co-owner-invite-form">
-          <input type="email" id="co-owner-email-input" placeholder="Enter email to invite co-owner..." value="${state.coOwnerInviteEmail || ''}">
+          <input type="email" id="co-owner-email-input" placeholder="Enter email to invite co-owner..." value="${esc(state.coOwnerInviteEmail) || ''}">
           <button class="btn-primary" data-action="send-co-owner-invite" data-pet-id="${petId}" style="padding:8px 16px; font-size:13px;">Invite</button>
         </div>`;
       }
@@ -5937,7 +5947,7 @@ END:VCALENDAR`;
         html += `<div class="co-owner-invite-banner">
           <h4>🐾 You've been invited as a co-owner!</h4>
           <p style="margin:0; font-size:14px; color:#4b5563;">
-            <strong>${inviterName}</strong> invited you to co-own <strong>${petName}</strong>${petSpecies ? ' (' + petSpecies + ')' : ''}.
+            <strong>${esc(inviterName)}</strong> invited you to co-own <strong>${esc(petName)}</strong>${petSpecies ? ' (' + esc(petSpecies) + ')' : ''}.
             You'll have full access to their care plan, messages, and appointments.
           </p>
           <div class="invite-actions">
@@ -7108,7 +7118,7 @@ END:VCALENDAR`;
             if (!entryText) { showToast('Please enter a log entry', 'error'); break; }
             try {
               const lp = state.carePlan.living_plan || emptyLivingCarePlan();
-              lp.engagement_log.push({ entry_text: entryText, created_by: state.profile.name, created_at: new Date().toISOString() });
+              lp.engagement_log.push({ entry_text: entryText, created_by: state.profile?.name, created_at: new Date().toISOString() });
               const updateData = { content: JSON.stringify(lp), updated_by: state.profile?.id, updated_at: new Date().toISOString() };
               if (state.carePlan?.id) {
                 await sb.from('care_plans').update(updateData).eq('id', state.carePlan.id);
@@ -7132,7 +7142,7 @@ END:VCALENDAR`;
             const desc = document.querySelector('[data-field="milestone-desc"]')?.value.trim() || '';
             try {
               const lp = state.carePlan.living_plan || emptyLivingCarePlan();
-              lp.milestones_and_wins.push({ title, description: desc, created_by: state.profile.name, created_at: new Date().toISOString() });
+              lp.milestones_and_wins.push({ title, description: desc, created_by: state.profile?.name, created_at: new Date().toISOString() });
               const updateData = { content: JSON.stringify(lp), updated_by: state.profile?.id, updated_at: new Date().toISOString() };
               if (state.carePlan?.id) {
                 await sb.from('care_plans').update(updateData).eq('id', state.carePlan.id);
@@ -7381,7 +7391,7 @@ END:VCALENDAR`;
             try {
               const { data: clientUser, error: findErr } = await sb.from('users').select('id, name, subscription_status').eq('email', trialEmail).single();
               if (findErr || !clientUser) throw new Error('No client found with that email');
-              if (clientUser.subscription_status === 'active') { showToast(`${clientUser.name || trialEmail} already has an active subscription`, 'error'); break; }
+              if (clientUser.subscription_status === 'active') { showToast(`${esc(clientUser.name || trialEmail)} already has an active subscription`, 'error'); target.textContent = `Grant ${TRIAL_DURATION_DAYS}-Day Trial`; target.disabled = false; break; }
               const trialEnd = new Date();
               trialEnd.setDate(trialEnd.getDate() + TRIAL_DURATION_DAYS);
               const { error: updateErr } = await sb.from('users').update({
@@ -7780,7 +7790,6 @@ END:VCALENDAR`;
             const hasAttachment = !!window._pendingAttachment;
             if ((!content && !hasAttachment) || !state.caseId) break;
             target.disabled = true;
-            if (true) {
               try {
                 let attachmentUrl = null, attachmentName = null;
                 if (window._pendingAttachment) {
@@ -7819,16 +7828,15 @@ END:VCALENDAR`;
                   await sb.from('cases').update({ last_client_message_at: new Date().toISOString() }).eq('id', state.caseId);
                 }
                 // TODO: Trigger server-side push notification to the other party here
-                // Mark client messages as read when staff opens them
+                // Mark client messages as read when staff views/sends in the case
                 if (['vet_buddy','admin'].includes(state.profile.role)) {
-                  await sb.from('messages').update({ is_read_by_client: true }).eq('case_id', state.caseId).eq('sender_role', state.profile.role).neq('is_read_by_client', true);
+                  await sb.from('messages').update({ is_read_by_staff: true }).eq('case_id', state.caseId).eq('sender_role', 'client').eq('is_read_by_staff', false);
                 }
               } catch (err) {
                 console.error(err);
                 showToast('Failed to send message', 'error');
                 target.disabled = false;
               }
-            }
             break;
           }
 
@@ -8028,14 +8036,6 @@ END:VCALENDAR`;
         }
       });
     }
-
-    document.addEventListener('input', function(e) {
-      if (e.target.dataset && e.target.dataset.action === 'search-faq') {
-        state.faqSearch = e.target.value;
-        clearTimeout(window._faqSearchTimeout);
-        window._faqSearchTimeout = setTimeout(function() { render(); }, 300);
-      }
-    });
 
     async function initApp() {
       // Handle Stripe return redirect
