@@ -6,6 +6,9 @@
     const { createClient } = window.supabase;
     const sb = createClient(SUPABASE_URL, SUPABASE_KEY);
 
+    // TODO: Generate a real VAPID keypair (e.g. via web-push library) and replace this placeholder
+    const VAPID_PUBLIC_KEY = 'YOUR_VAPID_PUBLIC_KEY_HERE';
+
     const COLORS = ['#689562', '#336026', '#3498db', '#9b59b6', '#e67e22', '#e74c3c'];
     const SPECIES_EMOJI = { dog: '🐕', cat: '🐈', bird: '🦜', rabbit: '🐇', other: '🐾' };
     const TIER_DISPLAY = { 'Buddy': 'Buddy', 'Buddy+': 'Buddy+', 'Buddy VIP': 'Buddy VIP', buddy: 'Buddy', buddy_plus: 'Buddy+', buddy_vip: 'Buddy VIP', 'Trial': '🎉 Free Trial' };
@@ -90,6 +93,7 @@
       notificationSettings: { email_messages: true, email_escalations: true, weekly_digest: false, push_enabled: false },
       notificationPermission: 'default',
       globalNotifChannel: null,
+      notifiedMessageIds: new Set(),
       petCoOwners: [], coOwnerInviteEmail: '', pendingCoOwnerInvites: [],
       showAddResource: false,
       availableBuddies: [], selectedBuddyId: null, referredByBuddyId: null,
@@ -381,6 +385,7 @@
           sb.removeChannel(state.globalNotifChannel);
           state.globalNotifChannel = null;
         }
+        await unsubscribeFromPush();
         await sb.auth.signOut();
         state.user = null;
         state.profile = null;
@@ -1646,6 +1651,12 @@ async function calculateBuddyScorecard(buddyId) {
           // Play notification sound for messages from others (even while viewing the case)
           if (!isOwnMessage) {
             playNotificationSound();
+            // Track this message ID to prevent duplicate notifications from global channel
+            if (state.notifiedMessageIds.size > 200) {
+              const first = state.notifiedMessageIds.values().next().value;
+              state.notifiedMessageIds.delete(first);
+            }
+            state.notifiedMessageIds.add(data.id);
           }
 
           render();
@@ -2024,6 +2035,7 @@ async function calculateBuddyScorecard(buddyId) {
       if (Notification.permission === 'granted') {
         state.notificationPermission = 'granted';
         state.notificationSettings.push_enabled = true;
+        await subscribeToPush();
         return 'granted';
       }
       if (Notification.permission === 'denied') {
@@ -2036,6 +2048,7 @@ async function calculateBuddyScorecard(buddyId) {
         state.notificationPermission = permission;
         state.notificationSettings.push_enabled = permission === 'granted';
         if (permission === 'granted') {
+          await subscribeToPush();
           showToast('Notifications enabled! 🔔', 'success');
         } else {
           showToast('Notifications were not enabled', 'info');
@@ -2047,14 +2060,63 @@ async function calculateBuddyScorecard(buddyId) {
       }
     }
 
+    // Subscribe to Web Push via PushManager and store subscription in Supabase
+    async function subscribeToPush() {
+      if (!navigator.serviceWorker || !state.profile || VAPID_PUBLIC_KEY === 'YOUR_VAPID_PUBLIC_KEY_HERE') return;
+      try {
+        const reg = await navigator.serviceWorker.ready;
+        const existing = await reg.pushManager.getSubscription();
+        if (existing) return; // already subscribed
+        const applicationServerKey = urlBase64ToUint8Array(VAPID_PUBLIC_KEY);
+        const subscription = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey });
+        const subJson = subscription.toJSON();
+        await sb.from('push_subscriptions').upsert({
+          user_id: state.profile.id,
+          endpoint: subJson.endpoint,
+          p256dh: subJson.keys?.p256dh || '',
+          auth: subJson.keys?.auth || '',
+          created_at: new Date().toISOString(),
+        }, { onConflict: 'endpoint' });
+      } catch (e) {
+        console.warn('Push subscription failed, falling back to local notifications:', e);
+      }
+    }
+
+    // Unsubscribe from Web Push and remove subscription from Supabase
+    async function unsubscribeFromPush() {
+      if (!navigator.serviceWorker || !state.profile) return;
+      try {
+        const reg = await navigator.serviceWorker.ready;
+        const subscription = await reg.pushManager.getSubscription();
+        if (subscription) {
+          const endpoint = subscription.endpoint;
+          await subscription.unsubscribe();
+          await sb.from('push_subscriptions').delete().eq('endpoint', endpoint);
+        }
+      } catch (e) {
+        console.warn('Push unsubscribe error:', e);
+      }
+    }
+
+    // Convert VAPID key from base64 URL to Uint8Array
+    function urlBase64ToUint8Array(base64String) {
+      const padding = '='.repeat((4 - base64String.length % 4) % 4);
+      const base64 = (base64String + padding).replace(/-/g, '+').replace(/_/g, '/');
+      const rawData = atob(base64);
+      const outputArray = new Uint8Array(rawData.length);
+      for (let i = 0; i < rawData.length; i++) outputArray[i] = rawData.charCodeAt(i);
+      return outputArray;
+    }
+
     // Show a local push notification (works when app is in foreground on mobile PWA)
     function showLocalNotification(title, body, data = {}) {
       // Always play sound + vibrate for in-app awareness
       playNotificationSound();
       vibrateIfMobile();
 
-      // Show native notification if permitted and document is hidden (background/minimized)
-      if (Notification.permission === 'granted' && document.hidden) {
+      // Show native notification if permitted and user isn't viewing this case's messages
+      const viewingThisCase = !document.hidden && state.caseId === data.caseId;
+      if (Notification.permission === 'granted' && !viewingThisCase) {
         try {
           if (navigator.serviceWorker && navigator.serviceWorker.controller) {
             navigator.serviceWorker.ready.then(reg => {
@@ -2191,6 +2253,8 @@ async function calculateBuddyScorecard(buddyId) {
 
           // Don't double-count if we're already viewing this case's messages
           if (state.caseId === msg.case_id && state.messages.some(m => m.id === msg.id)) return;
+          // Skip if per-case handler already notified for this message
+          if (state.notifiedMessageIds.has(msg.id)) return;
 
           // Update unread count
           state.unreadCount = Math.max(0, state.unreadCount + 1);
@@ -7750,6 +7814,11 @@ END:VCALENDAR`;
                 state.showCannedResponses = false;
                 render();
                 scrollMessagesToBottom();
+                // Update last_client_message_at when client sends a message
+                if (state.profile.role === 'client') {
+                  await sb.from('cases').update({ last_client_message_at: new Date().toISOString() }).eq('id', state.caseId);
+                }
+                // TODO: Trigger server-side push notification to the other party here
                 // Mark client messages as read when staff opens them
                 if (['vet_buddy','admin'].includes(state.profile.role)) {
                   await sb.from('messages').update({ is_read_by_client: true }).eq('case_id', state.caseId).eq('sender_role', state.profile.role).neq('is_read_by_client', true);
