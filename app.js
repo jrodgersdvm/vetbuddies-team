@@ -3370,13 +3370,13 @@ async function calculateBuddyScorecard(buddyId) {
     function renderAppointmentsTab() {
       const isVisible = state.caseTab === 'appointments';
       const canEdit = ['vet_buddy', 'admin'].includes(state.profile.role);
+      const isClient = state.profile.role === 'client';
       let html = `<div class="tab-content ${isVisible ? 'active' : ''}">`;
 
-      if (canEdit) {
-        html += `<div style="display:flex; justify-content:flex-end; margin-bottom:12px;">
-          <button class="btn btn-primary btn-small" data-action="toggle-add-appt">${state.showAddAppt ? '✕ Cancel' : '+ Schedule Appointment'}</button>
-        </div>`;
-      }
+      html += `<div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
+        <div style="font-weight:600;">Appointments</div>
+        ${canEdit ? `<button class="btn btn-primary btn-small" data-action="toggle-add-appt">${state.showAddAppt ? '✕ Cancel' : '+ Schedule Appointment'}</button>` : ''}
+      </div>`;
 
       if (state.showAddAppt && canEdit) {
         html += `
@@ -3427,7 +3427,14 @@ async function calculateBuddyScorecard(buddyId) {
       }
 
       if (state.appointments.length === 0) {
-        html += '<div class="empty-state"><div class="empty-state-text">📅 No appointments scheduled yet — your Buddy will help set these up.</div></div>';
+        html += `<div class="empty-state">
+          <div class="empty-state-icon">📅</div>
+          <div class="empty-state-title">No Appointments Yet</div>
+          <div class="empty-state-text">${isClient
+            ? 'Your Vet Buddy will schedule appointments here. Need to set one up? Send them a message!'
+            : 'No appointments scheduled yet — use the button above to create one.'}</div>
+          ${isClient ? `<button class="btn btn-primary" data-action="nav-client-case" data-case-id="${state.caseId}" data-tab="messages" style="margin-top:16px;">💬 Message Your Buddy</button>` : ''}
+        </div>`;
       } else {
         const now = new Date();
         const upcoming = state.appointments.filter(a => new Date(a.scheduled_at) >= now && a.status !== 'cancelled');
