@@ -922,7 +922,7 @@
         const today = new Date();
         today.setHours(0, 0, 0, 0);
         const { data, error } = await sb.from('appointments')
-          .select('*, case:cases(pet_name)')
+          .select('*, case:cases(pet_id, pets(name))')
           .in('case_id', buddyCaseIds)
           .gte('scheduled_at', today.toISOString())
           .order('scheduled_at', { ascending: true });
@@ -1113,8 +1113,10 @@ async function saveHandoffNote(caseId, toBuddyId, data) {
         case_id: caseId,
         from_buddy_id: state.profile.id,
         to_buddy_id: toBuddyId,
-        notes: data.notes,
-        status: 'pending',
+        active_issues: data.active_issues || '',
+        watch_items: data.watch_items || '',
+        client_preferences: data.client_preferences || '',
+        additional_notes: data.additional_notes || '',
         created_at: new Date().toISOString()
       })
       .select();
@@ -1172,7 +1174,7 @@ async function loadHealthTimeline(petId) {
         timeline.push({
           type: 'vital',
           date: new Date(vital.recorded_at),
-          description: `${vital.vital_type}: ${vital.value}${vital.unit || ''}`,
+          description: `Weight: ${vital.weight || ''}${vital.temperature ? ' · Temp: ' + vital.temperature : ''}${vital.notes ? ' · ' + vital.notes : ''}`,
           color: '#3b82f6'
         });
       });
@@ -1183,7 +1185,7 @@ async function loadHealthTimeline(petId) {
         timeline.push({
           type: 'medication',
           date: new Date(med.start_date),
-          description: `${med.medication_name} (${med.dosage})`,
+          description: `${med.name}${med.dose ? ' (' + med.dose + ')' : ''}`,
           color: '#10b981'
         });
       });
@@ -1194,7 +1196,7 @@ async function loadHealthTimeline(petId) {
         timeline.push({
           type: 'vaccine',
           date: new Date(vac.administered_date),
-          description: `${vac.vaccine_name}`,
+          description: `${vac.name}`,
           color: '#f59e0b'
         });
       });
@@ -1204,8 +1206,8 @@ async function loadHealthTimeline(petId) {
       apptRes.data.forEach(appt => {
         timeline.push({
           type: 'appointment',
-          date: new Date(appt.appointment_date),
-          description: `${appt.visit_type || 'Appointment'} with ${appt.veterinarian_name || 'Vet'}`,
+          date: new Date(appt.scheduled_at),
+          description: `${appt.title || appt.type || 'Appointment'}`,
           color: '#8b5cf6'
         });
       });
@@ -1245,11 +1247,11 @@ function generateICS(appointment, petName) {
     return d.toISOString().replace(/[-:]/g, '').split('.')[0] + 'Z';
   };
 
-  const apptStart = formatDate(appointment.appointment_date);
-  const apptEnd = new Date(new Date(appointment.appointment_date).getTime() + 60 * 60 * 1000);
+  const apptStart = formatDate(appointment.scheduled_at);
+  const apptEnd = new Date(new Date(appointment.scheduled_at).getTime() + 60 * 60 * 1000);
   const apptEndFormatted = formatDate(apptEnd);
 
-  const title = (appointment.visit_type || 'Appointment') + ' for ' + petName;
+  const title = (appointment.title || appointment.type || 'Appointment') + ' for ' + petName;
   const description = appointment.notes || `Vet appointment for ${petName}`;
 
   const ics = `BEGIN:VCALENDAR
@@ -1375,13 +1377,13 @@ function checkVaccineDueDates(vaccines) {
 async function calculateBuddyScorecard(buddyId) {
   try {
     const [casesRes, ratingsRes, messagesRes, escalationsRes] = await Promise.all([
-      sb.from('cases').select('id').eq('buddy_id', buddyId),
+      sb.from('cases').select('id').eq('assigned_buddy_id', buddyId),
       sb.from('client_surveys').select('rating').eq('buddy_id', buddyId),
       sb.from('messages')
         .select('id')
         .eq('sender_id', buddyId)
         .gte('created_at', new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString()),
-      sb.from('escalations').select('id').eq('buddy_id', buddyId)
+      sb.from('escalations').select('id').eq('raised_by', buddyId)
     ]);
 
     const totalCases = casesRes.data ? casesRes.data.length : 0;
@@ -2363,7 +2365,7 @@ async function calculateBuddyScorecard(buddyId) {
           ? `<div style="opacity:0.8;font-size:13px;">No appointments today — ${state.cases.length} active case${state.cases.length!==1?'s':''}</div>`
           : todayAppts.map(a => `<div style="background:rgba(255,255,255,0.15);border-radius:8px;padding:8px 12px;margin-bottom:6px;font-size:13px;">
               <strong>${new Date(a.scheduled_at).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'})}</strong> — ${a.title}
-              ${a.case?.pet_name ? `<span style="opacity:0.75;font-size:11px;margin-left:6px;">(${a.case.pet_name})</span>` : ''}
+              ${a.case?.pets?.name ? `<span style="opacity:0.75;font-size:11px;margin-left:6px;">(${a.case.pets.name})</span>` : ''}
               ${a.video_url ? `<a href="${a.video_url}" target="_blank" style="color:#a8e6cf;font-size:11px;display:block;margin-top:2px;">🎥 Join Call</a>` : ''}
             </div>`).join('')}
         <div style="margin-top:10px;font-size:12px;opacity:0.8;">Inbox${unreadBadge} · ${state.cases.length} case${state.cases.length!==1?'s':''} assigned</div>
@@ -2529,8 +2531,8 @@ async function calculateBuddyScorecard(buddyId) {
         // Core tabs always visible
         tabs = ['messages', 'careplan', 'appointments'];
         // Conditional tabs — only show when data exists
-        if (state.medications && state.medications.length > 0) tabs.push('medications');
-        if (state.vaccines && state.vaccines.length > 0) tabs.push('vaccines');
+        if (state.petMedications && state.petMedications.length > 0) tabs.push('medications');
+        if (state.petVaccines && state.petVaccines.length > 0) tabs.push('vaccines');
         tabs.push('files');
         tabs.push('co-owners');
       } else {
@@ -4614,7 +4616,7 @@ async function calculateBuddyScorecard(buddyId) {
 
       // Medications tab
       if (tab === 'medications') {
-        const meds = state.medications || [];
+        const meds = state.petMedications || [];
         html += '<div class="card">';
         html += '<div class="card-title" style="margin-bottom:12px;">Current Medications</div>';
         if (meds.length === 0) {
@@ -4632,7 +4634,7 @@ async function calculateBuddyScorecard(buddyId) {
 
       // Vaccines tab
       if (tab === 'vaccines') {
-        const vaccines = state.vaccines || [];
+        const vaccines = state.petVaccines || [];
         html += '<div class="card">';
         html += '<div class="card-title" style="margin-bottom:12px;">Vaccination History</div>';
         if (vaccines.length === 0) {
@@ -6178,7 +6180,7 @@ END:VCALENDAR`;
         if (action === 'save-handoff') { var tbid=document.querySelector('[data-field="handoff-to-buddy"]')?.value;if(!tbid){showToast('Select receiving Buddy','error');return;}saveHandoffNote(state.caseId,tbid,{active_issues:document.querySelector('[data-field="handoff-active-issues"]')?.value||'',watch_items:document.querySelector('[data-field="handoff-watch-items"]')?.value||'',client_preferences:document.querySelector('[data-field="handoff-client-prefs"]')?.value||'',additional_notes:document.querySelector('[data-field="handoff-notes"]')?.value||''}).then(function(){state.showHandoffForm=false;showToast('Handoff saved!','success');loadHandoffNotes(state.caseId).then(function(){render();});});return; }
         if (action === 'copy-referral-code') { navigator.clipboard.writeText(state.profile?.referral_code||'').then(function(){showToast('Copied!','success');});return; }
         if (action === 'download-ics') { var apt=state.appointments.find(function(a){return a.id===target.dataset.appointmentId;});if(apt){var ics=generateICS(apt,state.currentCase?.pets?.name||'Pet');var b=new Blob([ics],{type:'text/calendar'});var u=URL.createObjectURL(b);var dl=document.createElement('a');dl.href=u;dl.download='vet-buddies-appt.ics';dl.click();URL.revokeObjectURL(u);showToast('Calendar event downloaded!','success');}return; }
-        if (action === 'export-care-plan-pdf') { if(state.carePlan&&state.currentCase){showToast('Generating PDF...','info');generateCarePlanPDF(state.carePlan,state.currentCase).then(function(bu){var dl=document.createElement('a');dl.href=bu;dl.download='care-plan-'+(state.currentCase.pets?.name||'pet')+'.pdf';dl.click();URL.revokeObjectURL(bu);showToast('PDF downloaded!','success');}).catch(function(){showToast('PDF failed','error');});}return; }
+        if (action === 'export-care-plan-pdf') { if(state.carePlan&&state.currentCase){showToast('Generating PDF...','info');generateCarePlanPDF(state.carePlan,state.currentCase).then(function(bu){var url=URL.createObjectURL(bu);var dl=document.createElement('a');dl.href=url;dl.download='care-plan-'+(state.currentCase.pets?.name||'pet')+'.pdf';dl.click();URL.revokeObjectURL(url);showToast('PDF downloaded!','success');}).catch(function(){showToast('PDF failed','error');});}return; }
         if (action === 'checkout-stripe') { var pid=target.dataset.priceId;if(!pid)return;showToast('Redirecting...','info');var origin=window.location.origin;callEdgeFunction('stripe-checkout',{price_id:pid,success_url:origin+'/?billing=success',cancel_url:origin+'/'}).then(function(r){if(r?.url)window.location.href=r.url;}).catch(function(err){showToast(err.message||'Checkout failed','error');});return; }
         if (action === 'show-pricing') { state.showPricingModal=true;render();return; }
         if (action === 'close-pricing') { state.showPricingModal=false;render();return; }
@@ -6269,8 +6271,8 @@ END:VCALENDAR`;
                 }
               } catch(err) { console.error('Failed to save onboarding concern:', err); }
             }
-            state.onboardingStep = 5;
-            render();
+            await loadCases();
+            navigate('client-dashboard');
             break;
           }
           case 'nav-add-pet':
@@ -6546,10 +6548,11 @@ END:VCALENDAR`;
               if (!activeCaseId) { showToast('No active case found', 'error'); break; }
               await sb.from('timeline_entries').insert({
                 case_id: activeCaseId,
-                entry_type: 'visit_summary',
-                title: 'External Vet Visit' + (visitDate ? ' — ' + visitDate : ''),
-                description: visitSummary + (visitRecs ? '\n\nRecommendations: ' + visitRecs : ''),
-                created_by: state.profile.id
+                type: 'note',
+                content: 'External Vet Visit' + (visitDate ? ' — ' + visitDate : '') + ': ' + visitSummary + (visitRecs ? '\n\nRecommendations: ' + visitRecs : ''),
+                author_id: state.profile.id,
+                is_client_visible: true,
+                created_at: new Date().toISOString()
               });
               showToast('Visit summary submitted!', 'success');
               render();

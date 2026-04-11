@@ -3,6 +3,7 @@ const fs = require('fs');
 const path = require('path');
 
 const PORT = 3000;
+const ROOT = __dirname;
 const MIME = {
   '.html': 'text/html',
   '.css': 'text/css',
@@ -15,7 +16,16 @@ const MIME = {
 };
 
 http.createServer((req, res) => {
-  let filePath = '.' + (req.url === '/' ? '/index.html' : req.url);
+  const pathname = new URL(req.url, 'http://localhost').pathname;
+  const safePath = path.normalize(pathname).replace(/^(\.\.[\/\\])+/, '');
+  let filePath = path.join(ROOT, safePath === '/' || safePath === '\\' ? 'index.html' : safePath);
+
+  if (!filePath.startsWith(ROOT)) {
+    res.writeHead(403);
+    res.end('Forbidden');
+    return;
+  }
+
   const ext = path.extname(filePath);
   fs.readFile(filePath, (err, data) => {
     if (err) {
