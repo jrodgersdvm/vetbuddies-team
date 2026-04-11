@@ -514,6 +514,59 @@
       box-shadow: 0 10px 40px rgba(0,0,0,0.2);
     }
 
+    .modal-card.resource-doc {
+      max-width: 720px;
+      max-height: 85vh;
+      display: flex;
+      flex-direction: column;
+    }
+    .modal-card.resource-doc .modal-body {
+      overflow-y: auto;
+      font-size: 14px;
+      line-height: 1.7;
+    }
+    .modal-card.resource-doc .modal-body h3 {
+      font-family: 'Fraunces', serif;
+      font-size: 16px;
+      font-weight: 600;
+      margin: 20px 0 8px 0;
+      color: var(--text-primary);
+    }
+    .modal-card.resource-doc .modal-body h3:first-child { margin-top: 0; }
+    .modal-card.resource-doc .modal-body ul,
+    .modal-card.resource-doc .modal-body ol {
+      padding-left: 20px;
+      margin: 8px 0;
+    }
+    .modal-card.resource-doc .modal-body li { margin-bottom: 4px; }
+    .modal-card.resource-doc .modal-body table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 12px 0;
+      font-size: 13px;
+    }
+    .modal-card.resource-doc .modal-body th,
+    .modal-card.resource-doc .modal-body td {
+      border: 1px solid var(--border);
+      padding: 8px 12px;
+      text-align: left;
+    }
+    .modal-card.resource-doc .modal-body th {
+      background: var(--bg);
+      font-weight: 600;
+    }
+    .modal-card.resource-doc .modal-body .callout {
+      background: #f0faf8;
+      border-left: 3px solid var(--primary);
+      padding: 12px 16px;
+      border-radius: 0 8px 8px 0;
+      margin: 12px 0;
+      font-size: 13px;
+    }
+    [data-theme="dark"] .modal-card.resource-doc .modal-body .callout {
+      background: rgba(46,139,130,0.1);
+    }
+
     .modal-title {
       font-family: 'Fraunces', serif;
       font-size: 20px;
