@@ -34,6 +34,7 @@
       realtimeChannel: null,
       timelineEntries: [],
       showAddAppt: false,
+      editingApptId: null,
       showAddTimeline: false,
       showRaiseEscalation: false,
       showEditPet: false,
@@ -1199,6 +1200,7 @@ Looking forward to being part of [Pet Name]'s care team!</div>
         const { data, error } = await sb.from('appointments')
           .select('*, case:cases(pet_id, pets(name))')
           .in('case_id', buddyCaseIds)
+          .neq('status', 'cancelled')
           .gte('scheduled_at', today.toISOString())
           .order('scheduled_at', { ascending: true });
         if (error) throw error;
@@ -1439,7 +1441,7 @@ async function loadHealthTimeline(petId) {
       sb.from('pet_vitals').select('*').eq('pet_id', petId).order('recorded_at', { ascending: false }).limit(100),
       sb.from('pet_medications').select('*').eq('pet_id', petId).limit(100),
       sb.from('pet_vaccines').select('*').eq('pet_id', petId).limit(100),
-      sb.from('appointments').select('*').eq('pet_id', petId).order('scheduled_at', { ascending: false }).limit(100)
+      sb.from('appointments').select('*, case:cases!inner(pet_id)').eq('cases.pet_id', petId).order('scheduled_at', { ascending: false }).limit(100)
     ]);
 
     const timeline = [];
@@ -2136,7 +2138,7 @@ async function calculateBuddyScorecard(buddyId) {
               <div class="stat-card">
                 <div class="stat-value">📅</div>
                 <div class="stat-label">Next Appointment</div>
-                <div style="font-size: 13px; margin-top: 4px; color: #336026;">${state.appointments[0] ? formatDate(state.appointments[0].scheduled_at) : 'Not scheduled'}</div>
+                <div style="font-size: 13px; margin-top: 4px; color: #336026;">${(() => { const next = state.appointments.find(a => a.status !== 'cancelled' && new Date(a.scheduled_at) >= new Date()); return next ? formatDate(next.scheduled_at) : 'Not scheduled'; })()}</div>
               </div>
               <div class="stat-card">
                 <div class="stat-value">${state.unreadCount || 0}</div>
@@ -3396,29 +3398,80 @@ async function calculateBuddyScorecard(buddyId) {
           </div>`;
       }
 
+      // Edit appointment form
+      if (state.editingApptId && canEdit) {
+        const ea = state.appointments.find(a => a.id === state.editingApptId);
+        if (ea) {
+          const editDate = ea.scheduled_at ? new Date(ea.scheduled_at).toISOString().slice(0, 16) : '';
+          html += `
+            <div class="card" style="margin-bottom:16px; background:#fffbf0; border:1px solid var(--amber);">
+              <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
+                <div class="card-title">Edit Appointment</div>
+                <button class="btn btn-secondary btn-small" data-action="cancel-edit-appt">✕ Cancel</button>
+              </div>
+              <div class="form-group"><label>Title</label><input type="text" data-field="edit-appt-title" value="${esc(ea.title || '')}" style="width:100%;"></div>
+              <div class="form-group"><label>Date & Time</label><input type="datetime-local" data-field="edit-appt-date" value="${editDate}" style="width:100%;"></div>
+              <div class="form-group"><label>Type</label>
+                <select data-field="edit-appt-type" style="width:100%;">
+                  <option value="Video Call" ${ea.type === 'Video Call' ? 'selected' : ''}>Video Call</option>
+                  <option value="Phone" ${ea.type === 'Phone' ? 'selected' : ''}>Phone</option>
+                  <option value="In-Person" ${ea.type === 'In-Person' ? 'selected' : ''}>In-Person</option>
+                  <option value="Internal" ${ea.type === 'Internal' ? 'selected' : ''}>Internal</option>
+                </select>
+              </div>
+              <div class="form-group"><label>Video Call Link <span style="color:var(--text-secondary);font-weight:400;">(optional)</span></label><input type="url" data-field="edit-appt-video-url" value="${esc(ea.video_url || '')}" style="width:100%;"></div>
+              <div class="form-group"><label>Notes (optional)</label><textarea data-field="edit-appt-notes" style="width:100%;height:70px;">${esc(ea.notes || '')}</textarea></div>
+              <button class="btn btn-primary" data-action="save-edit-appointment">Save Changes</button>
+            </div>`;
+        }
+      }
+
       if (state.appointments.length === 0) {
         html += '<div class="empty-state"><div class="empty-state-text">📅 No appointments scheduled yet — your Buddy will help set these up.</div></div>';
       } else {
-        for (const appt of state.appointments) {
-          const typeColors = { 'Video Call': 'var(--blue)', 'In-Person': 'var(--green)', 'Phone': 'var(--amber)', 'Internal': '#999' };
-          html += `
-            <div class="appointment-item" style="border-left-color: ${typeColors[appt.type] || 'var(--blue)'};">
-              <div class="appointment-info">
-                <div class="appointment-title">${esc(appt.title)}</div>
-                <div class="appointment-datetime">${formatDateTime(appt.scheduled_at)}</div>
-                ${appt.notes ? `<div style="font-size:12px;color:var(--text-secondary);margin-top:4px;">${esc(appt.notes)}</div>` : ''}
+        const now = new Date();
+        const upcoming = state.appointments.filter(a => new Date(a.scheduled_at) >= now && a.status !== 'cancelled');
+        const past = state.appointments.filter(a => new Date(a.scheduled_at) < now && a.status !== 'cancelled');
+        const cancelled = state.appointments.filter(a => a.status === 'cancelled');
+
+        const renderApptList = (appts, sectionLabel, isPast) => {
+          if (appts.length === 0) return '';
+          let s = `<div style="font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:0.5px;color:var(--text-secondary);margin:16px 0 8px;">${sectionLabel} (${appts.length})</div>`;
+          for (const appt of appts) {
+            const typeColors = { 'Video Call': 'var(--blue)', 'In-Person': 'var(--green)', 'Phone': 'var(--amber)', 'Internal': '#999' };
+            const isCancelled = appt.status === 'cancelled';
+            const opacity = isPast || isCancelled ? 'opacity:0.6;' : '';
+            s += `
+              <div class="appointment-item" style="border-left-color: ${typeColors[appt.type] || 'var(--blue)'}; ${opacity}">
+                <div class="appointment-info" style="flex:1;min-width:0;">
+                  <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+                    <div class="appointment-title">${esc(appt.title)}</div>
+                    ${isPast && !isCancelled ? '<span style="font-size:10px;background:#e0e0e0;color:#666;padding:2px 6px;border-radius:3px;">Completed</span>' : ''}
+                    ${isCancelled ? '<span style="font-size:10px;background:#ffebee;color:var(--red);padding:2px 6px;border-radius:3px;">Cancelled</span>' : ''}
+                  </div>
+                  <div class="appointment-datetime">${formatDateTime(appt.scheduled_at)}</div>
+                  ${appt.notes ? `<div style="font-size:12px;color:var(--text-secondary);margin-top:4px;">${esc(appt.notes)}</div>` : ''}
+                </div>
+                <div style="display:flex; align-items:center; gap:6px; flex-shrink:0; flex-wrap:wrap;">
+                  ${!isCancelled && appt.video_url
+                    ? `<a href="${esc(appt.video_url)}" target="_blank" rel="noopener" class="btn btn-primary btn-small" style="text-decoration:none;" onclick="event.stopPropagation();">🎥 Join</a>`
+                    : !isCancelled && canEdit && appt.type === 'Video Call' && !isPast
+                      ? `<button class="btn btn-secondary btn-small" data-action="generate-video-link" data-appt-id="${appt.id}">🔗 Get Link</button>`
+                      : ''}
+                  <button class="btn btn-secondary btn-small" data-action="download-ics" data-appointment-id="${appt.id}" style="font-size:11px;">📅 ICS</button>
+                  ${canEdit && !isCancelled && !isPast ? `<button class="btn btn-secondary btn-small" data-action="edit-appointment" data-appt-id="${appt.id}" style="font-size:11px;">✏️</button>` : ''}
+                  ${canEdit && !isCancelled ? `<button class="btn btn-secondary btn-small" data-action="cancel-appointment" data-appt-id="${appt.id}" style="font-size:11px;border-color:var(--red);color:var(--red);">✕</button>` : ''}
+                  <span class="appointment-type" style="background: ${typeColors[appt.type] || 'var(--blue)'};">${appt.type}</span>
+                </div>
               </div>
-              <div style="display:flex; align-items:center; gap:8px; flex-shrink:0; flex-wrap:wrap;">
-                ${appt.video_url
-                  ? `<a href="${esc(appt.video_url)}" target="_blank" rel="noopener" class="btn btn-primary btn-small" style="text-decoration:none;" onclick="event.stopPropagation();">🎥 Join</a>`
-                  : canEdit && appt.type === 'Video Call'
-                    ? `<button class="btn btn-secondary btn-small" data-action="generate-video-link" data-appt-id="${appt.id}">🔗 Get Link</button>`
-                    : ''}
-                <span class="appointment-type" style="background: ${typeColors[appt.type] || 'var(--blue)'};">${appt.type}</span>
-              </div>
-            </div>
-          `;
-        }
+            `;
+          }
+          return s;
+        };
+
+        html += renderApptList(upcoming, 'Upcoming', false);
+        html += renderApptList(past, 'Past', true);
+        if (cancelled.length > 0) html += renderApptList(cancelled, 'Cancelled', false);
       }
 
       html += '</div>';
@@ -6113,40 +6166,6 @@ function renderVaccineDueAlerts(vaccines) {
   return alertsHtml || '';
 }
 
-function renderCalendarSyncButton(appointment, petName) {
-  if (!appointment) return '';
-
-  const startDate = new Date(appointment.scheduled_at);
-  const endDate = new Date(startDate.getTime() + 60 * 60 * 1000);
-
-  const icsContent = `BEGIN:VCALENDAR
-VERSION:2.0
-PRODID:-//Vet Buddies//EN
-CALSCALE:GREGORIAN
-METHOD:PUBLISH
-X-WR-CALNAME:Vet Buddies
-X-WR-TIMEZONE:UTC
-BEGIN:VEVENT
-UID:${appointment.id}@vetbuddies.com
-DTSTART:${startDate.toISOString().replace(/[-:]/g, '').split('.')[0]}Z
-DTEND:${endDate.toISOString().replace(/[-:]/g, '').split('.')[0]}Z
-SUMMARY:${petName} - ${appointment.title || 'Appointment'}
-DESCRIPTION:${appointment.description || 'Pet appointment with Vet Buddies'}
-LOCATION:${appointment.location || 'Veterinary Clinic'}
-STATUS:CONFIRMED
-END:VEVENT
-END:VCALENDAR`;
-
-  const encodedIcs = encodeURIComponent(icsContent);
-
-  return `
-    <button class="btn-secondary" data-action="download-ics" data-appointment-id="${appointment.id}" style="padding: 8px 12px; font-size: 13px; white-space: nowrap;">
-      📅 Add to Calendar
-    </button>
-  `;
-}
-
-
     // ── Co-Owner Render Functions ──────────────────────────
     function renderCoOwnerSection(petId) {
       const pet = state.currentCase?.pets;
@@ -6794,7 +6813,7 @@ END:VCALENDAR`;
                 state.caseId = state.cases[state.activePetIndex || 0]?.id || state.cases[0].id;
               }
               if (target.dataset.tab) state.caseTab = target.dataset.tab;
-              state.showAddAppt = false; state.showAddTimeline = false; state.showRaiseEscalation = false;
+              state.showAddAppt = false; state.editingApptId = null; state.showAddTimeline = false; state.showRaiseEscalation = false;
               await loadCase(state.caseId);
               await loadCarePlan(state.caseId);
               await loadMessages(state.caseId);
@@ -7220,6 +7239,51 @@ END:VCALENDAR`;
               showToast('Appointment scheduled', 'success');
               render();
             } catch(err) { showToast(err.message || 'Failed to save appointment', 'error'); }
+            break;
+          }
+          case 'edit-appointment': {
+            state.editingApptId = target.dataset.apptId;
+            state.showAddAppt = false;
+            render();
+            break;
+          }
+          case 'cancel-edit-appt':
+            state.editingApptId = null;
+            render();
+            break;
+          case 'save-edit-appointment': {
+            const title = document.querySelector('[data-field="edit-appt-title"]')?.value.trim();
+            const dateVal = document.querySelector('[data-field="edit-appt-date"]')?.value;
+            const type = document.querySelector('[data-field="edit-appt-type"]')?.value || 'Video Call';
+            const videoUrl = document.querySelector('[data-field="edit-appt-video-url"]')?.value.trim() || null;
+            const notes = document.querySelector('[data-field="edit-appt-notes"]')?.value.trim() || null;
+            if (!title || !dateVal) { showToast('Title and date are required', 'error'); break; }
+            try {
+              const { error } = await sb.from('appointments').update({ title, scheduled_at: new Date(dateVal).toISOString(), type, notes, video_url: videoUrl }).eq('id', state.editingApptId);
+              if (error) throw error;
+              await sb.from('timeline_entries').insert({ case_id: state.caseId, author_id: state.profile.id, type: 'appointment', content: `Appointment updated: ${title} on ${formatDate(dateVal)}`, is_client_visible: true });
+              state.editingApptId = null;
+              await loadAppointments(state.caseId);
+              await loadTimeline(state.caseId);
+              showToast('Appointment updated', 'success');
+              render();
+            } catch(err) { showToast(err.message || 'Failed to update appointment', 'error'); }
+            break;
+          }
+          case 'cancel-appointment': {
+            const apptId = target.dataset.apptId;
+            const appt = state.appointments.find(a => a.id === apptId);
+            if (!appt) break;
+            if (!confirm(`Cancel appointment "${appt.title}"? This cannot be undone.`)) break;
+            try {
+              const { error } = await sb.from('appointments').update({ status: 'cancelled' }).eq('id', apptId);
+              if (error) throw error;
+              await sb.from('timeline_entries').insert({ case_id: state.caseId, author_id: state.profile.id, type: 'appointment', content: `Appointment cancelled: ${appt.title}`, is_client_visible: true });
+              await loadAppointments(state.caseId);
+              await loadTimeline(state.caseId);
+              showToast('Appointment cancelled', 'success');
+              render();
+            } catch(err) { showToast(err.message || 'Failed to cancel appointment', 'error'); }
             break;
           }
           // Timeline entry
