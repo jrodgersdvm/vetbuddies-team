@@ -21,9 +21,13 @@
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
-  <div id="app"></div>
+  <a href="#main-content" class="skip-link" style="position:absolute;left:-9999px;top:auto;width:1px;height:1px;overflow:hidden;z-index:10000;padding:8px 16px;background:#336026;color:white;font-weight:600;text-decoration:none;border-radius:0 0 4px 0;" onfocus="this.style.cssText='position:fixed;left:0;top:0;z-index:10000;padding:8px 16px;background:#336026;color:white;font-weight:600;text-decoration:none;border-radius:0 0 4px 0;'" onblur="this.style.cssText='position:absolute;left:-9999px;top:auto;width:1px;height:1px;overflow:hidden;'">Skip to main content</a>
+  <div id="app" role="application" aria-label="Vet Buddies"></div>
 
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
+  <script src="config.js"></script>
+  <script src="utils.js"></script>
+  <script src="resource-documents.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

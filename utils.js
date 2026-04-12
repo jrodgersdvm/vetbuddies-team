@@ -1,0 +1,157 @@
+// ============================================
+// UTILITY FUNCTIONS
+// ============================================
+// Pure utility functions with no dependency on app state.
+// Loaded before app.js via <script> tag.
+
+function esc(str) {
+  if (!str) return '';
+  return String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#039;');
+}
+
+function formatDate(date) {
+  if (!date) return '';
+  const d = new Date(date);
+  if (isNaN(d.getTime())) return '';
+  return d.toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
+}
+
+function formatDateTime(date) {
+  if (!date) return '';
+  const d = new Date(date);
+  if (isNaN(d.getTime())) return '';
+  return d.toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+}
+
+function showToast(message, type = 'info') {
+  const toast = document.createElement('div');
+  toast.className = `toast ${type}`;
+  toast.setAttribute('role', 'alert');
+  toast.setAttribute('aria-live', 'polite');
+  toast.textContent = message;
+  document.body.appendChild(toast);
+  setTimeout(() => toast.remove(), 3000);
+}
+
+function renderBadge(role) {
+  const badges = {
+    client: '<span class="badge badge-client">Client</span>',
+    vet_buddy: '<span class="badge badge-buddy">Vet Buddy</span>',
+    admin: '<span class="badge badge-admin">Supervising DVM</span>',
+    external_vet: '<span class="badge badge-external">External Vet</span>',
+  };
+  return badges[role] || '';
+}
+
+function renderAvatar(initials, color, size = '') {
+  const sizeClass = size ? ` ${size}` : '';
+  return `<div class="avatar${sizeClass}" style="background: ${esc(color)};">${esc(initials)}</div>`;
+}
+
+function renderStatusDot(status) {
+  const classes = {
+    'Active':          'status-dot active',
+    'Needs Attention': 'status-dot needs-attention',
+    'Inactive':        'status-dot inactive',
+  };
+  return `<span class="${classes[status] || 'status-dot'}"></span>`;
+}
+
+function renderProgressBar(current, max, color = 'var(--primary)') {
+  const percent = max > 0 ? (current / max) * 100 : 0;
+  return `<div class="progress-bar"><div class="progress-bar-fill" style="width: ${percent}%; background: ${color};"></div></div>`;
+}
+
+// Compress image to a max dimension and JPEG quality to keep uploads small
+function compressImage(file, maxDim = 1200, quality = 0.8) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => {
+      URL.revokeObjectURL(img.src);
+      let w = img.width, h = img.height;
+      if (w > maxDim || h > maxDim) {
+        const ratio = Math.min(maxDim / w, maxDim / h);
+        w = Math.round(w * ratio);
+        h = Math.round(h * ratio);
+      }
+      const canvas = document.createElement('canvas');
+      canvas.width = w;
+      canvas.height = h;
+      canvas.getContext('2d').drawImage(img, 0, 0, w, h);
+      canvas.toBlob(blob => {
+        if (!blob) return reject(new Error('Compression failed'));
+        resolve(new File([blob], file.name.replace(/\.[^.]+$/, '.jpg'), { type: 'image/jpeg' }));
+      }, 'image/jpeg', quality);
+    };
+    img.onerror = () => reject(new Error('Failed to load image for compression'));
+    img.src = URL.createObjectURL(file);
+  });
+}
+
+// ── Pagination ──────────────────────────────────────────
+const PAGE_SIZE = 10;
+
+function paginate(items, page, pageSize = PAGE_SIZE) {
+  const totalPages = Math.max(1, Math.ceil(items.length / pageSize));
+  const safePage = Math.max(1, Math.min(page, totalPages));
+  const start = (safePage - 1) * pageSize;
+  return { items: items.slice(start, start + pageSize), page: safePage, totalPages, total: items.length };
+}
+
+function renderPagination(key, page, totalPages, total) {
+  if (totalPages <= 1) return '';
+  let html = `<div style="display:flex;justify-content:center;align-items:center;gap:12px;padding:16px 0;" role="navigation" aria-label="Pagination">`;
+  html += `<button class="btn btn-secondary btn-small" data-action="paginate" data-key="${key}" data-page="${page - 1}" ${page <= 1 ? 'disabled' : ''} aria-label="Previous page">&laquo; Prev</button>`;
+  html += `<span style="font-size:13px;color:var(--text-secondary);">Page ${page} of ${totalPages} (${total} items)</span>`;
+  html += `<button class="btn btn-secondary btn-small" data-action="paginate" data-key="${key}" data-page="${page + 1}" ${page >= totalPages ? 'disabled' : ''} aria-label="Next page">Next &raquo;</button>`;
+  html += '</div>';
+  return html;
+}
+
+// ── Tier-based feature gating ──────────────────────────
+const TIER_LEVELS = { 'Buddy': 1, 'buddy': 1, 'Buddy+': 2, 'buddy_plus': 2, 'Buddy VIP': 3, 'buddy_vip': 3, 'Trial': 1 };
+const FEATURE_MIN_TIER = {
+  'weekly_checkins': 2,
+  'health_timeline': 2,
+  'vitals_tracking': 2,
+  'vaccine_tracker': 1,
+  'medication_tracking': 1,
+  'dvm_checkins': 3,
+  'priority_messaging': 3,
+  'referral_dashboard': 2,
+  'document_uploads': 1,
+  'care_plan': 1,
+};
+
+function getTierLevel(tierName) {
+  return TIER_LEVELS[tierName] || 1;
+}
+
+// ── Free Trial Helpers ─────────────────────────────────
+function getTrialDaysRemaining(profile) {
+  if (!profile?.trial_ends_at) return 0;
+  const now = new Date();
+  const end = new Date(profile.trial_ends_at);
+  const diff = Math.ceil((end - now) / (1000 * 60 * 60 * 24));
+  return Math.max(0, diff);
+}
+
+function isTrialActive(profile) {
+  return profile?.subscription_status === 'trialing' && getTrialDaysRemaining(profile) > 0;
+}
+
+function isTrialExpired(profile) {
+  return profile?.subscription_status === 'trialing' && getTrialDaysRemaining(profile) <= 0;
+}
+
+function hasActiveAccess(profile) {
+  return profile?.subscription_status === 'active' || isTrialActive(profile);
+}
+
+function hasWriteAccess(profile) {
+  return profile?.subscription_status === 'active' || isTrialActive(profile);
+}
+
+function hasReadAccess(profile) {
+  return !!profile?.subscription_status && profile.subscription_status !== 'none';
+}

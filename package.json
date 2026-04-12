@@ -2,6 +2,7 @@
   "name": "rodgersvetbuddies",
   "version": "1.0.0",
   "scripts": {
-    "dev": "node server.js"
+    "dev": "node server.js",
+    "test": "node tests/utils.test.js"
   }
 }
