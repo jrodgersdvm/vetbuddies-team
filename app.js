@@ -2914,9 +2914,11 @@ async function calculateBuddyScorecard(buddyId) {
             <div class="form-group"><label>Date of Birth</label><input type="date" data-field="pet-dob" value="${p?.dob || ''}" style="width:100%;"></div>
           </div>
           <div class="form-group"><label>Notes (behavior, preferences…)</label><textarea data-field="pet-notes" placeholder="Any notes about your pet..." style="width:100%;height:70px;">${esc(p?.notes)}</textarea></div>
-          <div style="display:flex;gap:8px;">
+          <div style="display:flex;gap:8px;align-items:center;">
             <button class="btn btn-primary btn-small" data-action="save-pet-profile" data-pet-id="${p?.id}">Save</button>
             <button class="btn btn-secondary btn-small" data-action="toggle-edit-pet">Cancel</button>
+            <div style="flex:1;"></div>
+            <button class="btn btn-secondary btn-small" data-action="delete-pet" data-pet-id="${p?.id}" data-pet-name="${esc(p?.name || 'this pet')}" style="border-color:var(--red);color:var(--red);">Remove Pet</button>
           </div>
         </div>`;
       }
@@ -7710,6 +7712,37 @@ function renderVaccineDueAlerts(vaccines) {
               showToast('Pet profile updated! 🐾', 'success');
               render();
             } catch(err) { showToast('Failed to save: ' + (err.message || 'Error'), 'error'); }
+            break;
+          }
+
+          case 'delete-pet': {
+            const petId = target.dataset.petId;
+            const petName = target.dataset.petName || 'this pet';
+            if (!petId) break;
+            if (!confirm(`Are you sure you want to remove ${petName}? This will permanently delete all of ${petName}'s data including messages, care plans, appointments, and medical records. This cannot be undone.`)) break;
+            // Double-confirm for safety
+            if (!confirm(`This is permanent. Type OK to confirm you want to delete ${petName} and all associated data.`)) break;
+            try {
+              const { error } = await sb.from('pets').delete().eq('id', petId);
+              if (error) throw error;
+              // Clean up state
+              state.showEditPet = false;
+              state.currentCase = null;
+              state.caseId = null;
+              state.appointments = [];
+              state.messages = [];
+              if (state.realtimeChannel) { sb.removeChannel(state.realtimeChannel); state.realtimeChannel = null; }
+              // Reload cases and navigate back
+              await loadCases();
+              if (state.cases.length > 0) {
+                state.activePetIndex = 0;
+                navigate('client-dashboard');
+              } else {
+                navigate('client-dashboard');
+              }
+              showToast(`${petName} has been removed`, 'success');
+              render();
+            } catch(err) { showToast('Failed to delete: ' + (err.message || 'Error'), 'error'); }
             break;
           }
 
