@@ -1840,7 +1840,7 @@ async function calculateBuddyScorecard(buddyId) {
       return `
         <div class="auth-container">
           <div class="auth-card">
-            <div class="auth-logo"><svg width="200" height="80" viewBox="0 0 200 80" xmlns="http://www.w3.org/2000/svg"><circle cx="40" cy="40" r="28" fill="#336026"/><text x="40" y="48" text-anchor="middle" fill="white" font-size="30">🐾</text><text x="128" y="36" text-anchor="middle" fill="#336026" font-size="22" font-weight="700" font-family="Georgia,serif">Vet</text><text x="128" y="60" text-anchor="middle" fill="#689562" font-size="22" font-weight="700" font-family="Georgia,serif">Buddies</text></svg></div>
+            <div class="auth-logo"><svg width="200" height="60" viewBox="0 0 200 60" xmlns="http://www.w3.org/2000/svg"><text x="100" y="28" text-anchor="middle" fill="#336026" font-size="28" font-weight="700" font-family="Georgia,serif">Vet Buddies</text><text x="100" y="48" text-anchor="middle" fill="#689562" font-size="13" font-family="DM Sans,sans-serif">Your pet deserves a Buddy.</text></svg></div>
             <div class="auth-title">Sign In</div>
             <div style="text-align:center; color:var(--text-secondary); font-size:14px; margin-bottom:20px; margin-top:-8px;">Welcome back — your Buddy is waiting.</div>
             <form data-action="signin">
@@ -1869,7 +1869,7 @@ async function calculateBuddyScorecard(buddyId) {
       return `
         <div class="auth-container">
           <div class="auth-card">
-            <div class="auth-logo"><svg width="200" height="80" viewBox="0 0 200 80" xmlns="http://www.w3.org/2000/svg"><circle cx="40" cy="40" r="28" fill="#336026"/><text x="40" y="48" text-anchor="middle" fill="white" font-size="30">🐾</text><text x="128" y="36" text-anchor="middle" fill="#336026" font-size="22" font-weight="700" font-family="Georgia,serif">Vet</text><text x="128" y="60" text-anchor="middle" fill="#689562" font-size="22" font-weight="700" font-family="Georgia,serif">Buddies</text></svg></div>
+            <div class="auth-logo"><svg width="200" height="60" viewBox="0 0 200 60" xmlns="http://www.w3.org/2000/svg"><text x="100" y="28" text-anchor="middle" fill="#336026" font-size="28" font-weight="700" font-family="Georgia,serif">Vet Buddies</text><text x="100" y="48" text-anchor="middle" fill="#689562" font-size="13" font-family="DM Sans,sans-serif">Your pet deserves a Buddy.</text></svg></div>
             <div class="auth-title">Create your account</div>
             <div style="text-align:center; color:var(--text-secondary); font-size:14px; margin-bottom:20px; margin-top:-8px;">Every pet deserves a Buddy.</div>
             <form data-action="signup">
@@ -5253,7 +5253,7 @@ async function calculateBuddyScorecard(buddyId) {
       `;
 
       let topbarHtml = `
-        <div class="topbar-logo"><svg width="130" height="36" viewBox="0 0 130 36" xmlns="http://www.w3.org/2000/svg"><circle cx="18" cy="18" r="14" fill="rgba(255,255,255,0.2)"/><text x="18" y="24" text-anchor="middle" fill="white" font-size="16">🐾</text><text x="78" y="24" text-anchor="middle" fill="white" font-size="15" font-weight="700" font-family="Georgia,serif">Vet Buddies</text></svg></div>
+        <div class="topbar-logo"><svg width="140" height="36" viewBox="0 0 140 36" xmlns="http://www.w3.org/2000/svg"><text x="0" y="25" fill="white" font-size="20" font-weight="700" font-family="Georgia,serif" letter-spacing="0.5">Vet Buddies</text></svg></div>
         <div class="topbar-center">
           <button class="topbar-hamburger" data-action="toggle-sidebar" aria-label="Toggle navigation menu" aria-expanded="${state.sidebarOpen}">☰</button>
         </div>
