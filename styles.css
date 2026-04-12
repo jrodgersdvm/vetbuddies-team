@@ -940,13 +940,15 @@
         height: 72px !important;
       }
 
-      /* --- Tabs: horizontal scroll --- */
+      /* --- Tabs: horizontal scroll with fade hint --- */
       .tabs {
         overflow-x: auto;
         -webkit-overflow-scrolling: touch;
         scrollbar-width: none;
         flex-wrap: nowrap;
         margin-bottom: 12px;
+        -webkit-mask-image: linear-gradient(to right, black 85%, transparent 100%);
+        mask-image: linear-gradient(to right, black 85%, transparent 100%);
       }
       .tabs::-webkit-scrollbar {
         display: none;

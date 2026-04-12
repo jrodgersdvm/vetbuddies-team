@@ -1504,6 +1504,7 @@ async function toggleDarkMode() {
   try {
     state.darkMode = !state.darkMode;
     document.documentElement.dataset.theme = state.darkMode ? 'dark' : 'light';
+    try { localStorage.setItem('vetbuddies_dark_mode', state.darkMode ? '1' : '0'); } catch(e) {}
 
     const { error } = await sb
       .from('users')
@@ -1571,7 +1572,7 @@ async function generateCarePlanPDF(carePlan, currentCase) {
 
     // Header
     doc.setFontSize(24);
-    doc.setTextColor(220, 38, 38);
+    doc.setTextColor(51, 96, 38);
     doc.text('Vet Buddies', margin, yPosition);
     yPosition += 12;
 
@@ -1607,7 +1608,7 @@ async function generateCarePlanPDF(carePlan, currentCase) {
         }
 
         doc.setFontSize(11);
-        doc.setTextColor(220, 38, 38);
+        doc.setTextColor(51, 96, 38);
         doc.text(section.title || 'Section', margin, yPosition);
         yPosition += 8;
 
@@ -2454,6 +2455,7 @@ async function calculateBuddyScorecard(buddyId) {
           email_escalations: state.notificationSettings.email_escalations,
           weekly_digest: state.notificationSettings.weekly_digest,
           push_enabled: state.notificationSettings.push_enabled,
+          muted_case_ids: state.notificationSettings.muted_case_ids || [],
           updated_at: new Date().toISOString(),
         };
         const { error } = await sb.from('notification_preferences').upsert(payload, { onConflict: 'user_id' });
@@ -2538,6 +2540,9 @@ async function calculateBuddyScorecard(buddyId) {
           if (state.caseId === msg.case_id && state.messages.some(m => m.id === msg.id)) return;
           // Skip if per-case handler already notified for this message
           if (state.notifiedMessageIds.has(msg.id)) return;
+
+          // Skip if this case is muted
+          if ((state.notificationSettings.muted_case_ids || []).includes(msg.case_id)) return;
 
           // Update unread count
           state.unreadCount = Math.max(0, state.unreadCount + 1);
@@ -2738,18 +2743,24 @@ async function calculateBuddyScorecard(buddyId) {
       // ── Proactive Check-In Reminders ──
       const now = new Date();
       const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+      // Pre-compute monthly buddy touchpoint counts per case
+      const monthlyTpCounts = new Map();
+      (state.touchpoints || []).forEach(t => {
+        if (t.type === 'buddy' && new Date(t.completed_at) >= startOfMonth) {
+          monthlyTpCounts.set(t.case_id, (monthlyTpCounts.get(t.case_id) || 0) + 1);
+        }
+      });
       const casesNeedingCheckin = state.cases.filter(c => {
-        const cTouchpoints = (state.touchpoints || []).filter(t => t.case_id === c.id && t.type === 'buddy' && new Date(t.completed_at) >= startOfMonth);
         const tier = c.subscription_tier || 'Buddy';
         const target = ['Buddy+', 'Buddy VIP'].includes(tier) ? 4 : 1;
-        return cTouchpoints.length < target;
+        return (monthlyTpCounts.get(c.id) || 0) < target;
       });
       if (casesNeedingCheckin.length > 0) {
         html += `<div class="card" style="margin-bottom:16px;border-left:4px solid var(--amber);background:#fffde7;">
           <div style="font-weight:700;margin-bottom:8px;font-size:14px;">🔔 Check-In Reminders</div>
           <div style="font-size:13px;color:var(--text-secondary);margin-bottom:10px;">These cases are due for a proactive wellness check-in this month:</div>
           ${casesNeedingCheckin.map(c => {
-            const monthlyDone = (state.touchpoints || []).filter(t => t.case_id === c.id && t.type === 'buddy' && new Date(t.completed_at) >= startOfMonth).length;
+            const monthlyDone = monthlyTpCounts.get(c.id) || 0;
             const tier = c.subscription_tier || 'Buddy';
             const target = ['Buddy+', 'Buddy VIP'].includes(tier) ? 4 : 1;
             return `<div style="display:flex;justify-content:space-between;align-items:center;padding:6px 0;border-bottom:1px solid #fff3cd;">
@@ -2835,6 +2846,7 @@ async function calculateBuddyScorecard(buddyId) {
             </div>
             <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
               ${state.profile.role === 'client' ? `<button class="btn btn-secondary btn-small" data-action="toggle-edit-pet">${state.showEditPet ? '✕' : '✏️ Edit'}</button>` : ''}
+              <button class="btn btn-secondary btn-small" data-action="toggle-mute-case" data-case-id="${state.currentCase.id}" title="${(state.notificationSettings.muted_case_ids || []).includes(state.currentCase.id) ? 'Unmute notifications' : 'Mute notifications'}">${(state.notificationSettings.muted_case_ids || []).includes(state.currentCase.id) ? '🔇 Muted' : '🔔'}</button>
               ${['vet_buddy','admin'].includes(state.profile.role) ? `<button class="btn btn-secondary btn-small" data-action="toggle-raise-escalation" style="border-color:#e74c3c;color:#e74c3c;">${state.showRaiseEscalation ? '✕' : '⚠️ Escalate'}</button>` : ''}
               ${state.currentCase.assigned_buddy ? renderAvatar(state.currentCase.assigned_buddy.avatar_initials, state.currentCase.assigned_buddy.avatar_color) : '<div style="color: var(--text-secondary);">No buddy</div>'}
             </div>
@@ -3210,7 +3222,11 @@ async function calculateBuddyScorecard(buddyId) {
       html += '</div>';
 
       if (canMessage) {
-        const placeholder = state.messageThread === 'staff' ? 'Message staff only (not visible to client)...' : 'Type a message...';
+        const placeholder = state.messageThread === 'staff'
+          ? 'Message staff only (not visible to client)...'
+          : ['vet_buddy','admin'].includes(state.profile.role)
+            ? 'Type a message... (press / for templates)'
+            : 'Type a message...';
         html += `
           <input type="file" id="msg-file-input" style="display:none;" accept="image/*,.pdf,.doc,.docx,.txt,.csv">
           <input type="file" id="voice-file-input" style="display:none;" accept="audio/*">
@@ -3463,7 +3479,7 @@ async function calculateBuddyScorecard(buddyId) {
                   ${appt.notes ? `<div style="font-size:12px;color:var(--text-secondary);margin-top:4px;">${esc(appt.notes)}</div>` : ''}
                 </div>
                 <div style="display:flex; align-items:center; gap:6px; flex-shrink:0; flex-wrap:wrap;">
-                  ${!isCancelled && appt.video_url
+                  ${!isCancelled && appt.video_url && /^https?:\/\//i.test(appt.video_url)
                     ? `<a href="${esc(appt.video_url)}" target="_blank" rel="noopener" class="btn btn-primary btn-small" style="text-decoration:none;" onclick="event.stopPropagation();">🎥 Join</a>`
                     : !isCancelled && canEdit && appt.type === 'Video Call' && !isPast
                       ? `<button class="btn btn-secondary btn-small" data-action="generate-video-link" data-appt-id="${appt.id}">🔗 Get Link</button>`
@@ -6513,6 +6529,7 @@ function renderVaccineDueAlerts(vaccines) {
         if(state.showPricingModal&&typeof renderPricingModal==='function')mh+=renderPricingModal();
         if(state.showNotifSettings&&typeof renderNotifSettings==='function')mh+=renderNotifSettings();
         if(state.show2FA&&typeof render2FASetup==='function')mh+=render2FASetup();
+        if(state._showPasswordReset)mh+=`<div class="broadcast-overlay" data-action="close-password-reset"><div class="broadcast-card" onclick="event.stopPropagation()" style="max-width:400px;"><div style="font-family:'Fraunces',serif;font-size:18px;font-weight:600;margin-bottom:16px;">🔒 Set New Password</div><div class="form-group"><label>New Password</label><input type="password" data-field="reset-new-password" placeholder="Enter new password (min 6 characters)" style="width:100%;"></div><div class="form-group"><label>Confirm Password</label><input type="password" data-field="reset-confirm-password" placeholder="Confirm new password" style="width:100%;"></div><div style="display:flex;gap:10px;margin-top:8px;"><button class="btn btn-primary" data-action="save-new-password" style="flex:1;">Update Password</button><button class="btn btn-secondary" data-action="close-password-reset">Cancel</button></div></div></div>`;
         var mc=document.getElementById('modal-overlay-container');if(mc)mc.remove();
         if(mh){var c=document.createElement('div');c.id='modal-overlay-container';c.innerHTML=mh;document.body.appendChild(c);}
       },50);
@@ -6541,8 +6558,8 @@ function renderVaccineDueAlerts(vaccines) {
         if (action === 'toggle-dark-mode') { toggleDarkMode(); return; }
         if (action === 'toggle-faq') { var aid=target.dataset.articleId; var ael=document.querySelector('.kb-article[data-article-id="'+aid+'"]'); if(ael){var ac=ael.querySelector('.kb-article-content');var ai=ael.querySelector('.kb-toggle-icon');if(ac)ac.style.display=ac.style.display==='none'?'block':'none';if(ai)ai.textContent=ac&&ac.style.display==='none'?'+':'\u2212';} return; }
         if (action === 'filter-faq-category') { state.faqCategory=target.dataset.category||'All'; render(); return; }
-        if (action === 'open-lightbox') { state.showLightbox=true;state.lightboxUrl=target.dataset.url||'';state.lightboxTitle=target.dataset.title||'';render();return; }
-        if (action === 'close-lightbox') { state.showLightbox=false;render();return; }
+        if (action === 'open-lightbox') { state.showLightbox=true;state.lightboxUrl=target.dataset.url||'';state.lightboxTitle=target.dataset.title||'';var mc=document.getElementById('modal-overlay-container');if(mc)mc.remove();if(typeof renderLightbox==='function'){var c=document.createElement('div');c.id='modal-overlay-container';c.innerHTML=renderLightbox();document.body.appendChild(c);}return; }
+        if (action === 'close-lightbox') { state.showLightbox=false;var mc=document.getElementById('modal-overlay-container');if(mc)mc.remove();return; }
         if (action === 'show-survey') { state.showSurvey=true;state.surveyRating=0;render();return; }
         if (action === 'set-survey-rating') { state.surveyRating=parseInt(target.dataset.rating||'0');document.querySelectorAll('.survey-star').forEach(function(s){s.textContent=parseInt(s.dataset.rating)<=state.surveyRating?'\u2605':'\u2606';s.style.color=parseInt(s.dataset.rating)<=state.surveyRating?'#f39c12':'#ccc';});return; }
         if (action === 'submit-survey') { var fb=document.querySelector('[data-field="survey-feedback"]')?.value||'';if(!state.surveyRating){showToast('Please select a rating','error');return;}saveSurvey(state.caseId,state.currentCase?.assigned_buddy_id,state.surveyRating,fb).then(function(){state.showSurvey=false;showToast('Thank you for your feedback!','success');render();});return; }
@@ -6550,6 +6567,9 @@ function renderVaccineDueAlerts(vaccines) {
         if (action === 'toggle-handoff-form') { state.showHandoffForm=!state.showHandoffForm;render();return; }
         if (action === 'save-handoff') { var tbid=document.querySelector('[data-field="handoff-to-buddy"]')?.value;if(!tbid){showToast('Select receiving Buddy','error');return;}saveHandoffNote(state.caseId,tbid,{active_issues:document.querySelector('[data-field="handoff-active-issues"]')?.value||'',watch_items:document.querySelector('[data-field="handoff-watch-items"]')?.value||'',client_preferences:document.querySelector('[data-field="handoff-client-prefs"]')?.value||'',additional_notes:document.querySelector('[data-field="handoff-notes"]')?.value||''}).then(function(){state.showHandoffForm=false;showToast('Handoff saved!','success');loadHandoffNotes(state.caseId).then(function(){render();});});return; }
         if (action === 'copy-referral-code') { navigator.clipboard.writeText(state.profile?.referral_code||'').then(function(){showToast('Copied!','success');});return; }
+        if (action === 'close-password-reset') { state._showPasswordReset=false;render();return; }
+        if (action === 'toggle-mute-case') { var cid=target.dataset.caseId;if(!cid)return;var muted=state.notificationSettings.muted_case_ids||[];if(muted.includes(cid)){state.notificationSettings.muted_case_ids=muted.filter(function(id){return id!==cid;});showToast('Notifications unmuted for this case','success');}else{state.notificationSettings.muted_case_ids=[].concat(muted,[cid]);showToast('Notifications muted for this case','info');}saveNotificationSettings().catch(function(){});render();return; }
+        if (action === 'save-new-password') { var np=document.querySelector('[data-field="reset-new-password"]')?.value||'';var cp=document.querySelector('[data-field="reset-confirm-password"]')?.value||'';if(np.length<6){showToast('Password must be at least 6 characters','error');return;}if(np!==cp){showToast('Passwords do not match','error');return;}sb.auth.updateUser({password:np}).then(function(r){if(r.error)throw r.error;state._showPasswordReset=false;showToast('Password updated successfully!','success');render();}).catch(function(e){showToast(e.message||'Failed to update password','error');});return; }
         if (action === 'download-ics') { var apt=state.appointments.find(function(a){return a.id===target.dataset.appointmentId;});if(apt){var ics=generateICS(apt,state.currentCase?.pets?.name||'Pet');var b=new Blob([ics],{type:'text/calendar'});var u=URL.createObjectURL(b);var dl=document.createElement('a');dl.href=u;dl.download='vet-buddies-appt.ics';dl.click();URL.revokeObjectURL(u);showToast('Calendar event downloaded!','success');}return; }
         if (action === 'export-care-plan-pdf') { if(state.carePlan&&state.currentCase){showToast('Generating PDF...','info');generateCarePlanPDF(state.carePlan,state.currentCase).then(function(bu){var url=URL.createObjectURL(bu);var dl=document.createElement('a');dl.href=url;dl.download='care-plan-'+(state.currentCase.pets?.name||'pet')+'.pdf';dl.click();URL.revokeObjectURL(url);showToast('PDF downloaded!','success');}).catch(function(){showToast('PDF failed','error');});}return; }
         if (action === 'checkout-stripe') { var pid=target.dataset.priceId;if(!pid)return;showToast('Redirecting...','info');var origin=window.location.origin;callEdgeFunction('stripe-checkout',{price_id:pid,success_url:origin+'/?billing=success',cancel_url:origin+'/'}).then(function(r){if(r?.url)window.location.href=r.url;}).catch(function(err){showToast(err.message||'Checkout failed','error');});return; }
@@ -7768,7 +7788,7 @@ function renderVaccineDueAlerts(vaccines) {
               const targetCases = tierFilter === 'all' ? state.cases : state.cases.filter(c => c.subscription_tier === tierFilter);
               let sent = 0;
               for (const c of targetCases) {
-                await sb.from('messages').insert({ case_id: c.id, sender_id: state.profile.id, content: `📢 [Broadcast] ${msg}`, sender_role: state.profile.role });
+                await sb.from('messages').insert({ case_id: c.id, sender_id: state.profile.id, content: `📢 [Broadcast] ${msg}`, sender_role: state.profile.role, thread_type: 'client', created_at: new Date().toISOString() });
                 sent++;
               }
               state.showBroadcast = false;
@@ -8395,11 +8415,20 @@ function renderVaccineDueAlerts(vaccines) {
     }
 
     async function initApp() {
+      // Restore dark mode from localStorage before render to avoid flash
+      try { if (localStorage.getItem('vetbuddies_dark_mode') === '1') { state.darkMode = true; document.documentElement.setAttribute('data-theme', 'dark'); } } catch(e) {}
+
       // Handle Stripe return redirect
       const urlParams = new URLSearchParams(window.location.search);
       if (urlParams.get('billing') === 'success') {
         window.history.replaceState({}, '', window.location.pathname);
         state._billingSuccessToast = true;
+      }
+
+      // Handle password reset redirect
+      if (urlParams.get('reset') === 'true' || window.location.hash.includes('type=recovery')) {
+        window.history.replaceState({}, '', window.location.pathname);
+        state._showPasswordReset = true;
       }
 
       // Capture referral code from URL — check if referrer is a vet buddy
@@ -8439,6 +8468,7 @@ function renderVaccineDueAlerts(vaccines) {
           if (session) state.user = session.user;
         } else if (event === 'SIGNED_OUT') {
           if (state.realtimeChannel) { sb.removeChannel(state.realtimeChannel); state.realtimeChannel = null; }
+          if (state.globalNotifChannel) { sb.removeChannel(state.globalNotifChannel); state.globalNotifChannel = null; }
           state.user = null;
           state.profile = null;
           state.cases = [];
