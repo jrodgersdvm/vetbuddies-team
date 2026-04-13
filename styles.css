@@ -4361,3 +4361,112 @@
     .co-owner-invite-banner .invite-actions { display: flex; gap: 8px; margin-top: 10px; }
     .co-owner-badge-inline { display: inline-block; font-size: 10px; padding: 1px 6px; border-radius: 99px; background: #dbeafe; color: #1d4ed8; margin-left: 6px; vertical-align: middle; font-weight: 500; }
 
+    /* ── Limited Time Offer (LTO) ──────────────────────────── */
+    .lto-banner {
+      background: linear-gradient(135deg, #4F152F 0%, #7B2D50 50%, #4F152F 100%);
+      color: white;
+      border-radius: 12px;
+      padding: 20px 24px;
+      margin-bottom: 20px;
+      text-align: center;
+      position: relative;
+      overflow: hidden;
+    }
+    .lto-banner::before {
+      content: '';
+      position: absolute;
+      top: -50%;
+      left: -50%;
+      width: 200%;
+      height: 200%;
+      background: radial-gradient(circle, rgba(255,255,255,0.05) 0%, transparent 70%);
+      animation: lto-shimmer 3s ease-in-out infinite;
+    }
+    @keyframes lto-shimmer {
+      0%, 100% { transform: translateX(-30%) translateY(-30%); }
+      50% { transform: translateX(30%) translateY(30%); }
+    }
+    .lto-banner-title {
+      font-family: 'Fraunces', serif;
+      font-size: 20px;
+      font-weight: 700;
+      margin-bottom: 6px;
+      position: relative;
+    }
+    .lto-banner-subtitle {
+      font-size: 13px;
+      opacity: 0.9;
+      margin-bottom: 12px;
+      position: relative;
+    }
+    .lto-countdown {
+      display: flex;
+      justify-content: center;
+      gap: 12px;
+      position: relative;
+    }
+    .lto-countdown-block {
+      background: rgba(255,255,255,0.15);
+      border-radius: 8px;
+      padding: 8px 12px;
+      min-width: 54px;
+    }
+    .lto-countdown-value {
+      font-size: 22px;
+      font-weight: 700;
+      font-variant-numeric: tabular-nums;
+      line-height: 1.2;
+    }
+    .lto-countdown-label {
+      font-size: 10px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      opacity: 0.8;
+    }
+    .lto-badge {
+      display: inline-block;
+      background: linear-gradient(135deg, #4F152F, #7B2D50);
+      color: white;
+      font-size: 10px;
+      font-weight: 700;
+      padding: 3px 10px;
+      border-radius: 20px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      margin-bottom: 6px;
+    }
+    .lto-price-original {
+      text-decoration: line-through;
+      color: var(--text-secondary);
+      font-size: 14px;
+      font-weight: 400;
+      opacity: 0.7;
+    }
+    .lto-price-new {
+      font-size: 32px;
+      font-weight: 700;
+      color: #4F152F;
+    }
+    .lto-savings {
+      display: inline-block;
+      background: #fef3c7;
+      color: #92400e;
+      font-size: 11px;
+      font-weight: 600;
+      padding: 2px 8px;
+      border-radius: 12px;
+      margin-top: 4px;
+    }
+    .lto-lock-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      background: #f0faf9;
+      color: #336026;
+      font-size: 11px;
+      font-weight: 600;
+      padding: 4px 10px;
+      border-radius: 20px;
+      margin-top: 8px;
+    }
+

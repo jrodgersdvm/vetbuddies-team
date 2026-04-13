@@ -2105,6 +2105,9 @@ async function calculateBuddyScorecard(buddyId) {
       'price_1T7Vw5CoogKs3SGPv92mnQvk': 'Buddy',
       'price_1T7VwjCoogKs3SGPL9GcM0FL': 'Buddy+',
       'price_1T7VxVCoogKs3SGPwcXrK0kI': 'Buddy VIP',
+      // LTO price IDs
+      [CONFIG.LTO_PRICES.buddy.priceId]: 'Buddy',
+      [CONFIG.LTO_PRICES.buddy_plus.priceId]: 'Buddy+',
     };
 
     // Trial helpers (getTrialDaysRemaining, isTrialActive, etc.) are in utils.js
@@ -2561,24 +2564,36 @@ async function calculateBuddyScorecard(buddyId) {
       }
 
       // Not subscribed — show plan picker (value-first, pricing subtle)
+      const _ltoActive = isLTOActive();
+      const _planKeyMap = { 'price_1T7Vw5CoogKs3SGPv92mnQvk': 'buddy', 'price_1T7VwjCoogKs3SGPL9GcM0FL': 'buddy_plus', 'price_1T7VxVCoogKs3SGPwcXrK0kI': 'buddy_vip' };
       return `
         <div class="card">
           <div class="card-title" style="margin-bottom: 4px;">🐾 Get Started with Vet Buddies</div>
           <div style="color: var(--text-secondary); font-size: 14px; margin-bottom: 8px;">Your pet's own Living Care Plan — built and maintained by a dedicated trained veterinary professional, with Dr. Rodgers as your clinical safety net.</div>
           <div style="color: var(--text-secondary); font-size: 13px; margin-bottom: 20px;">Choose the level of care that fits your pet's needs:</div>
+          ${_ltoActive ? renderLTOCountdownBanner() : ''}
           <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px;" class="plans-grid">
-            ${STRIPE_PLANS.map(plan => `
-              <div style="border: 2px solid ${plan.highlight ? 'var(--primary)' : 'var(--border)'}; border-radius: 12px; padding: 20px; position: relative; ${plan.highlight ? 'background: linear-gradient(135deg, #f0faf9 0%, #fff 100%);' : ''}">
+            ${STRIPE_PLANS.map(plan => {
+              const _pk = _planKeyMap[plan.id] || 'buddy_vip';
+              const _pr = getActivePricing(_pk);
+              const _priceHtml = _pr.isLTO
+                ? `<div class="lto-badge" style="margin-top:8px;">Limited Time</div>
+                   <div style="margin-top:4px;"><span class="lto-price-original">${_pr.regularPrice}/mo</span></div>
+                   <div style="font-size:22px;font-weight:700;color:#4F152F;">${_pr.price}<span style="font-size:13px;font-weight:400;color:var(--text-secondary);">/mo</span></div>
+                   <div class="lto-savings">Save $${(_pr.regularAmount - _pr.amount).toFixed(2)}/mo</div>`
+                : `<div style="text-align: center; margin-top: 8px; font-size: 12px; color: var(--text-secondary);">${_pr.price}/mo</div>`;
+              return `
+              <div style="border: 2px solid ${plan.highlight ? 'var(--primary)' : 'var(--border)'}; border-radius: 12px; padding: 20px; position: relative; ${plan.highlight ? 'background: linear-gradient(135deg, #f0faf9 0%, #fff 100%);' : ''} ${_pr.isLTO ? 'border-top: 3px solid #4F152F;' : ''}">
                 ${plan.highlight ? '<div style="position:absolute;top:-12px;left:50%;transform:translateX(-50%);background:var(--primary);color:white;font-size:11px;font-weight:700;padding:3px 12px;border-radius:20px;white-space:nowrap;">MOST POPULAR</div>' : ''}
                 <div style="font-size: 22px; margin-bottom: 6px;">${plan.emoji}</div>
                 <div style="font-size: 17px; font-weight: 700; color: #336026;">${plan.name}</div>
                 <ul style="list-style: none; padding: 0; margin: 12px 0 16px; font-size: 13px; color: var(--text-secondary);">
                   ${plan.features.map(f => `<li style="padding: 3px 0;">✓ ${f}</li>`).join('')}
                 </ul>
-                <button class="btn ${plan.highlight ? 'btn-primary' : 'btn-secondary'}" data-action="subscribe" data-price-id="${plan.id}" style="width: 100%; font-size: 14px;">Get Started</button>
-                <div style="text-align: center; margin-top: 8px; font-size: 12px; color: var(--text-secondary);">${plan.price}/mo</div>
-              </div>
-            `).join('')}
+                <button class="btn ${plan.highlight ? 'btn-primary' : 'btn-secondary'}" data-action="subscribe" data-price-id="${_pr.priceId}" style="width: 100%; font-size: 14px;">${_pr.isLTO ? 'Lock In This Rate' : 'Get Started'}</button>
+                ${!_pr.isLTO ? `<div style="text-align: center; margin-top: 8px; font-size: 12px; color: var(--text-secondary);">${_pr.price}/mo</div>` : ''}
+              </div>`;
+            }).join('')}
           </div>
         </div>`;
     }
@@ -4781,12 +4796,14 @@ async function calculateBuddyScorecard(buddyId) {
 
       let content = '';
       if (step === 1) {
+        const _onboardLTO = isLTOActive();
         content = `
           <div style="text-align:center;margin-bottom:24px;">
             <div style="font-size:48px;margin-bottom:12px;">🐾</div>
             <div style="font-size:22px;font-weight:700;color:#336026;margin-bottom:8px;">Welcome to Vet Buddies!</div>
             <div style="color:var(--text-secondary);">Every pet deserves a Buddy. Let's get you set up.</div>
           </div>
+          ${_onboardLTO ? renderLTOCountdownBanner() : ''}
           <div class="card" style="border:2px solid var(--primary);background:linear-gradient(135deg,#f0faf9 0%,#fff 100%);margin-bottom:20px;text-align:center;">
             <div style="font-size:28px;margin-bottom:8px;">🎉</div>
             <div style="font-size:18px;font-weight:700;color:#336026;margin-bottom:6px;">Try Vet Buddies Free for ${TRIAL_DURATION_DAYS} Days</div>
@@ -5802,44 +5819,114 @@ function renderHealthTimeline() {
   `);
 }
 
+function renderLTOCountdownBanner() {
+  const remaining = getLTOTimeRemaining();
+  if (!remaining) return '';
+  return `
+    <div class="lto-banner" id="lto-countdown-banner">
+      <div class="lto-banner-title">Limited Time Offer</div>
+      <div class="lto-banner-subtitle">Lock in your discounted rate — offer ends soon!</div>
+      <div class="lto-countdown" id="lto-countdown">
+        <div class="lto-countdown-block">
+          <div class="lto-countdown-value" id="lto-days">${remaining.days}</div>
+          <div class="lto-countdown-label">Days</div>
+        </div>
+        <div class="lto-countdown-block">
+          <div class="lto-countdown-value" id="lto-hours">${String(remaining.hours).padStart(2, '0')}</div>
+          <div class="lto-countdown-label">Hours</div>
+        </div>
+        <div class="lto-countdown-block">
+          <div class="lto-countdown-value" id="lto-minutes">${String(remaining.minutes).padStart(2, '0')}</div>
+          <div class="lto-countdown-label">Minutes</div>
+        </div>
+        <div class="lto-countdown-block">
+          <div class="lto-countdown-value" id="lto-seconds">${String(remaining.seconds).padStart(2, '0')}</div>
+          <div class="lto-countdown-label">Seconds</div>
+        </div>
+      </div>
+    </div>`;
+}
+
+// Live-update the LTO countdown every second without full re-render
+let _ltoTimerInterval = null;
+function startLTOCountdownTimer() {
+  if (_ltoTimerInterval) clearInterval(_ltoTimerInterval);
+  _ltoTimerInterval = setInterval(() => {
+    const remaining = getLTOTimeRemaining();
+    const daysEl = document.getElementById('lto-days');
+    if (!daysEl) return; // countdown not in DOM
+    if (!remaining) {
+      clearInterval(_ltoTimerInterval);
+      _ltoTimerInterval = null;
+      render(); // LTO expired — re-render to remove offer UI
+      return;
+    }
+    daysEl.textContent = remaining.days;
+    document.getElementById('lto-hours').textContent = String(remaining.hours).padStart(2, '0');
+    document.getElementById('lto-minutes').textContent = String(remaining.minutes).padStart(2, '0');
+    document.getElementById('lto-seconds').textContent = String(remaining.seconds).padStart(2, '0');
+  }, 1000);
+}
+
 function renderPricingModal() {
+  const ltoActive = isLTOActive();
+  const buddyPricing = getActivePricing('buddy');
+  const buddyPlusPricing = getActivePricing('buddy_plus');
+
   const plans = [
     {
       name: 'Buddy',
-      price: '$99',
-      priceId: 'price_1T7Vw5CoogKs3SGPv92mnQvk',
+      key: 'buddy',
+      pricing: buddyPricing,
+      priceId: buddyPricing.priceId,
       description: '/month',
       features: ['1 check-in per month from your Vet Buddy', 'Digital Living Care Plan', 'Care coordination between vet visits'],
       popular: false
     },
     {
       name: 'Buddy+',
-      price: '$149',
-      priceId: 'price_1T7VwjCoogKs3SGPL9GcM0FL',
+      key: 'buddy_plus',
+      pricing: buddyPlusPricing,
+      priceId: buddyPlusPricing.priceId,
       description: '/month',
       features: ['1 check-in per week from your Vet Buddy', 'Digital Living Care Plan', 'Care coordination between vet visits'],
       popular: true
     },
     {
       name: 'Buddy VIP',
-      price: '$279',
-      priceId: 'price_1T7VxVCoogKs3SGPwcXrK0kI',
+      key: 'buddy_vip',
+      pricing: getActivePricing('buddy_vip'),
+      priceId: CONFIG.STRIPE_PLANS.buddy_vip,
       description: '/month',
       features: ['Weekly check-ins from your Vet Buddy', 'Monthly check-ins from a veterinarian', 'Digital Living Care Plan', 'Care coordination between vet visits'],
       popular: false
     }
   ];
 
-  const cardsHtml = plans.map(plan => `
-    <div class="card" style="padding: 24px; display: flex; flex-direction: column; position: relative; ${plan.popular ? 'border: 2px solid var(--primary); box-shadow: 0 8px 24px rgba(104, 149, 98, 0.15);' : 'border: 1px solid var(--border);'}">
+  const ltoCountdownHtml = ltoActive ? renderLTOCountdownBanner() : '';
+
+  const cardsHtml = plans.map(plan => {
+    const p = plan.pricing;
+    const pricingHtml = p.isLTO
+      ? `<div class="lto-badge">Lock in this rate</div>
+         <div style="display: flex; align-items: baseline; gap: 8px; margin-bottom: 4px;">
+           <span class="lto-price-new">${p.price}</span>
+           <span style="color: var(--text-secondary); font-size: 13px;">${plan.description}</span>
+         </div>
+         <div class="lto-price-original">${p.regularPrice}/month</div>
+         <div class="lto-savings">Save $${(p.regularAmount - p.amount).toFixed(2)}/mo</div>`
+      : `<div style="display: flex; align-items: baseline; gap: 4px; margin-bottom: 8px;">
+           <span style="font-size: 32px; font-weight: 700; color: #336026;">${p.price}</span>
+           <span style="color: var(--text-secondary); font-size: 13px;">${plan.description}</span>
+         </div>`;
+
+    return `
+    <div class="card" style="padding: 24px; display: flex; flex-direction: column; position: relative; ${plan.popular ? 'border: 2px solid var(--primary); box-shadow: 0 8px 24px rgba(104, 149, 98, 0.15);' : 'border: 1px solid var(--border);'} ${p.isLTO ? 'border-top: 3px solid #4F152F;' : ''}">
       ${plan.popular ? '<div style="position: absolute; top: -12px; right: 20px; background: var(--primary); color: white; padding: 4px 12px; border-radius: 20px; font-size: 11px; font-weight: 700;">Most Popular</div>' : ''}
 
       <div style="margin-bottom: 20px;">
         <h3 style="font-family: 'Fraunces', serif; font-size: 24px; font-weight: 700; color: #336026; margin-bottom: 4px;">${plan.name}</h3>
-        <div style="display: flex; align-items: baseline; gap: 4px; margin-bottom: 8px;">
-          <span style="font-size: 32px; font-weight: 700; color: #336026;">${plan.price}</span>
-          <span style="color: var(--text-secondary); font-size: 13px;">${plan.description}</span>
-        </div>
+        ${pricingHtml}
       </div>
 
       <ul style="flex: 1; margin-bottom: 20px; list-style: none;">
@@ -5851,11 +5938,12 @@ function renderPricingModal() {
         `).join('')}
       </ul>
 
-      <button class="btn-primary" data-action="checkout-stripe" data-price-id="${plan.priceId}" style="width: 100%; padding: 12px; ${plan.popular ? '' : ''}">
-        Get Started
+      <button class="btn-primary" data-action="checkout-stripe" data-price-id="${plan.priceId}" style="width: 100%; padding: 12px;">
+        ${p.isLTO ? 'Lock In This Rate' : 'Get Started'}
       </button>
-    </div>
-  `).join('');
+      ${p.isLTO ? '<div class="lto-lock-badge" style="justify-content:center;margin-top:8px;">🔒 Rate locked for your subscription</div>' : ''}
+    </div>`;
+  }).join('');
 
   return `
     <div class="pricing-modal" style="position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.7); display: flex; align-items: center; justify-content: center; z-index: 1000; padding: 20px;">
@@ -5866,6 +5954,7 @@ function renderPricingModal() {
           <p style="color: var(--text-secondary);">Pick the perfect Vet Buddies plan for your pet.</p>
         </div>
         <div style="padding: 32px 24px;">
+          ${ltoCountdownHtml}
           <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 24px;">
             ${cardsHtml}
           </div>
@@ -6653,6 +6742,10 @@ function renderVaccineDueAlerts(vaccines) {
       app.innerHTML = html;
 
       // ── Post-render hooks ──────────────────────────────────
+      // LTO countdown timer — start ticking if countdown is visible
+      if (document.getElementById('lto-countdown-banner')) {
+        startLTOCountdownTimer();
+      }
       // Chart.js — vitals weight chart
       const vitalsCanvas = document.getElementById('vitals-chart');
       if (vitalsCanvas && state.petVitals.length >= 2) {
@@ -6790,7 +6883,7 @@ function renderVaccineDueAlerts(vaccines) {
         if (action === 'save-new-password') { var np=document.querySelector('[data-field="reset-new-password"]')?.value||'';var cp=document.querySelector('[data-field="reset-confirm-password"]')?.value||'';if(np.length<6){showToast('Password must be at least 6 characters','error');return;}if(np!==cp){showToast('Passwords do not match','error');return;}sb.auth.updateUser({password:np}).then(function(r){if(r.error)throw r.error;state._showPasswordReset=false;showToast('Password updated successfully!','success');render();}).catch(function(e){showToast(e.message||'Failed to update password','error');});return; }
         if (action === 'download-ics') { var apt=state.appointments.find(function(a){return a.id===target.dataset.appointmentId;});if(apt){var ics=generateICS(apt,state.currentCase?.pets?.name||'Pet');var b=new Blob([ics],{type:'text/calendar'});var u=URL.createObjectURL(b);var dl=document.createElement('a');dl.href=u;dl.download='vet-buddies-appt.ics';dl.click();URL.revokeObjectURL(u);showToast('Calendar event downloaded!','success');}return; }
         if (action === 'export-care-plan-pdf') { if(state.carePlan&&state.currentCase){showToast('Generating PDF...','info');generateCarePlanPDF(state.carePlan,state.currentCase).then(function(bu){var url=URL.createObjectURL(bu);var dl=document.createElement('a');dl.href=url;dl.download='care-plan-'+(state.currentCase.pets?.name||'pet')+'.pdf';dl.click();URL.revokeObjectURL(url);showToast('PDF downloaded!','success');}).catch(function(){showToast('PDF failed','error');});}return; }
-        if (action === 'checkout-stripe') { var pid=target.dataset.priceId;if(!pid)return;showToast('Redirecting...','info');var origin=window.location.origin;callEdgeFunction('stripe-checkout',{price_id:pid,success_url:origin+'/?billing=success',cancel_url:origin+'/'}).then(function(r){if(r?.url)window.location.href=r.url;}).catch(function(err){showToast(err.message||'Checkout failed','error');});return; }
+        if (action === 'checkout-stripe') { var pid=target.dataset.priceId;if(!pid)return;showToast('Redirecting...','info');var origin=window.location.origin;var checkoutPayload={price_id:pid,success_url:origin+'/?billing=success',cancel_url:origin+'/'};if(isLTOActive()){checkoutPayload.lto_initiated_at=new Date().toISOString();checkoutPayload.lto_locked_rate=true;}callEdgeFunction('stripe-checkout',checkoutPayload).then(function(r){if(r?.url)window.location.href=r.url;}).catch(function(err){showToast(err.message||'Checkout failed','error');});return; }
         if (action === 'show-pricing') { state.showPricingModal=true;render();return; }
         if (action === 'close-pricing') { state.showPricingModal=false;render();return; }
         if (action === 'show-notif-settings') { state.showNotifSettings=true;state.showNotifications=false;render();return; }
@@ -6939,11 +7032,16 @@ function renderVaccineDueAlerts(vaccines) {
             target.disabled = true;
             try {
               const origin = window.location.origin;
-              const { url } = await callEdgeFunction('stripe-checkout', {
+              const checkoutBody = {
                 price_id: priceId,
                 success_url: `${origin}/?billing=success`,
                 cancel_url: `${origin}/`,
-              });
+              };
+              if (isLTOActive()) {
+                checkoutBody.lto_initiated_at = new Date().toISOString();
+                checkoutBody.lto_locked_rate = true;
+              }
+              const { url } = await callEdgeFunction('stripe-checkout', checkoutBody);
               window.location.href = url;
             } catch (err) {
               showToast(err.message || 'Could not start checkout', 'error');

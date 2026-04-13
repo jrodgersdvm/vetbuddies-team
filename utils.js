@@ -155,3 +155,65 @@ function hasWriteAccess(profile) {
 function hasReadAccess(profile) {
   return !!profile?.subscription_status && profile.subscription_status !== 'none';
 }
+
+// ── Limited Time Offer (LTO) Helpers ─────────────────────
+function getLTOExpiry() {
+  if (!CONFIG.LTO_START) return null;
+  const start = new Date(CONFIG.LTO_START);
+  if (isNaN(start.getTime())) return null;
+  return new Date(start.getTime() + CONFIG.LTO_DURATION_HOURS * 60 * 60 * 1000);
+}
+
+function isLTOActive() {
+  const expiry = getLTOExpiry();
+  if (!expiry) return false;
+  const now = new Date();
+  const start = new Date(CONFIG.LTO_START);
+  return now >= start && now < expiry;
+}
+
+function getLTOTimeRemaining() {
+  const expiry = getLTOExpiry();
+  if (!expiry) return null;
+  const diff = expiry.getTime() - Date.now();
+  if (diff <= 0) return null;
+  const days = Math.floor(diff / (1000 * 60 * 60 * 24));
+  const hours = Math.floor((diff % (1000 * 60 * 60 * 24)) / (1000 * 60 * 60));
+  const minutes = Math.floor((diff % (1000 * 60 * 60)) / (1000 * 60));
+  const seconds = Math.floor((diff % (1000 * 60)) / 1000);
+  return { days, hours, minutes, seconds, totalMs: diff };
+}
+
+function getActivePricing(planKey) {
+  const ltoEntry = CONFIG.LTO_PRICES[planKey];
+  const regular = CONFIG.LTO_REGULAR_PRICES[planKey];
+  if (!regular) return null;
+  if (isLTOActive() && ltoEntry) {
+    return {
+      isLTO: true,
+      price: ltoEntry.display,
+      amount: ltoEntry.amount,
+      priceId: ltoEntry.priceId,
+      regularPrice: regular.display,
+      regularAmount: regular.amount,
+    };
+  }
+  return {
+    isLTO: false,
+    price: regular.display,
+    amount: regular.amount,
+    priceId: CONFIG.STRIPE_PLANS[planKey],
+    regularPrice: regular.display,
+    regularAmount: regular.amount,
+  };
+}
+
+function formatLTOCountdown(remaining) {
+  if (!remaining) return '';
+  const parts = [];
+  if (remaining.days > 0) parts.push(`${remaining.days}d`);
+  parts.push(`${String(remaining.hours).padStart(2, '0')}h`);
+  parts.push(`${String(remaining.minutes).padStart(2, '0')}m`);
+  parts.push(`${String(remaining.seconds).padStart(2, '0')}s`);
+  return parts.join(' ');
+}
