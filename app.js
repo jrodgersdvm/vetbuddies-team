@@ -601,6 +601,11 @@
             state.onboardingStep = 2;
             navigate('onboarding');
           } else {
+            // Pre-load care plan + appointments for first case so dashboard has data immediately
+            const firstCase = state.cases[state.activePetIndex || 0] || state.cases[0];
+            if (firstCase) {
+              await Promise.all([loadCarePlan(firstCase.id), loadAppointments(firstCase.id)]);
+            }
             navigate('client-dashboard');
           }
           // Load client unread count + start global notifications + appointment reminders
@@ -2033,88 +2038,131 @@ async function calculateBuddyScorecard(buddyId) {
 
       const coOwnerInviteBanner = renderPendingCoOwnerInvites();
 
+      // ── Care Plan Dashboard Data ──
+      const lp = state.carePlan?.living_plan || emptyLivingCarePlan();
+      const cpRaw = state.carePlan || {};
+      const nextAppt = (state.appointments || []).find(a => a.status !== 'cancelled' && new Date(a.scheduled_at) >= new Date());
+      const activeGoals = (lp.active_care_goals || []).filter(g => g.status !== 'completed');
+      const completedGoals = (lp.active_care_goals || []).filter(g => g.status === 'completed');
+      const recentLog = [...(lp.engagement_log || [])].sort((a, b) => new Date(b.created_at) - new Date(a.created_at)).slice(0, 3);
+      const milestones = (lp.milestones_and_wins || []).slice(-3);
+
+      // Care plan summary fields
+      const summaryFields = [
+        ['Diagnoses', lp.diagnoses || cpRaw.diagnoses],
+        ['Allergies', lp.allergies || cpRaw.allergies],
+        ['Medications', lp.medications || (cpRaw.medications?.length ? cpRaw.medications.map(m => typeof m === 'string' ? m : m.name).join(', ') : null)],
+        ['Diet', lp.diet_notes || cpRaw.diet_notes],
+        ['Next Steps', lp.next_steps || cpRaw.next_steps],
+      ].filter(([, val]) => val && val !== '[]' && val !== 'null');
+
+      const hasCarePlan = summaryFields.length > 0 || activeGoals.length > 0 || lp.pet_profile;
+
       return renderLayout(`
         ${expiredBanner}
         ${trialBanner}
         ${welcomeBanner}
         ${coOwnerInviteBanner}
-        <div class="hero" style="display:flex; gap:24px; align-items:center; flex-wrap:wrap;">
+
+        <div style="display:flex; gap:16px; align-items:center; margin-bottom:16px; flex-wrap:wrap;">
           ${renderPetPhoto(pet, 'hero')}
           <div style="flex:1; min-width:0;">
-            <div class="hero-title" style="margin-bottom:4px;">👋 Welcome back, ${esc(state.profile.name)}</div>
-            <div class="hero-subtitle" style="margin-bottom:12px; font-size:18px; font-weight:500; color:#336026;">${emoji} ${esc(pet.name)}</div>
-            <div style="font-size:13px; color:var(--text-secondary);">${tier}</div>
+            <div style="font-size:14px; color:var(--text-secondary);">Welcome back, ${esc(state.profile.name)}</div>
+            <div style="font-size:22px; font-weight:700; color:#336026; font-family:'Fraunces',serif;">${emoji} ${esc(pet.name)}'s Care Plan</div>
+            ${buddy ? `<div style="font-size:13px; color:var(--text-secondary); margin-top:4px;">Vet Buddy: <strong>${esc(buddy.name)}</strong></div>` : ''}
+          </div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;">
+            <button class="btn btn-primary btn-small" data-action="nav-client-case" data-case-id="${petCase.id}" data-tab="messages" style="font-size:13px;">💬 Messages${state.unreadCount ? ' (' + state.unreadCount + ')' : ''}</button>
+            <button class="btn btn-secondary btn-small" data-action="nav-client-case" data-case-id="${petCase.id}" data-tab="careplan" style="font-size:13px;">📋 Full Care Plan</button>
           </div>
         </div>
 
         ${petSwitcher}
 
-        <div class="grid grid-2">
-          <div class="card">
-            <div class="card-title">Your Vet Buddy</div>
-            ${buddy ? `<div style="display: flex; gap: 16px; align-items: center; margin-top: 16px;">
-              ${renderAvatar(buddy.avatar_initials, buddy.avatar_color, 'md')}
-              <div>
-                <div style="font-weight: 600; color: #336026;">${esc(buddy.name)}</div>
-                <div style="font-size: 13px; color: var(--text-secondary); margin-bottom: 8px;">${esc(buddy.bio) || 'Caring vet buddy'}</div>
-                <div style="font-size: 12px; color: var(--text-secondary);">Response time: ${esc(buddy.response_time) || 'Within 24 hours'}</div>
-              </div>
-            </div>` : '<div style="padding: 16px; color: var(--text-secondary);">No buddy assigned yet — one will be assigned shortly!</div>'}
-          </div>
-          <div class="card">
-            <div class="card-title">Quick Stats</div>
-            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 16px;">
-              <div class="stat-card">
-                <div class="stat-value">📅</div>
-                <div class="stat-label">Next Appointment</div>
-                <div style="font-size: 13px; margin-top: 4px; color: #336026;">${(() => { const next = state.appointments.find(a => a.status !== 'cancelled' && new Date(a.scheduled_at) >= new Date()); return next ? formatDate(next.scheduled_at) : 'Not scheduled'; })()}</div>
-              </div>
-              <div class="stat-card">
-                <div class="stat-value">${state.unreadCount || 0}</div>
-                <div class="stat-label">Unread Messages</div>
-              </div>
+        ${nextAppt ? `
+        <div class="card" style="border-left:4px solid var(--primary);margin-bottom:16px;padding:14px 16px;">
+          <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;">
+            <div>
+              <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.5px;color:var(--primary);margin-bottom:2px;">Next Appointment</div>
+              <div style="font-size:15px;font-weight:600;color:#336026;">${formatDateTime(nextAppt.scheduled_at)}</div>
+              ${nextAppt.type ? `<div style="font-size:12px;color:var(--text-secondary);margin-top:2px;">${esc(nextAppt.type)}</div>` : ''}
             </div>
+            <button class="btn btn-secondary btn-small" data-action="nav-client-case" data-case-id="${petCase.id}" data-tab="appointments">View All</button>
+          </div>
+        </div>` : ''}
+
+        ${hasCarePlan ? `
+        <div class="card" style="margin-bottom:16px;">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
+            <div class="card-title" style="margin:0;">Care Summary</div>
+          </div>
+          ${lp.pet_profile ? `<div style="font-size:13px;line-height:1.6;color:var(--text-secondary);margin-bottom:12px;padding:10px 12px;background:var(--bg);border-radius:8px;">${esc(lp.pet_profile)}</div>` : ''}
+          ${summaryFields.length > 0 ? `<div style="display:grid;gap:0;">
+            ${summaryFields.map(([label, val]) => `
+              <div style="display:flex;gap:12px;padding:8px 0;border-bottom:1px solid var(--border);font-size:13px;">
+                <div style="min-width:110px;color:var(--text-secondary);font-weight:600;">${label}</div>
+                <div style="color:var(--text);line-height:1.5;">${esc(val)}</div>
+              </div>`).join('')}
+          </div>` : ''}
+        </div>` : `
+        <div class="card" style="margin-bottom:16px;text-align:center;padding:24px;">
+          <div style="font-size:32px;margin-bottom:8px;">📋</div>
+          <div style="font-weight:600;color:#336026;margin-bottom:4px;">Your Living Care Plan</div>
+          <div style="font-size:13px;color:var(--text-secondary);line-height:1.5;">Your Buddy will start building your pet's care plan after your first check-in. It will appear right here.</div>
+        </div>`}
+
+        ${activeGoals.length > 0 ? `
+        <div class="card" style="border-left:4px solid var(--green);margin-bottom:16px;">
+          <div class="card-title" style="margin-bottom:10px;">Active Care Goals</div>
+          ${activeGoals.map(g => `
+            <div style="display:flex;align-items:flex-start;gap:10px;padding:8px 0;border-bottom:1px solid var(--border);">
+              <div style="margin-top:2px;font-size:16px;">🎯</div>
+              <div style="flex:1;">
+                <div style="font-size:14px;font-weight:500;">${esc(g.goal_text)}</div>
+                <div style="font-size:11px;color:var(--text-secondary);margin-top:2px;">
+                  ${g.set_by_owner ? 'Set by you' : 'Set by Buddy'}${g.reviewed_at ? ' · Last reviewed ' + formatDate(g.reviewed_at) : ''}
+                </div>
+              </div>
+            </div>`).join('')}
+          ${completedGoals.length > 0 ? `<div style="font-size:12px;color:var(--green);margin-top:8px;font-weight:500;">${completedGoals.length} goal${completedGoals.length !== 1 ? 's' : ''} completed</div>` : ''}
+        </div>` : ''}
+
+        ${milestones.length > 0 ? `
+        <div class="card" style="border-left:4px solid var(--amber);margin-bottom:16px;background:linear-gradient(135deg,#fffde7 0%,#fff8e1 100%);">
+          <div class="card-title" style="margin-bottom:10px;">Recent Wins</div>
+          ${milestones.map(m => `
+            <div style="background:white;border-radius:8px;padding:10px 12px;margin-bottom:6px;border:1px solid #ffe082;">
+              <div style="font-weight:600;color:#f57f17;font-size:13px;">🌟 ${esc(m.title)}</div>
+              ${m.description ? `<div style="font-size:12px;margin-top:2px;color:var(--text-secondary);">${esc(m.description)}</div>` : ''}
+            </div>`).join('')}
+        </div>` : ''}
+
+        ${recentLog.length > 0 ? `
+        <div class="card" style="border-left:4px solid var(--purple);margin-bottom:16px;">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">
+            <div class="card-title" style="margin:0;">Recent Check-ins</div>
+            <button class="btn btn-secondary btn-small" data-action="nav-client-case" data-case-id="${petCase.id}" data-tab="careplan" style="font-size:11px;">View All</button>
+          </div>
+          ${recentLog.map(entry => `
+            <div style="padding:8px 0;border-bottom:1px solid var(--border);">
+              <div style="font-size:13px;line-height:1.5;">${esc(entry.entry_text)}</div>
+              <div style="font-size:11px;color:var(--text-secondary);margin-top:4px;">— ${esc(entry.created_by) || 'Buddy'} · ${entry.created_at ? formatDate(entry.created_at) : ''}</div>
+            </div>`).join('')}
+        </div>` : ''}
+
+        <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(100px, 1fr));gap:10px;margin-bottom:16px;">
+          <div class="card" style="padding:14px;text-align:center;cursor:pointer;" data-action="nav-client-case" data-case-id="${petCase.id}" data-tab="appointments">
+            <div style="font-size:20px;margin-bottom:4px;">🗓️</div><div style="font-weight:500;font-size:12px;color:#336026;">Appointments</div>
+          </div>
+          <div class="card" style="padding:14px;text-align:center;cursor:pointer;" data-action="nav-client-case" data-case-id="${petCase.id}" data-tab="records">
+            <div style="font-size:20px;margin-bottom:4px;">📁</div><div style="font-weight:500;font-size:12px;color:#336026;">Files</div>
+          </div>
+          <div class="card" style="padding:14px;text-align:center;cursor:pointer;" data-action="nav-add-pet">
+            <div style="font-size:20px;margin-bottom:4px;">➕</div><div style="font-weight:500;font-size:12px;color:#336026;">Add Pet</div>
           </div>
         </div>
 
         ${renderSubscriptionCard()}
-
-        ${(() => {
-          const rawTier = petCase.subscription_tier || 'Buddy';
-          const isBuddyPlus = rawTier === 'Buddy+' || rawTier === 'Buddy VIP';
-          const isVIP = rawTier === 'Buddy VIP';
-          return `<div class="card" style="margin-bottom:16px;">
-            <div class="card-title" style="margin-bottom:12px;">Your Plan Includes</div>
-            <div style="display:flex;flex-direction:column;gap:6px;">
-              <div style="font-size:13px;display:flex;align-items:center;gap:6px;"><span style="color:var(--green);">✓</span> ${rawTier === 'Buddy' ? '1 check-in per month' : '1 check-in per week'} from your Vet Buddy${rawTier === 'Buddy' ? ' · <a data-action="manage-billing" style="color:var(--primary);cursor:pointer;font-size:12px;">Upgrade to Buddy+ for weekly</a>' : ''}</div>
-              <div style="font-size:13px;display:flex;align-items:center;gap:6px;"><span style="color:var(--green);">✓</span> Digital Living Care Plan</div>
-              <div style="font-size:13px;display:flex;align-items:center;gap:6px;"><span style="color:var(--green);">✓</span> Care coordination between vet visits</div>
-              <div style="font-size:13px;display:flex;align-items:center;gap:6px;"><span style="color:${isVIP ? 'var(--green)' : 'var(--border)'};">${isVIP ? '✓' : '🔒'}</span> <span ${!isVIP ? 'style="color:var(--text-secondary);"' : ''}>Monthly check-ins from a veterinarian${!isVIP ? ' · <a data-action="manage-billing" style="color:var(--primary);cursor:pointer;font-size:12px;">Upgrade to Buddy VIP</a>' : ''}</span></div>
-            </div>
-          </div>`;
-        })()}
-
-        <div class="card">
-          <div class="card-title">Quick Navigation</div>
-          <div class="grid" style="margin-top: 16px;">
-            <div style="background:var(--bg);border-radius:8px;padding:16px;text-align:center;cursor:pointer;" data-action="nav-client-case" data-case-id="${petCase.id}" data-tab="messages">
-              <div style="font-size:24px;margin-bottom:8px;">💬</div><div style="font-weight:500;color:#336026;">Messages</div>
-            </div>
-            <div style="background:var(--bg);border-radius:8px;padding:16px;text-align:center;cursor:pointer;" data-action="nav-client-case" data-case-id="${petCase.id}" data-tab="careplan">
-              <div style="font-size:24px;margin-bottom:8px;">📋</div><div style="font-weight:500;color:#336026;">Care Plan</div>
-            </div>
-            <div style="background:var(--bg);border-radius:8px;padding:16px;text-align:center;cursor:pointer;" data-action="nav-client-case" data-case-id="${petCase.id}" data-tab="appointments">
-              <div style="font-size:24px;margin-bottom:8px;">🗓️</div><div style="font-weight:500;color:#336026;">Appointments</div>
-            </div>
-            <div style="background:var(--bg);border-radius:8px;padding:16px;text-align:center;cursor:pointer;" data-action="nav-client-case" data-case-id="${petCase.id}" data-tab="files">
-              <div style="font-size:24px;margin-bottom:8px;">📁</div><div style="font-weight:500;color:#336026;">Files</div>
-              <div style="font-size:11px;color:var(--text-secondary);margin-top:4px;">Upload medical records</div>
-            </div>
-            <div style="background:var(--bg);border-radius:8px;padding:16px;text-align:center;cursor:pointer;" data-action="nav-add-pet">
-              <div style="font-size:24px;margin-bottom:8px;">➕</div><div style="font-weight:500;color:#336026;">Add a Pet</div>
-            </div>
-          </div>
-        </div>
       `);
     }
 
@@ -7445,6 +7493,11 @@ function renderVaccineDueAlerts(vaccines) {
           case 'switch-active-pet': {
             const newIdx = parseInt(target.dataset.idx || '0');
             state.activePetIndex = Math.max(0, Math.min(newIdx, state.cases.length - 1));
+            // Reload care plan + appointments for the newly selected pet
+            const switchedCase = state.cases[state.activePetIndex];
+            if (switchedCase) {
+              Promise.all([loadCarePlan(switchedCase.id), loadAppointments(switchedCase.id)]).then(() => render());
+            }
             render();
             break;
           }
