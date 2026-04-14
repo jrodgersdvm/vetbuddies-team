@@ -2675,7 +2675,6 @@ async function calculateBuddyScorecard(buddyId) {
 
           <div class="form-group" style="margin-bottom: 20px;">
             <label>Pet Photo <span style="color: var(--text-secondary); font-weight: 400;">(optional)</span></label>
-            <input type="file" id="pet-photo-input" accept="image/*" style="display:none;">
             <div class="photo-upload-area" data-action="trigger-photo-upload">
               ${preview
                 ? `<img src="${preview}" class="photo-upload-preview" alt="Pet preview">`
@@ -3247,8 +3246,7 @@ async function calculateBuddyScorecard(buddyId) {
             ? 'Type a message... (press / for templates)'
             : 'Type a message...';
         html += `
-          <input type="file" id="msg-file-input" style="display:none;" accept="image/*,.pdf,.doc,.docx,.txt,.csv">
-          <input type="file" id="voice-file-input" style="display:none;" accept="audio/*">
+          <!-- file inputs are persistent in #persistent-file-inputs -->
           <div style="position:relative;">
             ${state.showCannedResponses && state.cannedResponses.length > 0 ? `
               <div class="canned-panel">
@@ -3533,7 +3531,7 @@ async function calculateBuddyScorecard(buddyId) {
       let html = `<div class="tab-content ${isVisible ? 'active' : ''}">`;
       html += `<div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:16px;">
         <div style="font-weight:600;">Documents & Files</div>
-        ${canUpload ? `<div><input type="file" id="doc-upload-input" style="display:none;" accept="image/*,.pdf,.doc,.docx,.txt,.csv,.xls,.xlsx"><button class="btn btn-primary btn-small" data-action="trigger-doc-upload">⬆️ Upload File</button></div>` : ''}
+        ${canUpload ? `<div><button class="btn btn-primary btn-small" data-action="trigger-doc-upload">⬆️ Upload File</button></div>` : ''}
       </div>`;
 
       // AI extraction in-progress banner
@@ -8921,6 +8919,7 @@ function renderVaccineDueAlerts(vaccines) {
         // Message file attachment
         if (e.target.id === 'msg-file-input' && e.target.files?.[0]) {
           window._pendingAttachment = e.target.files[0];
+          e.target.value = ''; // reset so same file can be re-selected
           render();
           return;
         }
@@ -9160,6 +9159,22 @@ function renderVaccineDueAlerts(vaccines) {
         loadUnreadCount().then(() => render());
       }
     });
+
+    // ── Persistent file inputs (outside render cycle for mobile compatibility) ──
+    // Mobile browsers cancel the file picker if the input element is destroyed
+    // by a re-render between the .click() call and the OS picker appearing.
+    (function initPersistentFileInputs() {
+      const container = document.createElement('div');
+      container.id = 'persistent-file-inputs';
+      container.style.cssText = 'position:absolute;width:0;height:0;overflow:hidden;';
+      container.innerHTML = `
+        <input type="file" id="doc-upload-input" accept="image/*,.pdf,.doc,.docx,.txt,.csv,.xls,.xlsx" capture="environment">
+        <input type="file" id="msg-file-input" accept="image/*,.pdf,.doc,.docx,.txt,.csv">
+        <input type="file" id="voice-file-input" accept="audio/*">
+        <input type="file" id="pet-photo-input" accept="image/*">
+      `;
+      document.body.appendChild(container);
+    })();
 
     attachEventListeners();
     initApp();
