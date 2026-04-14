@@ -9085,8 +9085,13 @@ function renderVaccineDueAlerts(vaccines) {
                 render();
               } catch (err) { console.error('Session restore failed:', err); }
             }, 0);
+          } else {
+            // No valid session — clear any stale auth data from localStorage
+            // This handles "Refresh Token Not Found" errors from expired/revoked tokens
+            setTimeout(() => {
+              sb.auth.signOut({ scope: 'local' });
+            }, 0);
           }
-          // If no session, login page is already showing — nothing to do
         } else if (event === 'SIGNED_IN') {
           if (session) state.user = session.user;
         } else if (event === 'SIGNED_OUT') {
