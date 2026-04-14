@@ -105,6 +105,12 @@
       aiExtractionDocName: '',
       showAiReviewModal: false,
       aiCheckedItems: {},
+      // Typing indicators
+      typingUsers: {},
+      _typingTimeout: null,
+      // Push notification prompt
+      showPushPromptBanner: false,
+      showPushPromptInPanel: false,
     };
 
     // ── HTML escape utility (prevents XSS in user-generated content) ──
