@@ -2154,7 +2154,7 @@ async function calculateBuddyScorecard(buddyId) {
           <div class="card" style="padding:14px;text-align:center;cursor:pointer;" data-action="nav-client-case" data-case-id="${petCase.id}" data-tab="appointments">
             <div style="font-size:20px;margin-bottom:4px;">🗓️</div><div style="font-weight:500;font-size:12px;color:#336026;">Appointments</div>
           </div>
-          <div class="card" style="padding:14px;text-align:center;cursor:pointer;" data-action="nav-client-case" data-case-id="${petCase.id}" data-tab="records">
+          <div class="card" style="padding:14px;text-align:center;cursor:pointer;" data-action="nav-client-case" data-case-id="${petCase.id}" data-tab="files">
             <div style="font-size:20px;margin-bottom:4px;">📁</div><div style="font-weight:500;font-size:12px;color:#336026;">Files</div>
           </div>
           <div class="card" style="padding:14px;text-align:center;cursor:pointer;" data-action="nav-add-pet">
