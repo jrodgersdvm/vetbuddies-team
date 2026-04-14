@@ -86,6 +86,7 @@
       showLightbox: false, lightboxUrl: '', lightboxTitle: '',
       showSurvey: false, surveyRating: 0, surveyTarget: null, surveys: [],
       faqArticles: [], faqSearch: '', faqCategory: 'All', expandedFaq: null,
+      kbMessages: [], kbConversationId: null, kbConversations: [], kbLoading: false, kbViewingConvId: null,
       auditLog: [], auditLogs: [], auditActionFilter: 'All', auditEntityFilter: 'All',
       handoffNotes: [], showHandoffForm: false,
       referralStats: { total: 0, converted: 0, pending: 0 },
@@ -1144,6 +1145,86 @@ async function loadFaqArticles() {
     console.error('Error loading FAQ articles:', err);
     showToast('Failed to load FAQ articles', 'error');
   }
+}
+
+async function loadKbConversation() {
+  if (!state.profile) return;
+  try {
+    // Load most recent conversation for this user
+    const { data: convs } = await sb.from('kb_conversations')
+      .select('id')
+      .eq('user_id', state.profile.id)
+      .order('updated_at', { ascending: false })
+      .limit(1);
+    if (convs && convs.length > 0) {
+      state.kbConversationId = convs[0].id;
+      const { data: msgs } = await sb.from('kb_messages')
+        .select('role, content, created_at')
+        .eq('conversation_id', state.kbConversationId)
+        .order('created_at', { ascending: true });
+      state.kbMessages = msgs || [];
+    } else {
+      state.kbConversationId = null;
+      state.kbMessages = [];
+    }
+  } catch (err) {
+    console.error('loadKbConversation error:', err);
+  }
+}
+
+async function loadKbAdminConversations() {
+  if (!state.profile || state.profile.role !== 'admin') return;
+  try {
+    // Anonymous: no user details included
+    const { data, error } = await sb.from('kb_conversations')
+      .select('id, title, created_at, updated_at')
+      .order('updated_at', { ascending: false })
+      .limit(50);
+    if (error) throw error;
+    state.kbConversations = data || [];
+  } catch (err) {
+    console.error('loadKbAdminConversations error:', err);
+  }
+}
+
+async function loadKbConversationMessages(convId) {
+  try {
+    const { data } = await sb.from('kb_messages')
+      .select('role, content, created_at')
+      .eq('conversation_id', convId)
+      .order('created_at', { ascending: true });
+    return data || [];
+  } catch (err) {
+    console.error('loadKbConversationMessages error:', err);
+    return [];
+  }
+}
+
+function scrollKbToBottom() {
+  const el = document.getElementById('kb-chat-messages');
+  if (el) el.scrollTop = el.scrollHeight;
+}
+
+async function sendKbMessage(content) {
+  if (!content.trim() || state.kbLoading) return;
+  state.kbMessages.push({ role: 'user', content: content.trim(), created_at: new Date().toISOString() });
+  state.kbLoading = true;
+  render();
+  scrollKbToBottom();
+  try {
+    const result = await callEdgeFunction('kb-chat', {
+      message: content.trim(),
+      conversation_id: state.kbConversationId || null,
+    });
+    state.kbConversationId = result.conversation_id;
+    state.kbMessages.push({ role: 'assistant', content: result.response, created_at: new Date().toISOString() });
+  } catch (err) {
+    console.error('kb-chat error:', err);
+    state.kbMessages.push({ role: 'assistant', content: 'Sorry, something went wrong. Please try again or message your Vet Buddy directly.', created_at: new Date().toISOString() });
+  }
+  state.kbLoading = false;
+  render();
+  scrollKbToBottom();
 }
 
 async function loadAuditLog(limit = 50) {
@@ -5350,6 +5431,7 @@ async function calculateBuddyScorecard(buddyId) {
           { label: 'Team', icon: '👥', action: 'nav-admin-team' },
           { label: 'Resources', icon: '📚', action: 'nav-admin-resources' },
           { label: 'Audit Log', icon: '📋', action: 'nav-audit-log' },
+          { label: 'AI Chats', icon: '🤖', action: 'nav-kb-admin' },
           { label: 'Scorecard', icon: '🏆', action: 'nav-buddy-scorecard' },
           { label: 'Surveys', icon: '⭐', action: 'nav-survey-results' },
         ],
@@ -5459,57 +5541,122 @@ async function calculateBuddyScorecard(buddyId) {
 
     // ═══ NEW FEATURE RENDER FUNCTIONS ═══
 function renderKnowledgeBase() {
-  const articles = state.faqArticles || [];
-  const categories = ['All', 'Getting Started', 'Care', 'Using the Portal', 'Billing'];
+  const messages = state.kbMessages || [];
 
-  const filteredArticles = articles.filter(article => {
-    const matchesSearch = !state.faqSearch || article.title.toLowerCase().includes(state.faqSearch.toLowerCase()) || article.content.toLowerCase().includes(state.faqSearch.toLowerCase());
-    const matchesCategory = state.faqCategory === 'All' || article.category === state.faqCategory;
-    return matchesSearch && matchesCategory;
-  });
-
-  const categoryTabsHtml = categories.map(cat => `
-    <button class="category-tab ${state.faqCategory === cat ? 'active' : ''}" data-action="filter-faq-category" data-category="${cat}">
-      ${cat}
-    </button>
-  `).join('');
-
-  const articlesHtml = filteredArticles.length > 0 ? filteredArticles.map((article, idx) => `
-    <div class="kb-article card" data-article-id="${article.id}">
-      <div class="kb-article-title" data-action="toggle-faq" data-article-id="${article.id}" style="cursor: pointer; padding: 16px; border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; align-items: center;">
-        <span style="font-weight: 600; color: var(--dark);">${esc(article.title)}</span>
-        <span style="color: var(--text-secondary); font-size: 18px;" class="kb-toggle-icon">+</span>
+  const messagesHtml = messages.length > 0 ? messages.map(m => {
+    const isUser = m.role === 'user';
+    return `<div style="display:flex;${isUser ? 'justify-content:flex-end;' : 'justify-content:flex-start;'}margin-bottom:12px;">
+      <div style="max-width:80%;padding:12px 16px;border-radius:${isUser ? '16px 16px 4px 16px' : '16px 16px 16px 4px'};background:${isUser ? 'var(--primary)' : 'white'};color:${isUser ? 'white' : 'var(--text)'};border:${isUser ? 'none' : '1px solid var(--border)'};font-size:14px;line-height:1.6;white-space:pre-wrap;word-wrap:break-word;">
+        ${esc(m.content)}
       </div>
-      <div class="kb-article-content" style="display: none; padding: 16px; color: #336026; line-height: 1.6;">
-        ${esc(article.content)}
-        <div style="font-size: 12px; color: var(--text-secondary); margin-top: 12px;">Last updated: ${formatDate(article.updated_at)}</div>
+    </div>`;
+  }).join('') : `
+    <div style="text-align:center;padding:48px 24px;">
+      <div style="font-size:48px;margin-bottom:12px;">🐾</div>
+      <div style="font-size:18px;font-weight:600;color:#336026;margin-bottom:8px;">Hi! I'm your Vet Buddies assistant.</div>
+      <div style="color:var(--text-secondary);line-height:1.6;max-width:400px;margin:0 auto;">Ask me anything about your pet's care, the Vet Buddies service, billing, or how to use the portal.</div>
+      <div style="display:flex;flex-wrap:wrap;gap:8px;justify-content:center;margin-top:20px;">
+        <button class="btn btn-secondary btn-small" data-action="kb-quick-ask" data-q="How does Vet Buddies work?" style="font-size:12px;">How does Vet Buddies work?</button>
+        <button class="btn btn-secondary btn-small" data-action="kb-quick-ask" data-q="What's included in my plan?" style="font-size:12px;">What's included in my plan?</button>
+        <button class="btn btn-secondary btn-small" data-action="kb-quick-ask" data-q="How do I upload medical records?" style="font-size:12px;">How do I upload records?</button>
+      </div>
+    </div>`;
+
+  const loadingHtml = state.kbLoading ? `
+    <div style="display:flex;justify-content:flex-start;margin-bottom:12px;">
+      <div style="max-width:80%;padding:12px 16px;border-radius:16px 16px 16px 4px;background:white;border:1px solid var(--border);font-size:14px;color:var(--text-secondary);">
+        <span class="kb-typing">Thinking</span>
+      </div>
+    </div>` : '';
+
+  return renderLayout(`
+    <div style="max-width:700px;margin:0 auto;display:flex;flex-direction:column;height:calc(100vh - 140px);padding:16px 16px 0;">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;">
+        <div>
+          <h1 style="font-family:'Fraunces',serif;font-size:24px;font-weight:700;color:var(--dark);margin:0;">Ask Vet Buddies</h1>
+          <p style="color:var(--text-secondary);font-size:13px;margin:2px 0 0;">Your AI assistant for pet care questions</p>
+        </div>
+        ${state.kbConversationId ? `<button class="btn btn-secondary btn-small" data-action="kb-new-chat" style="font-size:12px;">+ New Chat</button>` : ''}
+      </div>
+
+      <div id="kb-chat-messages" style="flex:1;overflow-y:auto;padding:8px 0;-webkit-overflow-scrolling:touch;">
+        ${messagesHtml}
+        ${loadingHtml}
+      </div>
+
+      <div style="padding:12px 0;border-top:1px solid var(--border);background:var(--bg-page);">
+        <div style="display:flex;gap:8px;">
+          <input type="text" id="kb-chat-input" data-field="kb-chat-input" placeholder="Ask a question about your pet's care..." style="flex:1;padding:12px 16px;border:1px solid var(--border);border-radius:24px;font-size:14px;font-family:'DM Sans',sans-serif;outline:none;" ${state.kbLoading ? 'disabled' : ''}>
+          <button class="btn btn-primary" data-action="kb-send-message" style="border-radius:50%;width:44px;height:44px;padding:0;display:flex;align-items:center;justify-content:center;font-size:18px;flex-shrink:0;" ${state.kbLoading ? 'disabled' : ''}>&#x27A4;</button>
+        </div>
+        <div style="font-size:11px;color:var(--text-secondary);text-align:center;margin-top:8px;">AI responses are for general guidance. For specific medical advice, message your Vet Buddy.</div>
+      </div>
+    </div>
+    <style>
+      .kb-typing::after { content:'...'; animation: kbDots 1.2s infinite; }
+      @keyframes kbDots { 0%{content:'.'} 33%{content:'..'} 66%{content:'...'} }
+    </style>
+  `);
+}
+
+function renderKbAdmin() {
+  // Viewing a specific conversation
+  if (state.kbViewingConvId && state._kbAdminMessages) {
+    const conv = (state.kbConversations || []).find(c => c.id === state.kbViewingConvId);
+    const msgs = state._kbAdminMessages || [];
+    const messagesHtml = msgs.map(m => {
+      const isUser = m.role === 'user';
+      return `<div style="display:flex;${isUser ? 'justify-content:flex-end;' : 'justify-content:flex-start;'}margin-bottom:12px;">
+        <div style="max-width:80%;padding:12px 16px;border-radius:${isUser ? '16px 16px 4px 16px' : '16px 16px 16px 4px'};background:${isUser ? '#e8f0e6' : 'white'};border:1px solid var(--border);font-size:14px;line-height:1.6;white-space:pre-wrap;">
+          <div style="font-size:11px;font-weight:600;color:var(--text-secondary);margin-bottom:4px;">${isUser ? 'User' : 'AI Assistant'}</div>
+          ${esc(m.content)}
+          <div style="font-size:10px;color:var(--text-secondary);margin-top:6px;text-align:right;">${formatDateTime(m.created_at)}</div>
+        </div>
+      </div>`;
+    }).join('');
+
+    return renderLayout(`
+      <div style="max-width:800px;margin:0 auto;padding:24px;">
+        <div style="display:flex;align-items:center;gap:12px;margin-bottom:24px;">
+          <button class="btn btn-secondary btn-small" data-action="kb-admin-back">← Back</button>
+          <div>
+            <h1 style="font-family:'Fraunces',serif;font-size:24px;font-weight:700;color:var(--dark);margin:0;">Conversation Log</h1>
+            <div style="font-size:12px;color:var(--text-secondary);">${conv ? formatDateTime(conv.created_at) : ''} · ${msgs.length} messages</div>
+          </div>
+        </div>
+        <div style="display:flex;flex-direction:column;">${messagesHtml}</div>
+        ${msgs.length === 0 ? '<div style="text-align:center;color:var(--text-secondary);padding:32px;">No messages in this conversation.</div>' : ''}
+      </div>
+    `);
+  }
+
+  // Conversation list
+  const convs = state.kbConversations || [];
+  const convsHtml = convs.length > 0 ? convs.map(c => `
+    <div class="card" style="padding:14px;cursor:pointer;" data-action="kb-admin-view-conv" data-conv-id="${c.id}">
+      <div style="display:flex;justify-content:space-between;align-items:center;">
+        <div style="flex:1;min-width:0;">
+          <div style="font-weight:600;font-size:14px;color:var(--dark);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${esc(c.title || 'Untitled conversation')}</div>
+          <div style="font-size:12px;color:var(--text-secondary);margin-top:2px;">${formatDateTime(c.created_at)}</div>
+        </div>
+        <div style="font-size:12px;color:var(--text-secondary);flex-shrink:0;margin-left:12px;">View →</div>
       </div>
     </div>
   `).join('') : `
     <div class="empty-state">
-      <div class="empty-state-icon">📚</div>
-      <div class="empty-state-title">No articles found</div>
-      <div class="empty-state-text">Try adjusting your search or filter to find what you're looking for.</div>
-    </div>
-  `;
+      <div class="empty-state-icon">🤖</div>
+      <div class="empty-state-title">No conversations yet</div>
+      <div class="empty-state-text">Chatbot conversations from users will appear here.</div>
+    </div>`;
 
   return renderLayout(`
-    <div style="max-width: 800px; margin: 0 auto; padding: 24px;">
-      <div style="margin-bottom: 28px;">
-        <h1 style="font-family: 'Fraunces', serif; font-size: 32px; font-weight: 700; color: var(--dark); margin-bottom: 8px;">Knowledge Base</h1>
-        <p style="color: var(--text-secondary);">Find answers to common questions about your pet's care.</p>
+    <div style="max-width:800px;margin:0 auto;padding:24px;">
+      <div style="margin-bottom:24px;">
+        <h1 style="font-family:'Fraunces',serif;font-size:28px;font-weight:700;color:var(--dark);margin-bottom:4px;">AI Chatbot Log</h1>
+        <p style="color:var(--text-secondary);font-size:14px;">Anonymous log of questions asked to the AI assistant. User identities are not shown.</p>
       </div>
-
-      <div style="background: white; border-radius: 12px; padding: 12px; margin-bottom: 24px; border: 1px solid var(--border);">
-        <input type="text" class="search-input" data-action="search-faq" placeholder="Search articles..." style="width: 100%; border: none; padding: 8px; font-size: 14px; outline: none;" value="${esc(state.faqSearch || '')}">
-      </div>
-
-      <div style="display: flex; gap: 8px; margin-bottom: 24px; overflow-x: auto; flex-wrap: wrap;">
-        ${categoryTabsHtml}
-      </div>
-
-      <div style="display: flex; flex-direction: column; gap: 12px;">
-        ${articlesHtml}
+      <div style="display:flex;flex-direction:column;gap:10px;">
+        ${convsHtml}
       </div>
     </div>
   `);
@@ -6730,7 +6877,7 @@ function renderVaccineDueAlerts(vaccines) {
 
       // Role gate: redirect to correct home if view doesn't match role
       const role = state.profile?.role;
-      const isAdminView = state.view.startsWith('admin-') || state.view === 'audit-log' || state.view === 'buddy-scorecard' || state.view === 'survey-results';
+      const isAdminView = state.view.startsWith('admin-') || state.view === 'audit-log' || state.view === 'buddy-scorecard' || state.view === 'survey-results' || state.view === 'kb-admin';
       const isBuddyView = state.view.startsWith('buddy-') || state.view === 'touchpoint-templates' || state.view === 'canned-responses' || state.view === 'buddy-availability';
       if (isAdminView && role !== 'admin' && role !== 'practice_manager') {
         navigate(role === 'client' ? 'client-dashboard' : role === 'vet_buddy' ? 'buddy-dashboard' : 'login');
@@ -6840,7 +6987,11 @@ function renderVaccineDueAlerts(vaccines) {
             html = renderAdminCaseCreation();
             break;
           case 'knowledge-base':
-            loadFaqArticles().then(function(){ app.innerHTML = renderKnowledgeBase(); attachEventListeners(); });
+            loadKbConversation().then(function(){ app.innerHTML = renderKnowledgeBase(); attachEventListeners(); scrollKbToBottom(); });
+            app.innerHTML = renderLayout('<div style="text-align:center;padding:40px;"><div class="spinner"></div></div>');
+            attachEventListeners(); return;
+          case 'kb-admin':
+            loadKbAdminConversations().then(function(){ app.innerHTML = renderKbAdmin(); attachEventListeners(); });
             app.innerHTML = renderLayout('<div style="text-align:center;padding:40px;"><div class="spinner"></div></div>');
             attachEventListeners(); return;
           case 'audit-log':
@@ -7014,6 +7165,39 @@ function renderVaccineDueAlerts(vaccines) {
         if (action === 'toggle-dark-mode') { toggleDarkMode(); return; }
         if (action === 'toggle-faq') { var aid=target.dataset.articleId; var ael=document.querySelector('.kb-article[data-article-id="'+aid+'"]'); if(ael){var ac=ael.querySelector('.kb-article-content');var ai=ael.querySelector('.kb-toggle-icon');if(ac)ac.style.display=ac.style.display==='none'?'block':'none';if(ai)ai.textContent=ac&&ac.style.display==='none'?'+':'\u2212';} return; }
         if (action === 'filter-faq-category') { state.faqCategory=target.dataset.category||'All'; render(); return; }
+        if (action === 'kb-send-message') {
+          const input = document.getElementById('kb-chat-input');
+          if (input && input.value.trim()) { sendKbMessage(input.value); input.value = ''; }
+          return;
+        }
+        if (action === 'kb-quick-ask') {
+          const q = target.dataset.q;
+          if (q) sendKbMessage(q);
+          return;
+        }
+        if (action === 'kb-new-chat') {
+          state.kbConversationId = null;
+          state.kbMessages = [];
+          render();
+          return;
+        }
+        if (action === 'kb-admin-view-conv') {
+          const convId = target.dataset.convId;
+          if (convId) {
+            state.kbViewingConvId = convId;
+            loadKbConversationMessages(convId).then(msgs => {
+              state._kbAdminMessages = msgs;
+              render();
+            });
+          }
+          return;
+        }
+        if (action === 'kb-admin-back') {
+          state.kbViewingConvId = null;
+          state._kbAdminMessages = null;
+          render();
+          return;
+        }
         if (action === 'open-lightbox') { state.showLightbox=true;state.lightboxUrl=target.dataset.url||'';state.lightboxTitle=target.dataset.title||'';var mc=document.getElementById('modal-overlay-container');if(mc)mc.remove();if(typeof renderLightbox==='function'){var c=document.createElement('div');c.id='modal-overlay-container';c.innerHTML=renderLightbox();document.body.appendChild(c);}return; }
         if (action === 'close-lightbox') { state.showLightbox=false;var mc=document.getElementById('modal-overlay-container');if(mc)mc.remove();return; }
         if (action === 'show-survey') { state.showSurvey=true;state.surveyRating=0;render();return; }
@@ -7523,6 +7707,7 @@ function renderVaccineDueAlerts(vaccines) {
             navigate('admin-dashboard');
             break;
           case 'nav-knowledge-base': navigate('knowledge-base'); break;
+          case 'nav-kb-admin': navigate('kb-admin'); break;
           case 'nav-audit-log': navigate('audit-log'); break;
           case 'nav-buddy-scorecard': navigate('buddy-scorecard'); break;
           case 'nav-survey-results': navigate('survey-results'); break;
@@ -8932,6 +9117,15 @@ function renderVaccineDueAlerts(vaccines) {
           await handleSignIn(e);
         } else if (e.target.dataset.action === 'signup') {
           await handleSignUp(e);
+        }
+      });
+
+      // KB chat Enter key handler
+      document.addEventListener('keydown', e => {
+        if (e.key === 'Enter' && e.target.id === 'kb-chat-input' && !e.shiftKey) {
+          e.preventDefault();
+          const val = e.target.value.trim();
+          if (val && !state.kbLoading) { sendKbMessage(val); e.target.value = ''; }
         }
       });
 
