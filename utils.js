@@ -156,6 +156,26 @@ function hasReadAccess(profile) {
   return !!profile?.subscription_status && profile.subscription_status !== 'none';
 }
 
+// ── Quiet Hours Helper ───────────────────────────────────
+function isQuietHoursActive() {
+  const settings = (typeof state !== 'undefined' && state.notificationSettings) || {};
+  const start = settings.quiet_hours_start;
+  const end = settings.quiet_hours_end;
+  if (!start || !end) return false;
+  const now = new Date();
+  const currentMins = now.getHours() * 60 + now.getMinutes();
+  const [sh, sm] = start.split(':').map(Number);
+  const [eh, em] = end.split(':').map(Number);
+  const startMins = sh * 60 + sm;
+  const endMins = eh * 60 + em;
+  if (startMins <= endMins) {
+    // Same-day range (e.g. 09:00–17:00)
+    return currentMins >= startMins && currentMins < endMins;
+  }
+  // Overnight range (e.g. 22:00–07:00)
+  return currentMins >= startMins || currentMins < endMins;
+}
+
 // ── Limited Time Offer (LTO) Helpers ─────────────────────
 function getLTOExpiry() {
   if (!CONFIG.LTO_START) return null;

@@ -1779,8 +1779,36 @@ async function calculateBuddyScorecard(buddyId) {
         sb.removeChannel(state.realtimeChannel);
         state.realtimeChannel = null;
       }
+      state.typingUsers = {};
       state.realtimeChannel = sb
         .channel(`messages:case:${caseId}`)
+        .on('presence', { event: 'sync' }, () => {
+          // Update typing indicator from presence state
+          const presenceState = state.realtimeChannel.presenceState();
+          const typers = {};
+          for (const key of Object.keys(presenceState)) {
+            for (const p of presenceState[key]) {
+              if (p.typing && p.userId !== state.profile?.id) {
+                typers[p.userId] = p.userName || 'Someone';
+              }
+            }
+          }
+          state.typingUsers = typers;
+          // Update typing indicator in DOM without full re-render
+          const typingEl = document.getElementById('typing-indicator');
+          if (typingEl) {
+            const names = Object.values(typers);
+            if (names.length > 0) {
+              typingEl.style.display = 'block';
+              typingEl.textContent = names.length === 1
+                ? `${names[0]} is typing...`
+                : `${names.join(' and ')} are typing...`;
+            } else {
+              typingEl.style.display = 'none';
+              typingEl.textContent = '';
+            }
+          }
+        })
         .on('postgres_changes', {
           event: 'INSERT',
           schema: 'public',
@@ -1809,8 +1837,9 @@ async function calculateBuddyScorecard(buddyId) {
           else if (isClient && data.sender_role !== 'client') {
             sb.from('messages').update({ is_read_by_client: true }).eq('id', data.id).then(({ error }) => { if (error) console.error('Failed to mark read:', error); });
           }
-          // Play notification sound for messages from others (even while viewing the case)
-          if (!isOwnMessage) {
+          // Play notification sound only if NOT actively viewing this conversation
+          const _viewingThisCase = !document.hidden && state.caseId === caseId;
+          if (!isOwnMessage && !_viewingThisCase) {
             playNotificationSound();
             // Track this message ID to prevent duplicate notifications from global channel
             if (state.notifiedMessageIds.size > 200) {
@@ -1823,7 +1852,25 @@ async function calculateBuddyScorecard(buddyId) {
           render();
           scrollMessagesToBottom();
         })
-        .subscribe();
+        .subscribe(async (status) => {
+          if (status === 'SUBSCRIBED' && state.profile) {
+            await state.realtimeChannel.track({
+              typing: false,
+              userId: state.profile.id,
+              userName: state.profile.name,
+            });
+          }
+        });
+    }
+
+    function sendTypingPresence(isTyping) {
+      if (state.realtimeChannel && state.profile) {
+        state.realtimeChannel.track({
+          typing: isTyping,
+          userId: state.profile.id,
+          userName: state.profile.name,
+        }).catch(() => {});
+      }
     }
 
     function scrollMessagesToBottom() {
@@ -2264,7 +2311,9 @@ async function calculateBuddyScorecard(buddyId) {
 
     // Show a local push notification (works when app is in foreground on mobile PWA)
     function showLocalNotification(title, body, data = {}) {
-      // Always play sound + vibrate for in-app awareness
+      // Suppress sound/vibrate/push during quiet hours (urgent always gets through)
+      if (isQuietHoursActive() && !data.urgent) return;
+      // Play sound + vibrate for in-app awareness
       playNotificationSound();
       vibrateIfMobile();
 
@@ -2363,6 +2412,8 @@ async function calculateBuddyScorecard(buddyId) {
             push_enabled: data.push_enabled ?? false,
             sms_enabled: data.sms_enabled ?? false,
             sms_phone: data.sms_phone || '',
+            quiet_hours_start: data.quiet_hours_start || '',
+            quiet_hours_end: data.quiet_hours_end || '',
           };
         }
       } catch (e) {
@@ -2382,6 +2433,8 @@ async function calculateBuddyScorecard(buddyId) {
           push_enabled: state.notificationSettings.push_enabled,
           sms_enabled: state.notificationSettings.sms_enabled || false,
           sms_phone: state.notificationSettings.sms_phone || null,
+          quiet_hours_start: state.notificationSettings.quiet_hours_start || null,
+          quiet_hours_end: state.notificationSettings.quiet_hours_end || null,
           muted_case_ids: state.notificationSettings.muted_case_ids || [],
           updated_at: new Date().toISOString(),
         };
@@ -2480,6 +2533,9 @@ async function calculateBuddyScorecard(buddyId) {
           // Skip if this case is muted
           if ((state.notificationSettings.muted_case_ids || []).includes(msg.case_id)) return;
 
+          // If actively viewing this case, just re-render (no sound/notification/badge bump)
+          if (!document.hidden && state.caseId === msg.case_id) { render(); return; }
+
           // Update unread count
           state.unreadCount = Math.max(0, state.unreadCount + 1);
           if (isClient) state.clientUnreadCount = Math.max(0, state.clientUnreadCount + 1);
@@ -2497,12 +2553,19 @@ async function calculateBuddyScorecard(buddyId) {
           showLocalNotification(
             urgentPrefix + senderName,
             preview || 'Sent a message',
-            { caseId: msg.case_id, tag: 'msg-' + msg.id }
+            { caseId: msg.case_id, tag: 'msg-' + msg.id, urgent: !!msg.is_urgent }
           );
 
           // Update inbox messages if panel is open
           if (state.showNotifications && isStaff) {
             await loadAllUnreadMessages();
+          }
+
+          // Contextual push prompt — show on first real incoming message
+          if (('Notification' in window) && Notification.permission === 'default' && !localStorage.getItem('vb_push_prompted')) {
+            state.showPushPromptBanner = true;
+            state.showPushPromptInPanel = true;
+            localStorage.setItem('vb_push_prompted', '1');
           }
 
           render();
@@ -3187,6 +3250,7 @@ async function calculateBuddyScorecard(buddyId) {
                   <strong>${esc(cr.shortcut)}</strong>${esc(cr.content.substring(0, 80))}${cr.content.length > 80 ? '…' : ''}
                 </div>`).join('')}
               </div>` : ''}
+            <div id="typing-indicator" style="display:none;font-size:12px;color:var(--text-secondary);padding:4px 8px;font-style:italic;"></div>
             <div class="chat-input-area" style="flex-wrap:wrap;">
               <textarea data-field="message-input" placeholder="${placeholder}" maxlength="2000" style="flex:1; min-width:120px;" oninput="if(this.value.startsWith('/')){document.querySelector('[data-action=toggle-canned-responses]')?.click()}"></textarea>
               <div style="display:flex; gap:6px; align-items:center;">
@@ -3900,18 +3964,24 @@ async function calculateBuddyScorecard(buddyId) {
     // ── Notification panel overlay (rendered into topbar area) ─────────────
     function renderNotificationsPanel() {
       if (!state.showNotifications) return '';
-      const recentMsgs = state.inboxMessages.slice(0, 15);
+      // Sort: urgent first, then by recency
+      const recentMsgs = [...state.inboxMessages]
+        .sort((a, b) => {
+          if (a.is_urgent && !b.is_urgent) return -1;
+          if (!a.is_urgent && b.is_urgent) return 1;
+          return new Date(b.created_at) - new Date(a.created_at);
+        })
+        .slice(0, 15);
       const role = state.profile?.role;
       const inboxAction = role === 'client' ? 'nav-client-case'
         : role === 'vet_buddy' ? 'nav-buddy-inbox' : 'nav-admin-inbox';
       const inboxTab = role === 'client' ? 'messages' : '';
 
-      // Push notification prompt banner
-      const showPushPrompt = ('Notification' in window) && Notification.permission === 'default';
-      const pushBanner = showPushPrompt ? `
+      // Push notification prompt — only show if contextual prompt was triggered
+      const pushBanner = state.showPushPromptInPanel ? `
         <div style="padding:10px 16px;background:rgba(42,157,143,0.1);border-bottom:1px solid var(--border);display:flex;align-items:center;gap:8px;">
           <span style="font-size:16px;">🔔</span>
-          <div style="flex:1;font-size:12px;color:var(--text-secondary);">Get notified even when the app is in the background</div>
+          <div style="flex:1;font-size:12px;color:var(--text-secondary);">You have unread messages — enable notifications so you never miss one</div>
           <button data-action="enable-push-notifications" style="background:var(--primary);color:white;border:none;border-radius:6px;padding:4px 10px;font-size:11px;font-weight:600;cursor:pointer;">Enable</button>
         </div>` : '';
 
@@ -3924,14 +3994,20 @@ async function calculateBuddyScorecard(buddyId) {
         <div class="notif-list">
           ${recentMsgs.length === 0
             ? '<div style="padding:20px;text-align:center;color:var(--text-secondary);font-size:13px;">All caught up! 🎉</div>'
-            : recentMsgs.map(m => `<div class="notif-item unread" data-action="${inboxAction}" ${inboxTab ? `data-tab="${inboxTab}"` : ''} data-case-id="${m.case_id || ''}">
+            : recentMsgs.map(m => {
+                const _c = (state.cases || []).find(c => c.id === m.case_id);
+                const _pet = _c?.pets?.name;
+                const _sender = esc(m.sender?.name || (role === 'client' ? 'Your Buddy' : 'Client'));
+                const _label = _pet ? `${_sender} about ${esc(_pet)}` : _sender;
+                return `<div class="notif-item unread" data-action="${inboxAction}" ${inboxTab ? `data-tab="${inboxTab}"` : ''} data-case-id="${m.case_id || ''}">
                 <div style="display:flex;align-items:center;gap:6px;">
                   ${m.is_urgent ? '<span style="color:var(--red);font-size:11px;font-weight:700;">🚨 URGENT</span>' : ''}
-                  <strong>${esc(m.sender?.name || (role === 'client' ? 'Your Buddy' : 'Client'))}</strong>
+                  <strong>${_label}</strong>
                 </div>
-                <div style="margin-top:2px;">${esc((m.content||'').substring(0,60))}${(m.content||'').length>60?'…':''}</div>
+                <div style="margin-top:2px;">${esc((m.content||'').substring(0,60))}${(m.content||'').length>60?'...':''}</div>
                 <div class="notif-time">${formatDateTime(m.created_at)}</div>
-              </div>`).join('')}
+              </div>`;
+            }).join('')}
         </div>
         <div style="padding:8px 16px;border-top:1px solid var(--border);text-align:center;">
           <button data-action="show-notif-settings" style="background:none;border:none;color:var(--primary);font-size:12px;cursor:pointer;font-weight:500;">⚙️ Notification Settings</button>
@@ -6251,6 +6327,17 @@ function renderNotifSettings() {
             </div>
             <input type="checkbox" class="notif-toggle" data-setting="weekly_digest" ${settings.weekly_digest ? 'checked' : ''} style="cursor: pointer; width: 18px; height: 18px;">
           </div>
+
+          <div style="padding: 12px; background: #f9f9f9; border-radius: 8px;">
+            <div style="font-weight: 600; color: #336026; margin-bottom: 4px;">Quiet hours</div>
+            <div style="font-size: 12px; color: var(--text-secondary); margin-bottom: 8px;">Suppress sounds and push notifications during these hours. Urgent messages always get through.</div>
+            <div style="display: flex; align-items: center; gap: 8px;">
+              <input type="time" data-field="quiet-hours-start" value="${esc(settings.quiet_hours_start || '')}" style="padding:6px 8px;border:1px solid var(--border);border-radius:6px;font-size:13px;" aria-label="Quiet hours start">
+              <span style="color:var(--text-secondary);font-size:13px;">to</span>
+              <input type="time" data-field="quiet-hours-end" value="${esc(settings.quiet_hours_end || '')}" style="padding:6px 8px;border:1px solid var(--border);border-radius:6px;font-size:13px;" aria-label="Quiet hours end">
+              ${settings.quiet_hours_start && settings.quiet_hours_end ? `<span style="font-size:11px;color:var(--green);margin-left:4px;">Active</span>` : ''}
+            </div>
+          </div>
         </div>
 
         <div style="display: flex; gap: 8px; margin-top: 24px;">
@@ -6779,6 +6866,16 @@ function renderVaccineDueAlerts(vaccines) {
         }, options: { responsive: true, maintainAspectRatio: false }});
       }
 
+      // Typing indicator — broadcast presence on input in chat
+      const _typingInput = document.querySelector('[data-field="message-input"]');
+      if (_typingInput && state.realtimeChannel) {
+        _typingInput.addEventListener('input', () => {
+          sendTypingPresence(true);
+          clearTimeout(state._typingTimeout);
+          state._typingTimeout = setTimeout(() => sendTypingPresence(false), 3000);
+        });
+      }
+
       // Show billing success toast once after Stripe redirect
       if (state._billingSuccessToast && state.profile) {
         delete state._billingSuccessToast;
@@ -6840,6 +6937,7 @@ function renderVaccineDueAlerts(vaccines) {
         if(state.showNotifSettings&&typeof renderNotifSettings==='function')mh+=renderNotifSettings();
         if(state.show2FA&&typeof render2FASetup==='function')mh+=render2FASetup();
         if(state.showAiReviewModal&&typeof renderAiReviewModal==='function')mh+=renderAiReviewModal();
+        if(state.showPushPromptBanner)mh+=`<div style="position:fixed;top:16px;left:50%;transform:translateX(-50%);z-index:1100;background:linear-gradient(135deg,#336026,#689562);color:white;border-radius:12px;padding:14px 20px;box-shadow:0 8px 32px rgba(0,0,0,0.2);display:flex;align-items:center;gap:12px;max-width:480px;width:90%;animation:notifSlideIn 0.3s ease-out;"><span style="font-size:20px;">🔔</span><div style="flex:1;"><div style="font-weight:600;font-size:14px;">Your Buddy just sent a message!</div><div style="font-size:12px;opacity:0.9;margin-top:2px;">Enable notifications so you never miss one.</div></div><button data-action="enable-push-from-toast" style="background:white;color:#336026;border:none;border-radius:6px;padding:6px 14px;font-size:12px;font-weight:700;cursor:pointer;white-space:nowrap;">Enable</button><button data-action="dismiss-push-toast" style="background:none;border:none;color:rgba(255,255,255,0.7);font-size:18px;cursor:pointer;padding:0 4px;">×</button></div>`;
         if(state._showPasswordReset)mh+=`<div class="broadcast-overlay" data-action="close-password-reset"><div class="broadcast-card" onclick="event.stopPropagation()" style="max-width:400px;"><div style="font-family:'Fraunces',serif;font-size:18px;font-weight:600;margin-bottom:16px;">🔒 Set New Password</div><div class="form-group"><label>New Password</label><input type="password" data-field="reset-new-password" placeholder="Enter new password (min 6 characters)" style="width:100%;"></div><div class="form-group"><label>Confirm Password</label><input type="password" data-field="reset-confirm-password" placeholder="Confirm new password" style="width:100%;"></div><div style="display:flex;gap:10px;margin-top:8px;"><button class="btn btn-primary" data-action="save-new-password" style="flex:1;">Update Password</button><button class="btn btn-secondary" data-action="close-password-reset">Cancel</button></div></div></div>`;
         var mc=document.getElementById('modal-overlay-container');if(mc)mc.remove();
         if(mh){var c=document.createElement('div');c.id='modal-overlay-container';c.innerHTML=mh;document.body.appendChild(c);}
@@ -6904,6 +7002,11 @@ function renderVaccineDueAlerts(vaccines) {
             }
             state.notificationSettings.sms_phone = phone;
           }
+          // Capture quiet hours
+          const qhStart = document.querySelector('[data-field="quiet-hours-start"]');
+          const qhEnd = document.querySelector('[data-field="quiet-hours-end"]');
+          if (qhStart) state.notificationSettings.quiet_hours_start = qhStart.value || '';
+          if (qhEnd) state.notificationSettings.quiet_hours_end = qhEnd.value || '';
           // If push was toggled on and permission not yet granted, request it
           if (state.notificationSettings.push_enabled && ('Notification' in window) && Notification.permission !== 'granted') {
             await requestNotificationPermission();
@@ -6914,7 +7017,20 @@ function renderVaccineDueAlerts(vaccines) {
           render();
           return;
         }
+        if (action === 'enable-push-from-toast') {
+          state.showPushPromptBanner = false;
+          await requestNotificationPermission();
+          render();
+          return;
+        }
+        if (action === 'dismiss-push-toast') {
+          state.showPushPromptBanner = false;
+          render();
+          return;
+        }
         if (action === 'enable-push-notifications') {
+          state.showPushPromptBanner = false;
+          state.showPushPromptInPanel = false;
           await requestNotificationPermission();
           render();
           return;
@@ -8647,6 +8763,8 @@ function renderVaccineDueAlerts(vaccines) {
                 if (msgInput) msgInput.value = '';
                 state.urgencyToggle = false;
                 state.showCannedResponses = false;
+                sendTypingPresence(false);
+                clearTimeout(state._typingTimeout);
                 render();
                 scrollMessagesToBottom();
                 // Update last_client_message_at when client sends a message

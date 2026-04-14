@@ -4457,6 +4457,20 @@
       border-radius: 12px;
       margin-top: 4px;
     }
+    /* ── Typing Indicator ──────────────────────────────────── */
+    #typing-indicator {
+      animation: typingPulse 1.5s ease-in-out infinite;
+    }
+    @keyframes typingPulse {
+      0%, 100% { opacity: 0.5; }
+      50% { opacity: 1; }
+    }
+
+    /* ── Push Prompt Toast ─────────────────────────────────── */
+    .push-prompt-toast {
+      animation: notifSlideIn 0.3s ease-out;
+    }
+
     .lto-lock-badge {
       display: inline-flex;
       align-items: center;
