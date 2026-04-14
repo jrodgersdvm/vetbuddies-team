@@ -7,11 +7,11 @@ const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 
 // LTO configuration — must match config.js values
-const LTO_START = "2026-04-12T12:00:00Z";
+const LTO_START: string | null = null; // LTO disabled
 const LTO_DURATION_HOURS = 48;
-const LTO_EXPIRY = new Date(
-  new Date(LTO_START).getTime() + LTO_DURATION_HOURS * 60 * 60 * 1000
-);
+const LTO_EXPIRY = LTO_START
+  ? new Date(new Date(LTO_START).getTime() + LTO_DURATION_HOURS * 60 * 60 * 1000)
+  : new Date(0);
 
 // Map of LTO price IDs to validate server-side
 const LTO_PRICE_IDS = new Set([
@@ -21,9 +21,9 @@ const LTO_PRICE_IDS = new Set([
 
 // Standard price IDs
 const STANDARD_PRICE_IDS = new Set([
-  "price_1T7Vw5CoogKs3SGPv92mnQvk",
-  "price_1T7VwjCoogKs3SGPL9GcM0FL",
-  "price_1T7VxVCoogKs3SGPwcXrK0kI",
+  "price_1TLxfzCoogKs3SGPIctkgMhW",  // Buddy $19.99/mo
+  "price_1TLxg0CoogKs3SGPAdQBsb8d",  // Buddy+ $29.99/mo
+  "price_1T7VxVCoogKs3SGPwcXrK0kI",  // Buddy VIP $279/mo
 ]);
 
 function isLTOActiveServerSide(): boolean {
@@ -145,7 +145,7 @@ serve(async (req) => {
     }
 
     // Create Stripe Checkout session
-    const session = await stripe.checkout.sessions.create({
+    const checkoutParams: Record<string, unknown> = {
       customer: customerId,
       mode: "subscription",
       line_items: [{ price: price_id, quantity: 1 }],
@@ -153,9 +153,11 @@ serve(async (req) => {
       cancel_url,
       metadata,
       subscription_data: {
-        metadata, // propagate LTO metadata to the subscription
+        metadata,
       },
-    });
+    };
+
+    const session = await stripe.checkout.sessions.create(checkoutParams);
 
     return new Response(JSON.stringify({ url: session.url }), {
       headers: { ...corsHeaders, "Content-Type": "application/json" },
