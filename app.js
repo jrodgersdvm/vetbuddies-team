@@ -947,7 +947,7 @@
     async function loadMessages(caseId) {
       try {
         const { data, error } = await sb.from('messages').select(`
-          id, case_id, sender_id, content, sender_role, is_read_by_staff, is_read_by_client,
+          id, case_id, sender_id, content, sender_role, is_read_by_staff, is_read_by_buddy, is_read_by_client,
           thread_type, message_type, read_at, created_at,
           attachment_url, attachment_name, is_urgent,
           sender:users!sender_id (id, name, role, avatar_initials, avatar_color)
@@ -955,14 +955,9 @@
         if (error) throw error;
         state.messages = data || [];
 
-        // Mark messages as read (single batch update instead of N queries)
-        if (state.profile && ['admin', 'vet_buddy'].includes(state.profile.role)) {
-          const unreadIds = state.messages.filter(m => !m.is_read_by_staff && m.sender_role === 'client').map(m => m.id);
-          if (unreadIds.length > 0) {
-            await sb.from('messages').update({ is_read_by_staff: true, read_at: new Date().toISOString() }).in('id', unreadIds);
-            state.unreadCount = Math.max(0, state.unreadCount - unreadIds.length);
-          }
-        } else if (state.profile?.role === 'client') {
+        // Only auto-mark as read for clients viewing staff messages.
+        // Staff messages stay unread until responded to — viewing alone does not mark read.
+        if (state.profile?.role === 'client') {
           // Client: mark staff messages as read
           const unreadIds = state.messages.filter(m => !m.is_read_by_client && m.sender_role !== 'client').map(m => m.id);
           if (unreadIds.length > 0) {
@@ -1713,17 +1708,17 @@ async function calculateBuddyScorecard(buddyId) {
       if (!state.profile) return;
       try {
         if (state.profile.role === 'admin') {
-          // Admin: all unread client messages
+          // Admin: all unread client messages (tracked independently from buddy)
           const { count, error } = await sb.from('messages').select('*', { count: 'exact', head: true })
             .eq('is_read_by_staff', false).eq('sender_role', 'client');
           if (error) throw error;
           state.unreadCount = count || 0;
         } else if (state.profile.role === 'vet_buddy') {
-          // Buddy: only unread from their assigned cases
+          // Buddy: only unread from their assigned cases (uses buddy-specific read flag)
           const buddyCaseIds = (state.cases || []).map(c => c.id);
           if (!buddyCaseIds.length) { state.unreadCount = 0; return; }
           const { count, error } = await sb.from('messages').select('*', { count: 'exact', head: true })
-            .eq('is_read_by_staff', false).eq('sender_role', 'client').in('case_id', buddyCaseIds);
+            .eq('is_read_by_buddy', false).eq('sender_role', 'client').in('case_id', buddyCaseIds);
           if (error) throw error;
           state.unreadCount = count || 0;
         } else if (state.profile.role === 'client') {
@@ -1749,20 +1744,23 @@ async function calculateBuddyScorecard(buddyId) {
             .neq('sender_role', 'client')
             .in('case_id', clientCaseIds)
             .order('created_at', { ascending: false });
+        } else if (state.profile.role === 'vet_buddy') {
+          // Buddy: unread client messages from assigned cases (buddy-specific read flag)
+          const buddyCaseIds = (state.cases || []).map(c => c.id);
+          if (!buddyCaseIds.length) { state.inboxMessages = []; state.unreadCount = 0; return; }
+          query = sb.from('messages')
+            .select(`*, sender:users!sender_id(id, name, role)`)
+            .eq('is_read_by_buddy', false)
+            .eq('sender_role', 'client')
+            .in('case_id', buddyCaseIds)
+            .order('created_at', { ascending: false });
         } else {
-          // Staff: unread client messages
+          // Admin: all unread client messages (admin-specific read flag)
           query = sb.from('messages')
             .select(`*, sender:users!sender_id(id, name, role)`)
             .eq('is_read_by_staff', false)
             .eq('sender_role', 'client')
             .order('created_at', { ascending: false });
-
-          // Buddies only see messages from their assigned cases
-          if (state.profile.role === 'vet_buddy') {
-            const buddyCaseIds = (state.cases || []).map(c => c.id);
-            if (!buddyCaseIds.length) { state.inboxMessages = []; state.unreadCount = 0; return; }
-            query = query.in('case_id', buddyCaseIds);
-          }
         }
 
         const { data, error } = await query;
@@ -1825,7 +1823,7 @@ async function calculateBuddyScorecard(buddyId) {
           if (state.messages.some(m => m.id === payload.new.id)) return;
           // Fetch full message with sender info
           const { data } = await sb.from('messages')
-            .select('id, case_id, sender_id, content, sender_role, is_read_by_staff, is_read_by_client, thread_type, message_type, read_at, created_at, attachment_url, attachment_name, sender:users!sender_id(id, name, role, avatar_initials, avatar_color)')
+            .select('id, case_id, sender_id, content, sender_role, is_read_by_staff, is_read_by_buddy, is_read_by_client, thread_type, message_type, read_at, created_at, attachment_url, attachment_name, sender:users!sender_id(id, name, role, avatar_initials, avatar_color)')
             .eq('id', payload.new.id)
             .single();
           if (!data) return;
@@ -1835,12 +1833,9 @@ async function calculateBuddyScorecard(buddyId) {
           const isClient = state.profile?.role === 'client';
           const isOwnMessage = data.sender_id === state.profile?.id;
 
-          // Auto-mark as read if staff is viewing client messages
-          if (isStaff && data.sender_role === 'client') {
-            sb.from('messages').update({ is_read_by_staff: true, read_at: new Date().toISOString() }).eq('id', data.id).then(({ error }) => { if (error) console.error('Failed to mark read:', error); });
-          }
-          // Auto-mark as read if client is viewing staff messages
-          else if (isClient && data.sender_role !== 'client') {
+          // Staff messages stay unread until responded to — no auto-mark on view.
+          // Auto-mark as read only for clients viewing staff messages.
+          if (isClient && data.sender_role !== 'client') {
             sb.from('messages').update({ is_read_by_client: true }).eq('id', data.id).then(({ error }) => { if (error) console.error('Failed to mark read:', error); });
           }
           // Play notification sound only if NOT actively viewing this conversation
@@ -3231,7 +3226,7 @@ async function calculateBuddyScorecard(buddyId) {
                 </div>` : ''}
                 <div class="chat-time">${formatDateTime(msg.created_at)}</div>
                 ${isRead ? '<div class="msg-seen">✓✓ Seen by client</div>' : ''}
-                ${isOwn && state.profile.role === 'client' && msg.is_read_by_staff ? '<div class="msg-seen">✓✓ Seen</div>' : ''}
+                ${isOwn && state.profile.role === 'client' && (msg.is_read_by_staff || msg.is_read_by_buddy) ? '<div class="msg-seen">✓✓ Seen</div>' : ''}
               </div>
             </div>
           `;
@@ -7047,14 +7042,12 @@ function renderVaccineDueAlerts(vaccines) {
                 await sb.from('messages').update({ is_read_by_client: true }).neq('sender_role', 'client').eq('is_read_by_client', false).in('case_id', clientCaseIds);
               }
               state.clientUnreadCount = 0;
-            } else {
-              if (state.profile.role === 'admin') {
-                await sb.from('messages').update({ is_read_by_staff: true, read_at: new Date().toISOString() }).eq('is_read_by_staff', false).eq('sender_role', 'client');
-              } else if (state.profile.role === 'vet_buddy') {
-                const buddyCaseIds = (state.cases || []).map(c => c.id);
-                if (buddyCaseIds.length) {
-                  await sb.from('messages').update({ is_read_by_staff: true, read_at: new Date().toISOString() }).eq('is_read_by_staff', false).eq('sender_role', 'client').in('case_id', buddyCaseIds);
-                }
+            } else if (state.profile.role === 'admin') {
+              await sb.from('messages').update({ is_read_by_staff: true, read_at: new Date().toISOString() }).eq('is_read_by_staff', false).eq('sender_role', 'client');
+            } else if (state.profile.role === 'vet_buddy') {
+              const buddyCaseIds = (state.cases || []).map(c => c.id);
+              if (buddyCaseIds.length) {
+                await sb.from('messages').update({ is_read_by_buddy: true, read_at: new Date().toISOString() }).eq('is_read_by_buddy', false).eq('sender_role', 'client').in('case_id', buddyCaseIds);
               }
             }
             state.unreadCount = 0;
@@ -8760,7 +8753,7 @@ function renderVaccineDueAlerts(vaccines) {
                   thread_type: threadType,
                   is_urgent: isUrgentMsg,
                   created_at: new Date().toISOString(),
-                }).select('id, case_id, sender_id, content, sender_role, is_read_by_staff, is_read_by_client, thread_type, read_at, created_at, attachment_url, attachment_name, is_urgent').single();
+                }).select('id, case_id, sender_id, content, sender_role, is_read_by_staff, is_read_by_buddy, is_read_by_client, thread_type, read_at, created_at, attachment_url, attachment_name, is_urgent').single();
                 if (msgErr) throw msgErr;
                 state.messages.push({ ...newMsg, sender: { id: state.profile.id, name: state.profile.name, role: state.profile.role, avatar_initials: state.profile.avatar_initials, avatar_color: state.profile.avatar_color } });
                 logAudit('create', 'message', newMsg.id, { case_id: state.caseId, role: state.profile.role });
@@ -8783,9 +8776,11 @@ function renderVaccineDueAlerts(vaccines) {
                   content: content || '',
                   sender_name: state.profile.name,
                 }).catch(e => console.warn('Push notification failed:', e));
-                // Mark client messages as read when staff views/sends in the case
-                if (['vet_buddy','admin'].includes(state.profile.role)) {
-                  await sb.from('messages').update({ is_read_by_staff: true }).eq('case_id', state.caseId).eq('sender_role', 'client').eq('is_read_by_staff', false);
+                // Mark client messages as read only for the responding role
+                if (state.profile.role === 'admin') {
+                  await sb.from('messages').update({ is_read_by_staff: true, read_at: new Date().toISOString() }).eq('case_id', state.caseId).eq('sender_role', 'client').eq('is_read_by_staff', false);
+                } else if (state.profile.role === 'vet_buddy') {
+                  await sb.from('messages').update({ is_read_by_buddy: true, read_at: new Date().toISOString() }).eq('case_id', state.caseId).eq('sender_role', 'client').eq('is_read_by_buddy', false);
                 }
               } catch (err) {
                 console.error(err);
@@ -8837,8 +8832,12 @@ function renderVaccineDueAlerts(vaccines) {
           // READ RECEIPTS — mark client messages as read when staff opens case
           // (happens in loadMessages above, but also on explicit action)
           case 'mark-messages-read': {
-            if (state.caseId && ['vet_buddy','admin'].includes(state.profile.role)) {
-              await sb.from('messages').update({ is_read_by_staff: true }).eq('case_id', state.caseId).eq('sender_role', 'client').eq('is_read_by_staff', false);
+            if (state.caseId && state.profile.role === 'admin') {
+              await sb.from('messages').update({ is_read_by_staff: true, read_at: new Date().toISOString() }).eq('case_id', state.caseId).eq('sender_role', 'client').eq('is_read_by_staff', false);
+              await loadUnreadCount();
+              render();
+            } else if (state.caseId && state.profile.role === 'vet_buddy') {
+              await sb.from('messages').update({ is_read_by_buddy: true, read_at: new Date().toISOString() }).eq('case_id', state.caseId).eq('sender_role', 'client').eq('is_read_by_buddy', false);
               await loadUnreadCount();
               render();
             }
