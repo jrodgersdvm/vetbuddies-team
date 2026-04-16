@@ -3,7 +3,7 @@
         <h3>Vet Buddies Subscription Tiers</h3>
         <p>Vet Buddies offers three tiers of care coordination, each designed to keep pets healthier between vet visits.</p>
         <table>
-          <tr><th></th><th>Buddy — $99/mo</th><th>Buddy+ — $149/mo</th><th>Buddy VIP — $279/mo</th></tr>
+          <tr><th></th><th>Buddy — $20/mo</th><th>Buddy+ — $30/mo</th><th>Buddy VIP — $279/mo</th></tr>
           <tr><td><strong>Vet Buddy Check-ins</strong></td><td>1 per month</td><td>1 per week</td><td>1 per week</td></tr>
           <tr><td><strong>Veterinarian Check-ins</strong></td><td>—</td><td>—</td><td>1 per month</td></tr>
           <tr><td><strong>Digital Living Care Plan</strong></td><td>✓</td><td>✓</td><td>✓</td></tr>
