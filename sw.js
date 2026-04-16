@@ -1,5 +1,5 @@
 // Service Worker for Vet Buddies
-const CACHE_NAME = 'vetbuddies-v1';
+const CACHE_NAME = 'vetbuddies-v2';
 const STATIC_ASSETS = [
   '/',
   '/index.html',
@@ -55,25 +55,25 @@ self.addEventListener('fetch', event => {
     return;
   }
 
-  // App shell (same-origin static assets): stale-while-revalidate
+  // App shell (same-origin static assets): network-first with cache fallback
+  // This ensures users always get fresh code after deploys.
   if (url.origin === self.location.origin) {
     event.respondWith(
-      caches.match(event.request).then(cached => {
-        const fetchPromise = fetch(event.request).then(resp => {
-          if (resp.ok) {
-            const clone = resp.clone();
-            caches.open(CACHE_NAME).then(cache => cache.put(event.request, clone));
-          }
-          return resp;
-        }).catch(() => {
-          // Network failed — return cached version or offline fallback
+      fetch(event.request).then(resp => {
+        if (resp.ok) {
+          const clone = resp.clone();
+          caches.open(CACHE_NAME).then(cache => cache.put(event.request, clone));
+        }
+        return resp;
+      }).catch(() => {
+        // Network failed — return cached version or offline fallback
+        return caches.match(event.request).then(cached => {
           if (cached) return cached;
           if (event.request.mode === 'navigate') {
             return caches.match('/index.html');
           }
           return new Response('Offline', { status: 503 });
         });
-        return cached || fetchPromise;
       })
     );
     return;

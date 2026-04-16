@@ -128,6 +128,7 @@
       // Push notification prompt
       showPushPromptBanner: false,
       showPushPromptInPanel: false,
+      _loginInProgress: false,
     };
 
     // ── HTML escape utility (prevents XSS in user-generated content) ──
@@ -842,7 +843,8 @@
         if (data.session) {
           state.user = data.user;
           showToast(`Welcome to Vet Buddies, ${name}! 🐾`, 'success');
-          await loadProfile();
+          const profileOk = await loadProfile();
+          if (!profileOk) return;
           // Accept care team invite if present
           if (state._careTeamInviteToken && state.profile?.id) {
             try {
@@ -882,13 +884,19 @@
       }
 
       try {
+        // Flag prevents stale INITIAL_SESSION loadProfile from clobbering this sign-in
+        state._loginInProgress = true;
         // After signInWithPassword resolves, the Supabase auth lock is fully released.
         // We call loadProfile() HERE — not inside onAuthStateChange — to avoid the
         // lock deadlock that occurs when sb.from() is called inside the SIGNED_IN event.
         const { data, error } = await sb.auth.signInWithPassword({ email, password });
         if (error) throw error;
         state.user = data.user;
-        await loadProfile();
+        const profileOk = await loadProfile();
+        if (!profileOk) {
+          showToast('Could not load your profile. Please try again or contact support.', 'error');
+          return;
+        }
         // Accept care team invite if present
         if (state._careTeamInviteToken && state.profile?.id) {
           try {
@@ -907,6 +915,8 @@
         } else {
           showToast(err.message || 'Sign in failed', 'error');
         }
+      } finally {
+        state._loginInProgress = false;
       }
     }
 
@@ -952,12 +962,12 @@
     // DATA LOADING FUNCTIONS
     // ============================================
     async function loadProfile() {
-      if (!state.user) return;
+      if (!state.user) return false;
       const userId = state.user.id; // capture before any async gap
       try {
         const { data, error } = await sb.from('users').select('*').eq('auth_id', userId).single();
         if (error) throw error;
-        if (!state.user) return; // user was cleared (e.g. by initApp) while query ran — bail out
+        if (!state.user) return false; // user was cleared (e.g. by initApp) while query ran — bail out
         state.profile = data;
         if (data.dark_mode) { state.darkMode = true; document.documentElement.setAttribute('data-theme', 'dark'); }
 
@@ -1018,14 +1028,18 @@
           });
         } else {
           navigate('login');
+          return false;
         }
+        return true;
       } catch (err) {
-        console.error(err);
+        console.error('loadProfile failed:', err);
+        showToast('Something went wrong loading your account. Please try signing in again.', 'error');
         // Clear stale session and return to login rather than showing a blank page
         await sb.auth.signOut({ scope: 'local' });
         state.user = null;
         state.profile = null;
         navigate('login');
+        return false;
       }
     }
 
@@ -2991,6 +3005,17 @@ async function calculateBuddyScorecard(buddyId) {
               <div style="font-size:11px;color:var(--text-secondary);margin-top:4px;">— ${esc(entry.created_by) || 'Buddy'} · ${entry.created_at ? formatDate(entry.created_at) : ''}</div>
             </div>`).join('')}
         </div>` : ''}
+
+        <div class="card" style="border-left:4px solid var(--primary);margin-bottom:16px;cursor:pointer;" data-action="dashboard-upload-records" data-case-id="${petCase.id}">
+          <div style="display:flex;align-items:center;gap:14px;">
+            <div style="font-size:28px;">📋</div>
+            <div style="flex:1;">
+              <div style="font-weight:600;font-size:15px;color:#336026;">Upload Medical Records</div>
+              <div style="font-size:13px;color:var(--text-secondary);margin-top:2px;">Share vet records, lab results, or vaccination docs. Our AI will automatically extract key details.</div>
+            </div>
+            <div style="font-size:14px;color:var(--primary);font-weight:600;">Upload</div>
+          </div>
+        </div>
 
         <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(100px, 1fr));gap:10px;margin-bottom:16px;">
           <div class="card" style="padding:14px;text-align:center;cursor:pointer;" data-action="nav-client-case" data-case-id="${petCase.id}" data-tab="appointments">
@@ -9547,6 +9572,17 @@ function renderVaccineDueAlerts(vaccines) {
           case 'trigger-doc-upload':
             document.getElementById('doc-upload-input')?.click();
             break;
+          case 'dashboard-upload-records': {
+            // Set caseId from the dashboard card so the upload handler can use it
+            const uploadCaseId = target.dataset.caseId || target.closest('[data-case-id]')?.dataset.caseId;
+            if (uploadCaseId) {
+              state.caseId = uploadCaseId;
+              document.getElementById('doc-upload-input')?.click();
+            } else {
+              showToast('No active case found — please add a pet first.', 'error');
+            }
+            break;
+          }
           case 'toggle-genetic-flag': {
             const docId = target.dataset.docId;
             const isGenetic = target.dataset.isGenetic === '1';
@@ -10437,6 +10473,20 @@ function renderVaccineDueAlerts(vaccines) {
             });
             await loadDocuments(state.caseId);
 
+            // If uploaded from dashboard, navigate to the case files tab to show progress
+            if (state.view === 'client-dashboard') {
+              await loadCase(state.caseId);
+              const petId = state.currentCase?.pets?.id;
+              await Promise.all([
+                loadCarePlan(state.caseId),
+                loadMessages(state.caseId),
+                petId ? loadPetMedications(petId) : Promise.resolve(),
+                petId ? loadPetVaccines(petId) : Promise.resolve(),
+              ]);
+              state.caseTab = 'files';
+              navigate('client-case');
+            }
+
             // Trigger AI extraction for supported file types
             if (AI_SUPPORTED_TYPES.includes(file.type)) {
               showToast('File uploaded! Analyzing medical record with AI...', 'success');
@@ -10597,6 +10647,8 @@ function renderVaccineDueAlerts(vaccines) {
             // Existing session found — restore the user without re-login
             state.user = session.user;
             setTimeout(async () => {
+              // Skip session restore if the user is already signing in via the login form
+              if (state._loginInProgress) return;
               try {
                 await loadProfile();
                 render();
@@ -10606,12 +10658,16 @@ function renderVaccineDueAlerts(vaccines) {
             // No valid session — clear any stale auth data from localStorage
             // This handles "Refresh Token Not Found" errors from expired/revoked tokens
             setTimeout(() => {
+              // Don't sign out if a fresh login is in progress
+              if (state._loginInProgress) return;
               sb.auth.signOut({ scope: 'local' });
             }, 0);
           }
         } else if (event === 'SIGNED_IN') {
           if (session) state.user = session.user;
         } else if (event === 'SIGNED_OUT') {
+          // Don't clobber state if a fresh login is in progress (stale session cleanup race)
+          if (state._loginInProgress) return;
           stopAppointmentReminders();
           if (state.realtimeChannel) { sb.removeChannel(state.realtimeChannel); state.realtimeChannel = null; }
           if (state.globalNotifChannel) { sb.removeChannel(state.globalNotifChannel); state.globalNotifChannel = null; }
