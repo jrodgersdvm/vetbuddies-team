@@ -3072,6 +3072,13 @@ async function calculateBuddyScorecard(buddyId) {
     }
 
     async function callEdgeFunction(fnName, body) {
+      // Ensure we have a valid session before calling edge functions
+      const { data: { session }, error: sessErr } = await sb.auth.getSession();
+      if (sessErr || !session) {
+        navigate('login');
+        render();
+        throw new Error('Session expired — please sign in again.');
+      }
       const { data, error } = await sb.functions.invoke(fnName, { body });
       if (error) throw new Error(error.message || 'Edge function error');
       return data;
