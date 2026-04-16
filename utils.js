@@ -139,11 +139,11 @@ const TIER_XP_MULTIPLIER = { 1: 1, 2: 1.25, 3: 1.5 };
 const TIER_HELPER_CAP = { 1: 0, 2: 2, 3: Infinity };
 
 const TIER_UPGRADE_COPY = {
-  'care_requests_post': { desc: 'Post care requests and tap into your local pet care community', tier: 'Buddy+', price: '$149/mo' },
-  'care_requests_claim': { desc: 'Claim care requests and help pets in your community', tier: 'Buddy+', price: '$149/mo' },
-  'community_score': { desc: 'Track your community impact and earn recognition badges', tier: 'Buddy+', price: '$149/mo' },
-  'community_impact': { desc: 'See your full community impact dashboard', tier: 'Buddy+', price: '$149/mo' },
-  'invite_helpers': { desc: 'Invite friends and family to your pet\'s care team', tier: 'Buddy+', price: '$149/mo' },
+  'care_requests_post': { desc: 'Post care requests and tap into your local pet care community', tier: 'Buddy+', price: '$29.99/mo' },
+  'care_requests_claim': { desc: 'Claim care requests and help pets in your community', tier: 'Buddy+', price: '$29.99/mo' },
+  'community_score': { desc: 'Track your community impact and earn recognition badges', tier: 'Buddy+', price: '$29.99/mo' },
+  'community_impact': { desc: 'See your full community impact dashboard', tier: 'Buddy+', price: '$29.99/mo' },
+  'invite_helpers': { desc: 'Invite friends and family to your pet\'s care team', tier: 'Buddy+', price: '$29.99/mo' },
   'profile_customization': { desc: 'Unlock exclusive profile frames and your private care circle', tier: 'Buddy VIP', price: '$279/mo' },
   'private_care_circle': { desc: 'Create a private, invite-only care circle for your pet', tier: 'Buddy VIP', price: '$279/mo' },
 };

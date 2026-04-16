@@ -13,6 +13,22 @@
     const SPECIES_EMOJI = { dog: '🐕', cat: '🐈', bird: '🦜', rabbit: '🐇', other: '🐾' };
     const TIER_DISPLAY = { 'Buddy': 'Buddy', 'Buddy+': 'Buddy+', 'Buddy VIP': 'Buddy VIP', buddy: 'Buddy', buddy_plus: 'Buddy+', buddy_vip: 'Buddy VIP', 'Trial': '🎉 Free Trial' };
 
+    // ── Lazy script loader (Chart.js, jsPDF loaded on demand) ──
+    const _loadedScripts = {};
+    function loadScript(url) {
+      if (_loadedScripts[url]) return _loadedScripts[url];
+      _loadedScripts[url] = new Promise((resolve, reject) => {
+        const s = document.createElement('script');
+        s.src = url;
+        s.onload = resolve;
+        s.onerror = reject;
+        document.head.appendChild(s);
+      });
+      return _loadedScripts[url];
+    }
+    function ensureChartJS() { return loadScript('https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js'); }
+    function ensureJsPDF() { return loadScript('https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js'); }
+
     // ============================================
     // STATE
     // ============================================
@@ -119,6 +135,13 @@
 
     function navigate(view, params = {}) {
       if (state.view === 'knowledge-base' && view !== 'knowledge-base') state._kbLoaded = false;
+      // Clean up realtime subscription when leaving a case view
+      const caseViews = ['client-case', 'buddy-case', 'external-case', 'geneticist-case'];
+      if (caseViews.includes(state.view) && !caseViews.includes(view) && state.realtimeChannel) {
+        sb.removeChannel(state.realtimeChannel);
+        state.realtimeChannel = null;
+        state.typingUsers = {};
+      }
       state.view = view;
       if (params.caseId) state.caseId = params.caseId;
       if (params.caseTab) state.caseTab = params.caseTab;
@@ -149,12 +172,12 @@
       }
 
       if (size === 'card') {
-        if (imgSrc) return `<img src="${esc(imgSrc)}" alt="${esc(pet?.name)}" class="pet-photo-card">`;
+        if (imgSrc) return `<img src="${esc(imgSrc)}" alt="${esc(pet?.name)}" class="pet-photo-card" loading="lazy">`;
         return `<div class="pet-photo-card-placeholder">${emoji}</div>`;
       }
 
       if (size === 'thumb') {
-        if (imgSrc) return `<img src="${esc(imgSrc)}" alt="${esc(pet?.name)}" class="pet-photo-thumb">`;
+        if (imgSrc) return `<img src="${esc(imgSrc)}" alt="${esc(pet?.name)}" class="pet-photo-thumb" loading="lazy">`;
         return `<div class="pet-photo-thumb-placeholder">${emoji}</div>`;
       }
 
@@ -178,8 +201,9 @@
         contentType: 'image/jpeg',
       });
       if (uploadErr) throw uploadErr;
-      const { data: urlData } = sb.storage.from('pet-photos').getPublicUrl(path);
-      const photoUrl = urlData.publicUrl + '?t=' + Date.now();
+      const { data: urlData, error: urlErr } = await sb.storage.from('pet-photos').createSignedUrl(path, 60 * 60 * 24 * 7); // 7-day signed URL
+      if (urlErr) throw urlErr;
+      const photoUrl = urlData.signedUrl + '&t=' + Date.now();
       const { error: updateErr } = await sb.from('pets').update({ photo_url: photoUrl }).eq('id', petId);
       if (updateErr) throw updateErr;
       return photoUrl;
@@ -196,6 +220,7 @@
       message_sent: 5,
       team_member_invited: 15,
       care_request_posted: 5,
+      care_checkin: 10,
     };
 
     const COMMUNITY_XP_MAP = {
@@ -335,6 +360,40 @@
       }
     }
 
+    // ── Care team activity logging ──
+    // When a care team member (caregiver) performs a care action,
+    // log it to the timeline, award bonus XP, and increment assists_given.
+    async function logCareTeamActivity(petId, actionDescription) {
+      if (!petId || !state.profile?.id) return;
+      try {
+        // Check if current user is a caregiver for this pet's case
+        const caseId = state.cases?.find(c => c.pets?.id === petId)?.id || state.currentCase?.id;
+        if (!caseId) return;
+        const careTeam = state._careTeamMembers || [];
+        const isCareTeamMember = careTeam.some(m => m.user_id === state.profile.id && !['buddy', 'dvm', 'admin'].includes(m.role));
+        if (!isCareTeamMember) return;
+
+        const userName = state.profile.name || 'A care team member';
+
+        // 1. Insert timeline entry
+        await sb.from('timeline_entries').insert({
+          case_id: caseId,
+          author_id: state.profile.id,
+          type: 'care_team_action',
+          content: userName + ' ' + actionDescription,
+          is_client_visible: true,
+        });
+
+        // 2. Award bonus XP for care team check-in (10 XP)
+        try { await awardCareXP(petId, 'care_checkin'); } catch(_) {}
+
+        // 3. Increment assists_given for this care team member
+        try { await sb.rpc('increment_assists_given', { uid: state.profile.id }); } catch(_) {}
+      } catch (err) {
+        console.warn('logCareTeamActivity failed (non-blocking):', err);
+      }
+    }
+
     // ── User-level community badge helpers ──
     async function awardUserBadge(userId, badgeType) {
       const def = COMMUNITY_BADGE_DEFINITIONS[badgeType];
@@ -369,10 +428,11 @@
           await awardUserBadge(userId, 'community_pillar');
         }
         // care_village: helped 5+ distinct pets
-        const { count: distinctPets } = await sb.from('care_requests')
-          .select('pet_id', { count: 'exact', head: true })
+        const { data: claimedRequests } = await sb.from('care_requests')
+          .select('pet_id')
           .eq('claimed_by', userId).neq('status', 'cancelled');
-        if (distinctPets >= 5) {
+        const distinctPetIds = new Set((claimedRequests || []).map(r => r.pet_id));
+        if (distinctPetIds.size >= 5) {
           await awardUserBadge(userId, 'care_village');
         }
       } catch (err) {
@@ -418,14 +478,13 @@
         if (existing) {
           await sb.from('user_care_stats').update({
             ...statUpdates,
-            community_score: (existing.community_score || 0) + delta,
             updated_at: now,
           }).eq('user_id', userId);
         } else {
           await sb.from('user_care_stats').insert({
             user_id: userId,
             ...statUpdates,
-            community_score: delta,
+            community_score: 0,
           });
         }
 
@@ -748,8 +807,8 @@
         return;
       }
 
-      if (password.length < 6) {
-        showToast('Password must be at least 6 characters', 'error');
+      if (password.length < 8) {
+        showToast('Password must be at least 8 characters', 'error');
         return;
       }
 
@@ -784,6 +843,16 @@
           state.user = data.user;
           showToast(`Welcome to Vet Buddies, ${name}! 🐾`, 'success');
           await loadProfile();
+          // Accept care team invite if present
+          if (state._careTeamInviteToken && state.profile?.id) {
+            try {
+              await sb.rpc('handle_care_team_invite_accepted', { invite_token: state._careTeamInviteToken, new_user_id: state.profile.id });
+              state._careTeamInviteToken = null;
+              state._careTeamInviteData = null;
+              window.history.replaceState({}, '', window.location.pathname);
+              showToast('You have joined the care team!', 'success');
+            } catch(e) { console.warn('Invite acceptance failed:', e); }
+          }
           render();
         } else {
           // Fallback: if email confirmation is still required
@@ -820,6 +889,16 @@
         if (error) throw error;
         state.user = data.user;
         await loadProfile();
+        // Accept care team invite if present
+        if (state._careTeamInviteToken && state.profile?.id) {
+          try {
+            await sb.rpc('handle_care_team_invite_accepted', { invite_token: state._careTeamInviteToken, new_user_id: state.profile.id });
+            state._careTeamInviteToken = null;
+            state._careTeamInviteData = null;
+            window.history.replaceState({}, '', window.location.pathname);
+            showToast('You\'ve joined the care team!', 'success');
+          } catch(e) { console.warn('Invite acceptance failed:', e); }
+        }
         render();
       } catch (err) {
         console.error(err);
@@ -1023,8 +1102,10 @@
           caseId ? sb.from('case_access').select('*').eq('case_id', caseId) : Promise.resolve({ data: [] }),
           userId ? sb.from('care_requests').select('*, pets(name, species, photo_url)').eq('status', 'open').neq('owner_id', userId).limit(10) : Promise.resolve({ data: [] }),
           userId ? sb.from('care_requests').select('*, pets(name, species, photo_url)').eq('claimed_by', userId).in('status', ['claimed','completed']) : Promise.resolve({ data: [] }),
+          caseId ? sb.from('pending_invites').select('*').eq('case_id', caseId).eq('invite_source', 'care_team').is('used_at', null) : Promise.resolve({ data: [] }),
+          userId ? sb.from('referrals').select('*').eq('referrer_id', userId) : Promise.resolve({ data: [] }),
         ];
-        const [clRes, badgesRes, statsRes, uBadgesRes, teamRes, openReqRes, myClaimedRes] = await Promise.all(fetches);
+        const [clRes, badgesRes, statsRes, uBadgesRes, teamRes, openReqRes, myClaimedRes, pendingCTRes, referralsRes] = await Promise.all(fetches);
         state._petCareLevel = clRes.data || {};
         state._petBadges = badgesRes.data || [];
         state._userCareStats = statsRes.data || {};
@@ -1032,6 +1113,8 @@
         state._careTeamMembers = teamRes.data || [];
         state._openCareRequests = openReqRes.data || [];
         state._myClaimedRequests = myClaimedRes.data || [];
+        state._pendingCareTeamInvites = pendingCTRes.data || [];
+        state._referrals = referralsRes.data || [];
       } catch (err) {
         console.warn('loadPetCareProfile failed:', err);
         state._petCareLevel = {};
@@ -1041,6 +1124,8 @@
         state._careTeamMembers = [];
         state._openCareRequests = [];
         state._myClaimedRequests = [];
+        state._pendingCareTeamInvites = [];
+        state._referrals = [];
       }
     }
 
@@ -1132,11 +1217,11 @@
         if (userId) {
           const { data: existing } = await sb.from('pet_co_owners')
             .select('id').eq('pet_id', petId).eq('user_id', userId).maybeSingle();
-          if (existing) { alert('This person is already a co-owner or has a pending invite.'); return; }
+          if (existing) { showToast('This person is already a co-owner or has a pending invite.', 'error'); return; }
         } else {
           const { data: existing } = await sb.from('pet_co_owners')
             .select('id').eq('pet_id', petId).eq('invited_email', email).maybeSingle();
-          if (existing) { alert('An invite has already been sent to this email.'); return; }
+          if (existing) { showToast('An invite has already been sent to this email.', 'error'); return; }
         }
 
         const insertData = {
@@ -1161,14 +1246,14 @@
 
         // If user already exists and has an account, auto-accept
         if (userId) {
-          alert('Invite sent! ' + email + ' will see this pet on their dashboard.');
+          showToast('Invite sent! ' + email + ' will see this pet on their dashboard.', 'success');
         } else {
-          alert('Invite sent! When ' + email + ' creates an account, they will see this pet.');
+          showToast('Invite sent! When ' + email + ' creates an account, they will see this pet.', 'success');
         }
         await loadPetCoOwners(petId);
       } catch (err) {
         console.error(err);
-        alert('Error sending invite: ' + err.message);
+        showToast('Error sending invite: ' + err.message, 'error');
       }
     }
 
@@ -1181,7 +1266,7 @@
         await loadPendingCoOwnerInvites();
         await loadCases();
         render();
-      } catch (err) { console.error(err); alert('Error accepting invite: ' + err.message); }
+      } catch (err) { console.error(err); showToast('Error accepting invite: ' + err.message, 'error'); }
     }
 
     async function declineCoOwnerInvite(inviteId) {
@@ -2362,12 +2447,45 @@ async function calculateBuddyScorecard(buddyId) {
                 <input type="password" data-field="signup-password" placeholder="••••••••" required aria-label="Password">
               </div>
               <div class="form-group" style="margin-top:4px;">
-                <div style="font-size:12px;color:var(--text-secondary);">Password must be at least 6 characters</div>
+                <div style="font-size:12px;color:var(--text-secondary);">Password must be at least 8 characters</div>
               </div>
               <button type="submit" class="btn btn-primary" style="width: 100%;">Create Account</button>
             </form>
             <div class="auth-toggle">
               Already have an account? <a data-action="nav-login">Sign In</a>
+            </div>
+          </div>
+        </div>
+      `;
+    }
+
+    function renderCareTeamInviteLanding() {
+      const invite = state._careTeamInviteData;
+      if (!invite) return '<div class="auth-container"><div class="auth-card"><p>This invite link is no longer valid.</p><button class="btn btn-primary" data-action="nav-login">Sign In</button></div></div>';
+      const pet = invite.cases?.pets;
+      const owner = pet?.owner;
+      const petName = pet?.name || 'your pet';
+      const petBreed = pet?.breed || '';
+      const petSpecies = pet?.species || 'pet';
+      const ownerName = owner?.name || 'Someone';
+      const petPhoto = pet?.photo_url;
+      const inviteMsg = invite.message || '';
+      const inviteeName = [invite.first_name, invite.last_name].filter(Boolean).join(' ') || '';
+
+      return `
+        <div class="auth-container" style="min-height:100vh; display:flex; align-items:center; justify-content:center; background:linear-gradient(135deg, #f0f7ef 0%, #e8f5e6 50%, #fff 100%);">
+          <div class="auth-card" style="max-width:440px; text-align:center; padding:32px;">
+            ${petPhoto
+              ? `<img src="${esc(petPhoto)}" alt="${esc(petName)}" style="width:120px; height:120px; border-radius:50%; object-fit:cover; margin:0 auto 16px; display:block; border:4px solid #c8e6c4;">`
+              : `<div style="width:120px; height:120px; border-radius:50%; margin:0 auto 16px; display:flex; align-items:center; justify-content:center; background:linear-gradient(135deg, #689562, #336026); font-size:48px; color:white; border:4px solid #c8e6c4;">${(petName.charAt(0) || '🐾').toUpperCase()}</div>`
+            }
+            <h2 style="font-family:'Fraunces',serif; color:#336026; font-size:22px; margin-bottom:8px;">${esc(petName)} needs you on their care team.</h2>
+            <p style="color:var(--text-secondary); font-size:14px; margin-bottom:4px;">Invited by ${esc(ownerName)}</p>
+            ${inviteMsg ? `<blockquote style="background:#f9f9f9; border-left:3px solid #689562; padding:10px 14px; margin:16px 0; font-style:italic; color:var(--text-secondary); font-size:14px; text-align:left; border-radius:0 6px 6px 0;">"${esc(inviteMsg)}"</blockquote>` : ''}
+            <p style="color:var(--text-secondary); font-size:13px; line-height:1.5; margin:16px 0;">Vet Buddies connects pet owners with their care team and a dedicated Vet Buddy — a CSU veterinary student who keeps everyone in the loop between vet visits.</p>
+            <div style="display:flex; flex-direction:column; gap:10px; margin-top:20px;">
+              <button class="btn btn-primary" data-action="care-team-invite-signup" style="width:100%; padding:12px;">Create my account</button>
+              <button class="btn btn-secondary" data-action="care-team-invite-login" style="width:100%; padding:12px;">I already have an account</button>
             </div>
           </div>
         </div>
@@ -2498,6 +2616,13 @@ async function calculateBuddyScorecard(buddyId) {
       const _teamSize = 1 + (buddy ? 1 : 0) + _careTeamMembers.length + (state.petCoOwners || []).length;
       const _communityScore = _userCareStats.community_score || 0;
       const _openCareRequests = state._openCareRequests || [];
+      const _pendingCareTeamInvites = state._pendingCareTeamInvites || [];
+      const _referrals = state._referrals || [];
+      const _caregivers = _careTeamMembers.filter(m => m.role === 'caregiver');
+      const _hasCareTeam = _caregivers.length > 0;
+      const _careTeamColors = ['#E67E22', '#3498DB', '#9B59B6', '#1ABC9C', '#E74C3C', '#F39C12', '#2ECC71'];
+      const _referralsRewarded = _referrals.filter(r => r.reward_status === 'rewarded');
+      const _referralCreditTotal = _referralsRewarded.reduce((sum, r) => sum + (parseFloat(r.reward_amount) || 0), 0);
 
       return renderLayout(`
         ${expiredBanner}
@@ -2621,6 +2746,56 @@ async function calculateBuddyScorecard(buddyId) {
                 <button class="btn btn-primary btn-small" data-action="send-helper-invite" data-case-id="${petCase.id}" data-pet-id="${pet.id}">Send Invite</button>
                 <button class="btn btn-secondary btn-small" data-action="toggle-invite-helper">Cancel</button>
                 <span style="font-size:11px;color:var(--text-secondary);margin-left:auto;">+30 XP when they accept</span>
+              </div>
+            </div>` : ''}
+          </div>
+
+
+          <div class="care-team-section" style="margin-top:0;">
+            ${!_hasCareTeam && _pendingCareTeamInvites.length === 0 ? `
+            <div class="card" style="background:linear-gradient(135deg, #f0f7ef 0%, #e8f5e6 100%); border:1px solid #c8e6c4; text-align:center; padding:24px;">
+              <div style="font-family:'Fraunces',serif; font-size:18px; font-weight:600; color:#336026; margin-bottom:8px;">${esc(pet.name)} has a care team — let's make it official.</div>
+              <div style="font-size:14px; color:var(--text-secondary); margin-bottom:16px;">Who else helps care for ${esc(pet.name)}? Invite them to Vet Buddies so everyone stays on the same page.</div>
+              <button class="btn btn-primary" data-action="open-care-team-invite" data-case-id="${petCase.id}" data-pet-id="${pet.id}" data-pet-name="${esc(pet.name)}" data-pet-breed="${esc(pet.breed || '')}" data-owner-name="${esc(state.profile?.name || '')}">+ Invite someone</button>
+            </div>
+            ` : `
+            <div class="care-team-header">
+              <span class="care-team-title">${esc(pet.name)}'s Care Team</span>
+              <button class="btn btn-secondary btn-small" data-action="open-care-team-invite" data-case-id="${petCase.id}" data-pet-id="${pet.id}" data-pet-name="${esc(pet.name)}" data-pet-breed="${esc(pet.breed || '')}" data-owner-name="${esc(state.profile?.name || '')}">+ Add</button>
+            </div>
+            <div style="display:flex; gap:16px; flex-wrap:wrap; align-items:flex-start; margin:12px 0;">
+              ${_caregivers.map((m, i) => `<div style="text-align:center; min-width:56px;">
+                <div class="avatar-circle" style="background:${_careTeamColors[i % _careTeamColors.length]};width:44px;height:44px;font-size:16px;margin:0 auto;">${(m.display_name || '?').charAt(0).toUpperCase()}</div>
+                <div style="font-size:11px; margin-top:4px; color:var(--text-primary); max-width:64px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${esc(m.display_name || 'Caregiver')}</div>
+              </div>`).join('')}
+              <div style="text-align:center; min-width:56px; cursor:pointer;" data-action="open-care-team-invite" data-case-id="${petCase.id}" data-pet-id="${pet.id}" data-pet-name="${esc(pet.name)}" data-pet-breed="${esc(pet.breed || '')}" data-owner-name="${esc(state.profile?.name || '')}">
+                <div class="avatar-circle" style="background:#f0f0f0;width:44px;height:44px;font-size:20px;margin:0 auto;color:#999;border:2px dashed #ccc;">+</div>
+                <div style="font-size:11px; margin-top:4px; color:var(--text-secondary);">Add</div>
+              </div>
+            </div>
+            ${_xpCurrent > 0 ? `<div style="font-size:12px; color:var(--text-secondary); margin-bottom:8px;">Your team has earned ${_xpCurrent} XP together for ${esc(pet.name)}.</div>` : ''}
+            `}
+            ${_pendingCareTeamInvites.length > 0 ? `
+            <div style="margin-top:8px;">
+              ${_pendingCareTeamInvites.map(inv => `<div style="display:flex; align-items:center; gap:8px; padding:6px 0; font-size:13px; color:var(--text-secondary);">
+                <span style="flex:1;">${esc(inv.first_name || inv.email)}${inv.last_name ? ' ' + esc(inv.last_name) : ''}</span>
+                <span class="badge" style="background:#f5f5f5; color:#999; font-size:10px;">Pending</span>
+                <a href="#" style="font-size:11px; color:var(--primary);" data-action="resend-care-team-invite" data-invite-id="${inv.id}" data-email="${esc(inv.email)}">Resend</a>
+              </div>`).join('')}
+            </div>` : ''}
+            ${_referrals.length > 0 ? `
+            <div style="margin-top:12px; padding-top:12px; border-top:1px solid var(--border);">
+              <div style="font-size:13px; color:var(--text-secondary);">You've brought ${_referrals.length} ${_referrals.length === 1 ? 'person' : 'people'} into ${esc(pet.name)}'s care team.</div>
+              ${_referralCreditTotal > 0 ? `<div style="font-size:13px; color:var(--primary); font-weight:600; margin-top:4px;">Referral credits earned: $${_referralCreditTotal.toFixed(2)}</div>` : ''}
+              <div style="margin-top:6px;">
+                ${_referrals.map(r => {
+                  const rStatus = r.reward_status === 'rewarded' ? 'Subscribed' : (r.referred_user_id ? 'Joined' : 'Pending');
+                  const rColor = r.reward_status === 'rewarded' ? '#2ECC71' : (r.referred_user_id ? '#3498DB' : '#999');
+                  return `<div style="display:flex; align-items:center; gap:8px; font-size:12px; padding:3px 0;">
+                    <span style="flex:1; color:var(--text-secondary);">${esc(r.referred_email)}</span>
+                    <span style="color:${rColor}; font-weight:500;">${rStatus}</span>
+                  </div>`;
+                }).join('')}
               </div>
             </div>` : ''}
           </div>
@@ -5518,6 +5693,12 @@ async function calculateBuddyScorecard(buddyId) {
             <button class="btn btn-secondary" data-action="cancel-profile">Cancel</button>
           </div>
         </div>
+        ${state.profile.role === 'client' ? `
+        <div class="card" style="max-width: 520px; margin-top: 24px; border: 1px solid var(--red);">
+          <div class="card-title" style="color: var(--red); margin-bottom: 12px;">Danger Zone</div>
+          <p style="font-size: 13px; color: var(--text-secondary); margin-bottom: 16px;">Permanently delete your account and all associated data. This action cannot be undone. Your pets, care plans, messages, and documents will be removed.</p>
+          <button class="btn" data-action="delete-account" style="background: var(--red); color: white; border: none;">Delete My Account</button>
+        </div>` : ''}
       `);
     }
 
@@ -6148,6 +6329,7 @@ async function calculateBuddyScorecard(buddyId) {
         ],
         external_vet: [
           { label: 'Cases', icon: '📁', action: 'nav-external-dashboard' },
+          { label: 'Clinic', icon: '🏥', action: 'nav-partner-clinic-dashboard' },
         ],
       };
 
@@ -7607,6 +7789,9 @@ function renderVaccineDueAlerts(vaccines) {
           case 'referral':
             html = renderReferralPage();
             break;
+          case 'care-team-invite':
+            html = renderCareTeamInviteLanding();
+            break;
           case 'buddy-availability':
             html = renderBuddyAvailabilityPage();
             break;
@@ -7682,37 +7867,39 @@ function renderVaccineDueAlerts(vaccines) {
       if (document.getElementById('lto-countdown-banner')) {
         startLTOCountdownTimer();
       }
-      // Chart.js — vitals weight chart
-      const vitalsCanvas = document.getElementById('vitals-chart');
-      if (vitalsCanvas && state.petVitals.length >= 2) {
-        const pts = state.petVitals.filter(v => v.weight).slice(0, 10).reverse();
-        new Chart(vitalsCanvas, { type: 'line', data: {
-          labels: pts.map(v => formatDate(v.recorded_at)),
-          datasets: [{ label: 'Weight', data: pts.map(v => parseFloat(v.weight) || 0), borderColor: '#689562', tension: 0.3, fill: false }]
-        }, options: { plugins: { legend: { display: false } }, scales: { y: { beginAtZero: false } }, responsive: true, maintainAspectRatio: false }});
-      }
-      // Chart.js — signup trend
-      const signupsCanvas = document.getElementById('signups-chart');
-      if (signupsCanvas && state.analyticsData) {
-        const d = state.analyticsData;
-        const weekBuckets = {};
-        for (const u of d.recentSignups || []) {
-          const w = new Date(u.created_at); w.setDate(w.getDate() - w.getDay());
-          const k = w.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
-          weekBuckets[k] = (weekBuckets[k] || 0) + 1;
+      // Chart.js — destroy existing instances before recreating to prevent memory leaks
+      if (!window._chartInstances) window._chartInstances = {};
+      function createChart(canvasId, config) {
+        const canvas = document.getElementById(canvasId);
+        if (!canvas) return null;
+        if (window._chartInstances[canvasId]) {
+          window._chartInstances[canvasId].destroy();
+          delete window._chartInstances[canvasId];
         }
-        const wl = Object.keys(weekBuckets).slice(-8);
-        new Chart(signupsCanvas, { type: 'bar', data: {
-          labels: wl, datasets: [{ label: 'Signups', data: wl.map(k => weekBuckets[k]), backgroundColor: '#689562' }]
-        }, options: { plugins: { legend: { display: false } }, responsive: true, maintainAspectRatio: false }});
+        const chart = new Chart(canvas, config);
+        window._chartInstances[canvasId] = chart;
+        return chart;
       }
-      // Chart.js — subscription tiers
-      const tiersCanvas = document.getElementById('tiers-chart');
-      if (tiersCanvas) {
-        const tierCounts = {}; for (const c of state.cases) { const t = c.subscription_tier || 'None'; tierCounts[t] = (tierCounts[t] || 0) + 1; }
-        new Chart(tiersCanvas, { type: 'doughnut', data: {
-          labels: Object.keys(tierCounts), datasets: [{ data: Object.values(tierCounts), backgroundColor: ['#689562','#336026','#2ecc71','#3498db','#f39c12'] }]
-        }, options: { responsive: true, maintainAspectRatio: false }});
+
+      // Chart.js — load on demand, then render charts
+      if (document.getElementById('vitals-chart') || document.getElementById('signups-chart') || document.getElementById('tiers-chart')) {
+        ensureChartJS().then(() => {
+          if (document.getElementById('vitals-chart') && state.petVitals.length >= 2) {
+            const pts = state.petVitals.filter(v => v.weight).slice(0, 10).reverse();
+            createChart('vitals-chart', { type: 'line', data: { labels: pts.map(v => formatDate(v.recorded_at)), datasets: [{ label: 'Weight', data: pts.map(v => parseFloat(v.weight) || 0), borderColor: '#689562', tension: 0.3, fill: false }] }, options: { plugins: { legend: { display: false } }, scales: { y: { beginAtZero: false } }, responsive: true, maintainAspectRatio: false }});
+          }
+          if (document.getElementById('signups-chart') && state.analyticsData) {
+            const d = state.analyticsData;
+            const weekBuckets = {};
+            for (const u of d.recentSignups || []) { const w = new Date(u.created_at); w.setDate(w.getDate() - w.getDay()); const k = w.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }); weekBuckets[k] = (weekBuckets[k] || 0) + 1; }
+            const wl = Object.keys(weekBuckets).slice(-8);
+            createChart('signups-chart', { type: 'bar', data: { labels: wl, datasets: [{ label: 'Signups', data: wl.map(k => weekBuckets[k]), backgroundColor: '#689562' }] }, options: { plugins: { legend: { display: false } }, responsive: true, maintainAspectRatio: false }});
+          }
+          if (document.getElementById('tiers-chart')) {
+            const tierCounts = {}; for (const c of state.cases) { const t = c.subscription_tier || 'None'; tierCounts[t] = (tierCounts[t] || 0) + 1; }
+            createChart('tiers-chart', { type: 'doughnut', data: { labels: Object.keys(tierCounts), datasets: [{ data: Object.values(tierCounts), backgroundColor: ['#689562','#336026','#2ecc71','#3498db','#f39c12'] }] }, options: { responsive: true, maintainAspectRatio: false }});
+          }
+        }).catch(err => console.warn('Chart.js load failed:', err));
       }
 
       // Typing indicator — broadcast presence on input in chat
@@ -7864,9 +8051,9 @@ function renderVaccineDueAlerts(vaccines) {
         if (action === 'copy-referral-code') { navigator.clipboard.writeText(state.profile?.referral_code||'').then(function(){showToast('Copied!','success');});return; }
         if (action === 'close-password-reset') { state._showPasswordReset=false;render();return; }
         if (action === 'toggle-mute-case') { var cid=target.dataset.caseId;if(!cid)return;var muted=state.notificationSettings.muted_case_ids||[];if(muted.includes(cid)){state.notificationSettings.muted_case_ids=muted.filter(function(id){return id!==cid;});showToast('Notifications unmuted for this case','success');}else{state.notificationSettings.muted_case_ids=[].concat(muted,[cid]);showToast('Notifications muted for this case','info');}saveNotificationSettings().catch(function(){});render();return; }
-        if (action === 'save-new-password') { var np=document.querySelector('[data-field="reset-new-password"]')?.value||'';var cp=document.querySelector('[data-field="reset-confirm-password"]')?.value||'';if(np.length<6){showToast('Password must be at least 6 characters','error');return;}if(np!==cp){showToast('Passwords do not match','error');return;}sb.auth.updateUser({password:np}).then(function(r){if(r.error)throw r.error;state._showPasswordReset=false;showToast('Password updated successfully!','success');render();}).catch(function(e){showToast(e.message||'Failed to update password','error');});return; }
+        if (action === 'save-new-password') { var np=document.querySelector('[data-field="reset-new-password"]')?.value||'';var cp=document.querySelector('[data-field="reset-confirm-password"]')?.value||'';if(np.length<8){showToast('Password must be at least 8 characters','error');return;}if(np!==cp){showToast('Passwords do not match','error');return;}sb.auth.updateUser({password:np}).then(function(r){if(r.error)throw r.error;state._showPasswordReset=false;showToast('Password updated successfully!','success');render();}).catch(function(e){showToast(e.message||'Failed to update password','error');});return; }
         if (action === 'download-ics') { var apt=state.appointments.find(function(a){return a.id===target.dataset.appointmentId;});if(apt){var ics=generateICS(apt,state.currentCase?.pets?.name||'Pet');var b=new Blob([ics],{type:'text/calendar'});var u=URL.createObjectURL(b);var dl=document.createElement('a');dl.href=u;dl.download='vet-buddies-appt.ics';dl.click();URL.revokeObjectURL(u);showToast('Calendar event downloaded!','success');}return; }
-        if (action === 'export-care-plan-pdf') { if(state.carePlan&&state.currentCase){showToast('Generating PDF...','info');generateCarePlanPDF(state.carePlan,state.currentCase).then(function(bu){var url=URL.createObjectURL(bu);var dl=document.createElement('a');dl.href=url;dl.download='care-plan-'+(state.currentCase.pets?.name||'pet')+'.pdf';dl.click();URL.revokeObjectURL(url);showToast('PDF downloaded!','success');}).catch(function(){showToast('PDF failed','error');});}return; }
+        if (action === 'export-care-plan-pdf') { if(state.carePlan&&state.currentCase){showToast('Generating PDF...','info');ensureJsPDF().then(function(){return generateCarePlanPDF(state.carePlan,state.currentCase);}).then(function(bu){var url=URL.createObjectURL(bu);var dl=document.createElement('a');dl.href=url;dl.download='care-plan-'+(state.currentCase.pets?.name||'pet')+'.pdf';dl.click();URL.revokeObjectURL(url);showToast('PDF downloaded!','success');}).catch(function(){showToast('PDF failed','error');});}return; }
         if (action === 'checkout-stripe') { var pid=target.dataset.priceId;if(!pid)return;showToast('Redirecting...','info');var origin=window.location.origin;var checkoutPayload={price_id:pid,success_url:origin+'/?billing=success',cancel_url:origin+'/'};if(isLTOActive()){checkoutPayload.lto_initiated_at=new Date().toISOString();checkoutPayload.lto_locked_rate=true;}callEdgeFunction('stripe-checkout',checkoutPayload).then(function(r){if(r?.url)window.location.href=r.url;}).catch(function(err){showToast(err.message||'Checkout failed','error');});return; }
         if (action === 'show-pricing') { state.showPricingModal=true;render();return; }
         if (action === 'close-pricing') { state.showPricingModal=false;render();return; }
@@ -7949,6 +8136,12 @@ function renderVaccineDueAlerts(vaccines) {
         if (action === 'close-2fa') { state.show2FA=false;render();return; }
 
         switch (action) {
+          case 'care-team-invite-signup':
+            navigate('signup');
+            break;
+          case 'care-team-invite-login':
+            navigate('login');
+            break;
           case 'nav-login':
             navigate('login');
             break;
@@ -8060,6 +8253,89 @@ function renderVaccineDueAlerts(vaccines) {
               try { await awardCareXP(hPetId, 'team_member_invited'); } catch(_) {}
               render();
             } catch(err) { showToast('Failed to send invite', 'error'); }
+            break;
+          }
+          case 'open-care-team-invite': {
+            const ctCaseId = target.dataset.caseId;
+            const ctPetId = target.dataset.petId;
+            const ctPetName = target.dataset.petName || '';
+            const ctPetBreed = target.dataset.petBreed || '';
+            const ctOwnerName = target.dataset.ownerName || state.profile?.name || '';
+            showModal(`Invite to ${ctPetName}'s care team`, `
+              <div class="form-group"><label>Name</label><input type="text" data-field="ct-invite-name" placeholder="First and last name" class="form-input"></div>
+              <div class="form-group"><label>Email</label><input type="email" data-field="ct-invite-email" placeholder="friend@example.com" class="form-input"></div>
+              <div class="form-group"><label>How do they help?</label><input type="text" data-field="ct-invite-how" placeholder="e.g. walks ${esc(ctPetName)} on Tuesdays" class="form-input"></div>
+              <div style="margin-top:12px; padding:12px; background:#f9f9f9; border-radius:8px; font-size:13px; color:var(--text-secondary); line-height:1.5;">
+                <div style="font-size:11px; text-transform:uppercase; letter-spacing:0.5px; font-weight:600; margin-bottom:6px; color:var(--text-secondary);">Invite preview</div>
+                <em>"Hey <span data-preview="ct-name">___</span>, I've added you to ${esc(ctPetName)}'s care team on Vet Buddies. ${esc(ctPetName)} is a ${esc(ctPetBreed)} who <span data-preview="ct-how">___</span>. With Vet Buddies, you can see ${esc(ctPetName)}'s care plan, log check-ins, and stay connected with their Vet Buddy. — ${esc(ctOwnerName)}"</em>
+              </div>
+              <div style="font-size:11px; color:var(--text-secondary); margin-top:8px;">You'll earn referral credit if they subscribe.</div>
+            `, `
+              <button class="btn btn-primary" data-action="send-care-team-invite" data-case-id="${ctCaseId}" data-pet-id="${ctPetId}" data-pet-name="${esc(ctPetName)}" data-pet-breed="${esc(ctPetBreed)}" data-owner-name="${esc(ctOwnerName)}">Send Invite</button>
+              <button class="btn btn-secondary" onclick="closeModal()">Cancel</button>
+            `);
+            // Live-update the preview as user types
+            setTimeout(() => {
+              const nameInput = document.querySelector('[data-field="ct-invite-name"]');
+              const howInput = document.querySelector('[data-field="ct-invite-how"]');
+              const namePreview = document.querySelector('[data-preview="ct-name"]');
+              const howPreview = document.querySelector('[data-preview="ct-how"]');
+              if (nameInput && namePreview) nameInput.addEventListener('input', () => { namePreview.textContent = nameInput.value || '___'; });
+              if (howInput && howPreview) howInput.addEventListener('input', () => { howPreview.textContent = howInput.value || '___'; });
+            }, 50);
+            break;
+          }
+          case 'send-care-team-invite': {
+            const ctName = document.querySelector('[data-field="ct-invite-name"]')?.value?.trim();
+            const ctEmail = document.querySelector('[data-field="ct-invite-email"]')?.value?.trim();
+            const ctHow = document.querySelector('[data-field="ct-invite-how"]')?.value?.trim() || '';
+            const ctCaseId2 = target.dataset.caseId;
+            const ctPetId2 = target.dataset.petId;
+            if (!ctName) { showToast('Name is required', 'error'); break; }
+            if (!ctEmail) { showToast('Email is required', 'error'); break; }
+            // Check if this email is already a co-owner
+            const existingCoOwner = (state.petCoOwners || []).find(co => (co.user?.email || co.invited_email || '').toLowerCase() === ctEmail.toLowerCase());
+            if (existingCoOwner) { showToast('This person is already a co-owner', 'error'); break; }
+            const nameParts = ctName.split(/\s+/);
+            const ctFirst = nameParts[0] || '';
+            const ctLast = nameParts.slice(1).join(' ') || '';
+            try {
+              const ctToken = crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(36).substring(2) + Date.now().toString(36);
+              await sb.from('pending_invites').insert({
+                email: ctEmail,
+                role: 'caregiver',
+                case_id: ctCaseId2,
+                invited_by: state.profile.id,
+                first_name: ctFirst,
+                last_name: ctLast,
+                message: ctHow,
+                token: ctToken,
+                invite_source: 'care_team',
+              });
+              closeModal();
+              showToast(`Invite sent to ${ctFirst}. You'll earn referral credit when they join.`, 'success');
+              try { await awardCareXP(ctPetId2, 'team_member_invited'); } catch(_) {}
+              // Reload care profile to refresh pending invites
+              const activePetId = state.cases[state.activePetIndex || 0]?.pets?.id;
+              if (activePetId) await loadPetCareProfile(activePetId);
+              render();
+            } catch(err) {
+              console.error('Care team invite failed:', err);
+              showToast('Failed to send invite', 'error');
+            }
+            break;
+          }
+          case 'resend-care-team-invite': {
+            const rInviteId = target.dataset.inviteId;
+            const rEmail = target.dataset.email;
+            if (!rInviteId) break;
+            try {
+              // Update created_at to "resend" (resets the invite timestamp)
+              await sb.from('pending_invites').update({ created_at: new Date().toISOString() }).eq('id', rInviteId);
+              showToast(`Invite resent to ${rEmail || 'recipient'}`, 'success');
+            } catch(err) {
+              showToast('Failed to resend invite', 'error');
+            }
             break;
           }
           case 'show-tier-gate': {
@@ -8310,20 +8586,21 @@ function renderVaccineDueAlerts(vaccines) {
               }
               if (target.dataset.tab) state.caseTab = target.dataset.tab;
               state.showAddAppt = false; state.editingApptId = null; state.showAddTimeline = false; state.showRaiseEscalation = false;
+              // Load case first (needed for petId), then everything else in parallel
               await loadCase(state.caseId);
-              await loadCarePlan(state.caseId);
-              await loadMessages(state.caseId);
-              await loadTimeline(state.caseId);
-              await loadAppointments(state.caseId);
-              // Lazy-load tab-specific data when navigating directly to a tab
-              // (state.currentCase is now populated by loadCase above)
               const petId = state.currentCase?.pets?.id;
-              if (state.caseTab === 'medications' && petId) await loadPetMedications(petId);
-              if (state.caseTab === 'vaccines' && petId) await loadPetVaccines(petId);
-              await loadDocuments(state.caseId);
-              await loadGeneticInsights(state.caseId);
-              if (petId) await loadPetCoOwners(petId);
-              try { await loadPetCareProfile(petId); } catch(_) {}
+              await Promise.all([
+                loadCarePlan(state.caseId),
+                loadMessages(state.caseId),
+                loadTimeline(state.caseId),
+                loadAppointments(state.caseId),
+                loadDocuments(state.caseId),
+                loadGeneticInsights(state.caseId),
+                (state.caseTab === 'medications' && petId) ? loadPetMedications(petId) : Promise.resolve(),
+                (state.caseTab === 'vaccines' && petId) ? loadPetVaccines(petId) : Promise.resolve(),
+                petId ? loadPetCoOwners(petId) : Promise.resolve(),
+                petId ? loadPetCareProfile(petId).catch(() => {}) : Promise.resolve(),
+              ]);
               subscribeToMessages(state.caseId);
               navigate('client-case');
             }
@@ -8336,8 +8613,8 @@ function renderVaccineDueAlerts(vaccines) {
             const emailInput = document.getElementById('co-owner-email-input');
             const inviteEmail = emailInput ? emailInput.value.trim() : '';
             const invitePetId = target.dataset.petId;
-            if (!inviteEmail || !inviteEmail.includes('@')) { alert('Please enter a valid email address.'); break; }
-            if (inviteEmail === state.user.email) { alert('You cannot invite yourself.'); break; }
+            if (!inviteEmail || !inviteEmail.includes('@')) { showToast('Please enter a valid email address.', 'error'); break; }
+            if (inviteEmail === state.user.email) { showToast('You cannot invite yourself.', 'error'); break; }
             await inviteCoOwner(invitePetId, inviteEmail);
             state.coOwnerInviteEmail = '';
             render();
@@ -9146,6 +9423,100 @@ function renderVaccineDueAlerts(vaccines) {
             navigate(roleRoutes[state.profile.role] || 'client-dashboard');
             break;
           }
+          case 'delete-account': {
+            // Two-step confirmation to prevent accidental deletion
+            const confirmText = 'DELETE';
+            showModal('Delete Account', `
+              <p style="margin-bottom:12px;">This will permanently delete your account and all associated data including:</p>
+              <ul style="font-size:13px;color:var(--text-secondary);margin-bottom:16px;">
+                <li>All your pets and their care plans</li>
+                <li>Messages and conversation history</li>
+                <li>Medical documents and records</li>
+                <li>Subscription and billing data</li>
+              </ul>
+              <p style="font-weight:600;margin-bottom:8px;">Type <strong>DELETE</strong> to confirm:</p>
+              <input type="text" id="delete-confirm-input" placeholder="Type DELETE" style="width:100%;margin-bottom:4px;">
+            `, `
+              <button class="btn" id="confirm-delete-btn" style="background:var(--red);color:white;border:none;" disabled>Delete My Account</button>
+              <button class="btn btn-secondary" onclick="closeModal()">Cancel</button>
+            `);
+            // Enable button only when user types DELETE
+            setTimeout(() => {
+              const inp = document.getElementById('delete-confirm-input');
+              const btn = document.getElementById('confirm-delete-btn');
+              if (inp && btn) {
+                inp.addEventListener('input', () => { btn.disabled = inp.value.trim() !== confirmText; });
+                btn.addEventListener('click', async () => {
+                  if (inp.value.trim() !== confirmText) return;
+                  btn.textContent = 'Deleting...';
+                  btn.disabled = true;
+                  try {
+                    // Cancel Stripe subscription if active
+                    if (state.profile.stripe_customer_id) {
+                      try { await callEdgeFunction('stripe-billing-portal', { return_url: window.location.origin }); } catch(_) {}
+                    }
+                    // Delete user data in order (respecting foreign keys)
+                    const userId = state.profile.id;
+                    const petIds = (state.cases || []).map(c => c.pets?.id).filter(Boolean);
+                    const caseIds = (state.cases || []).map(c => c.id);
+
+                    if (caseIds.length > 0) {
+                      await Promise.all([
+                        sb.from('messages').delete().in('case_id', caseIds),
+                        sb.from('timeline_entries').delete().in('case_id', caseIds),
+                        sb.from('touchpoints').delete().in('case_id', caseIds),
+                        sb.from('appointments').delete().in('case_id', caseIds),
+                        sb.from('case_documents').delete().in('case_id', caseIds),
+                        sb.from('case_notes').delete().in('case_id', caseIds),
+                        sb.from('care_plans').delete().in('case_id', caseIds),
+                        sb.from('escalations').delete().in('case_id', caseIds),
+                        sb.from('case_access').delete().in('case_id', caseIds),
+                        sb.from('client_surveys').delete().in('case_id', caseIds),
+                        sb.from('genetic_insights').delete().in('case_id', caseIds),
+                      ]);
+                      await sb.from('cases').delete().in('id', caseIds);
+                    }
+                    if (petIds.length > 0) {
+                      await Promise.all([
+                        sb.from('pet_vitals').delete().in('pet_id', petIds),
+                        sb.from('pet_medications').delete().in('pet_id', petIds),
+                        sb.from('pet_vaccines').delete().in('pet_id', petIds),
+                        sb.from('pet_care_level').delete().in('pet_id', petIds),
+                        sb.from('pet_badges').delete().in('pet_id', petIds),
+                        sb.from('pet_co_owners').delete().in('pet_id', petIds),
+                        sb.from('care_requests').delete().in('pet_id', petIds),
+                      ]);
+                      await sb.from('pets').delete().in('id', petIds);
+                    }
+                    await Promise.all([
+                      sb.from('kb_messages').delete().in('conversation_id', (await sb.from('kb_conversations').select('id').eq('user_id', userId)).data?.map(c => c.id) || []),
+                      sb.from('notification_preferences').delete().eq('user_id', userId),
+                      sb.from('push_subscriptions').delete().eq('user_id', userId),
+                      sb.from('user_care_stats').delete().eq('user_id', userId),
+                      sb.from('user_badges').delete().eq('user_id', userId),
+                      sb.from('pending_invites').delete().eq('invited_by', userId),
+                    ]);
+                    await sb.from('kb_conversations').delete().eq('user_id', userId);
+                    await sb.from('users').delete().eq('id', userId);
+
+                    closeModal();
+                    await sb.auth.signOut({ scope: 'local' });
+                    state.user = null;
+                    state.profile = null;
+                    navigate('login');
+                    render();
+                    showToast('Your account has been deleted.', 'success');
+                  } catch(err) {
+                    console.error('Account deletion error:', err);
+                    showToast('Failed to delete account: ' + (err.message || 'Unknown error'), 'error');
+                    btn.textContent = 'Delete My Account';
+                    btn.disabled = false;
+                  }
+                });
+              }
+            }, 100);
+            break;
+          }
           case 'open-resource': {
             const resCard = target.closest('.resource-card');
             const resTitle = resCard?.querySelector('.resource-title')?.textContent;
@@ -9559,6 +9930,7 @@ function renderVaccineDueAlerts(vaccines) {
               await sb.from('pet_medications').insert({ pet_id: target.dataset.petId, case_id: target.dataset.caseId, name, dose, frequency, start_date: startDate || null, end_date: endDate || null, added_by: state.profile.id });
               await loadPetMedications(target.dataset.petId);
               try { await awardCareXP(target.dataset.petId, 'medication_logged'); } catch(_) {}
+              try { await logCareTeamActivity(target.dataset.petId, 'logged a medication: ' + name); } catch(_) {}
               state.showAddMed = false;
               showToast('Medication added', 'success');
               render();
@@ -9592,6 +9964,7 @@ function renderVaccineDueAlerts(vaccines) {
               await sb.from('pet_vitals').insert({ pet_id: target.dataset.petId, weight: weight || null, temperature: temp || null, notes: vNotes || null, recorded_by: state.profile.id });
               await loadPetVitals(target.dataset.petId);
               try { await awardCareXP(target.dataset.petId, 'vital_recorded'); } catch(_) {}
+              try { await logCareTeamActivity(target.dataset.petId, 'logged a vitals check' + (weight ? ': ' + weight + ' lbs' : '')); } catch(_) {}
               state.showAddVitals = false;
               showToast('Vitals recorded', 'success');
               render();
@@ -9618,6 +9991,7 @@ function renderVaccineDueAlerts(vaccines) {
               await sb.from('pet_vaccines').insert({ pet_id: target.dataset.petId, name: vName, administered_date: vDate || null, due_date: vDue || null, notes: vNotes2 || null, added_by: state.profile.id });
               await loadPetVaccines(target.dataset.petId);
               try { await awardCareXP(target.dataset.petId, 'vaccine_recorded'); } catch(_) {}
+              try { await logCareTeamActivity(target.dataset.petId, 'recorded a vaccine: ' + vName); } catch(_) {}
               state.showAddVaccine = false;
               showToast('Vaccine added', 'success');
               render();
@@ -9704,14 +10078,25 @@ function renderVaccineDueAlerts(vaccines) {
             break;
           }
           case 'show-add-canned': {
-            const sc = prompt('Shortcut (e.g. /thanks):');
-            if (!sc) break;
-            const ct = prompt('Response text:');
-            if (!ct) break;
-            await sb.from('canned_responses').insert({ shortcut: sc, content: ct, created_by: state.profile.id });
-            await loadCannedResponses();
-            showToast('Canned response saved', 'success');
-            render();
+            showModal('Add Canned Response', `
+              <div class="form-group"><label>Shortcut (e.g. /thanks)</label><input type="text" id="canned-shortcut-input" placeholder="/thanks" style="width:100%;"></div>
+              <div class="form-group"><label>Response text</label><textarea id="canned-content-input" placeholder="Thank you for the update!" style="width:100%;height:80px;"></textarea></div>
+            `, `
+              <button class="btn btn-primary" id="save-canned-btn">Save</button>
+              <button class="btn btn-secondary" onclick="closeModal()">Cancel</button>
+            `);
+            setTimeout(() => {
+              document.getElementById('save-canned-btn')?.addEventListener('click', async () => {
+                const sc = document.getElementById('canned-shortcut-input')?.value?.trim();
+                const ct = document.getElementById('canned-content-input')?.value?.trim();
+                if (!sc || !ct) { showToast('Both fields are required', 'error'); return; }
+                await sb.from('canned_responses').insert({ shortcut: sc, content: ct, created_by: state.profile.id });
+                await loadCannedResponses();
+                closeModal();
+                showToast('Canned response saved', 'success');
+                render();
+              });
+            }, 50);
             break;
           }
 
@@ -9782,8 +10167,8 @@ function renderVaccineDueAlerts(vaccines) {
                   const path = `messages/${state.caseId}/${Date.now()}_${file.name}`;
                   const { error: upErr } = await sb.storage.from('case-files').upload(path, file, { upsert: false });
                   if (upErr) throw upErr;
-                  const { data: urlData } = sb.storage.from('case-files').getPublicUrl(path);
-                  attachmentUrl = urlData.publicUrl;
+                  const { data: urlData } = await sb.storage.from('case-files').createSignedUrl(path, 60 * 60 * 24 * 7); // 7-day signed URL
+                  attachmentUrl = urlData.signedUrl;
                   attachmentName = file.name;
                   window._pendingAttachment = null;
                 }
@@ -9803,6 +10188,7 @@ function renderVaccineDueAlerts(vaccines) {
                 if (msgErr) throw msgErr;
                 state.messages.push({ ...newMsg, sender: { id: state.profile.id, name: state.profile.name, role: state.profile.role, avatar_initials: state.profile.avatar_initials, avatar_color: state.profile.avatar_color } });
                 try { await awardCareXP(getCurrentPetId(), 'message_sent'); } catch(_) {}
+                try { await logCareTeamActivity(getCurrentPetId(), 'sent a message'); } catch(_) {}
                 logAudit('create', 'message', newMsg.id, { case_id: state.caseId, role: state.profile.role });
                 if (msgInput) msgInput.value = '';
                 state.urgencyToggle = false;
@@ -9839,16 +10225,29 @@ function renderVaccineDueAlerts(vaccines) {
 
           // QUICK QUESTION
           case 'send-quick-question': {
-            const qq = prompt('What\'s your quick question?');
-            if (!qq?.trim()) break;
-            try {
-              await sb.from('messages').insert({ case_id: state.caseId, sender_id: state.profile.id, content: `❓ Quick Question: ${qq}`, sender_role: state.profile.role, message_type: 'quick_question', thread_type: 'client', created_at: new Date().toISOString() });
-              await loadMessages(state.caseId);
-              try { await awardCareXP(getCurrentPetId(), 'message_sent'); } catch(_) {}
-              showToast('Quick question sent!', 'success');
-              render();
-              scrollMessagesToBottom();
-            } catch (err) { showToast('Failed to send', 'error'); }
+            showModal('Quick Question', `
+              <p style="font-size:13px;color:var(--text-secondary);margin-bottom:12px;">Short questions get faster responses from your Buddy.</p>
+              <textarea id="quick-question-input" placeholder="What's your question?" style="width:100%;height:80px;" maxlength="500"></textarea>
+            `, `
+              <button class="btn btn-primary" id="send-qq-btn">Send</button>
+              <button class="btn btn-secondary" onclick="closeModal()">Cancel</button>
+            `);
+            setTimeout(() => {
+              document.getElementById('quick-question-input')?.focus();
+              document.getElementById('send-qq-btn')?.addEventListener('click', async () => {
+                const qq = document.getElementById('quick-question-input')?.value?.trim();
+                if (!qq) { showToast('Please enter a question', 'error'); return; }
+                closeModal();
+                try {
+                  await sb.from('messages').insert({ case_id: state.caseId, sender_id: state.profile.id, content: `❓ Quick Question: ${qq}`, sender_role: state.profile.role, message_type: 'quick_question', thread_type: 'client', created_at: new Date().toISOString() });
+                  await loadMessages(state.caseId);
+                  try { await awardCareXP(getCurrentPetId(), 'message_sent'); } catch(_) {}
+                  showToast('Quick question sent!', 'success');
+                  render();
+                  scrollMessagesToBottom();
+                } catch (err) { showToast('Failed to send', 'error'); }
+              });
+            }, 50);
             break;
           }
 
@@ -9894,16 +10293,43 @@ function renderVaccineDueAlerts(vaccines) {
 
           case 'forgot-password': {
             const email = document.querySelector('[data-field="signin-email"]')?.value?.trim();
-            const addr = email || prompt('Enter your email address:');
-            if (!addr) break;
-            try {
-              const { error } = await sb.auth.resetPasswordForEmail(addr, {
-                redirectTo: window.location.origin + '/?reset=true',
-              });
-              if (error) throw error;
-              showToast('Password reset email sent — check your inbox!', 'success');
-            } catch (err) {
-              showToast(err.message || 'Failed to send reset email', 'error');
+            if (email) {
+              // Email already filled in — send reset directly
+              try {
+                const { error } = await sb.auth.resetPasswordForEmail(email, {
+                  redirectTo: window.location.origin + '/?reset=true',
+                });
+                if (error) throw error;
+                showToast('Password reset email sent — check your inbox!', 'success');
+              } catch (err) {
+                showToast(err.message || 'Failed to send reset email', 'error');
+              }
+            } else {
+              // No email in the field — show modal to enter email
+              showModal('Reset Password', `
+                <p style="font-size:13px;color:var(--text-secondary);margin-bottom:12px;">Enter your email address and we'll send you a reset link.</p>
+                <input type="email" id="reset-email-input" placeholder="you@example.com" style="width:100%;">
+              `, `
+                <button class="btn btn-primary" id="send-reset-btn">Send Reset Link</button>
+                <button class="btn btn-secondary" onclick="closeModal()">Cancel</button>
+              `);
+              setTimeout(() => {
+                document.getElementById('reset-email-input')?.focus();
+                document.getElementById('send-reset-btn')?.addEventListener('click', async () => {
+                  const addr = document.getElementById('reset-email-input')?.value?.trim();
+                  if (!addr) { showToast('Please enter your email', 'error'); return; }
+                  try {
+                    const { error } = await sb.auth.resetPasswordForEmail(addr, {
+                      redirectTo: window.location.origin + '/?reset=true',
+                    });
+                    if (error) throw error;
+                    closeModal();
+                    showToast('Password reset email sent — check your inbox!', 'success');
+                  } catch (err) {
+                    showToast(err.message || 'Failed to send reset email', 'error');
+                  }
+                });
+              }, 50);
             }
             break;
           }
@@ -9991,11 +10417,11 @@ function renderVaccineDueAlerts(vaccines) {
             const path = `cases/${state.caseId}/${Date.now()}_${file.name}`;
             const { error: upErr } = await sb.storage.from('case-files').upload(path, file, { upsert: false });
             if (upErr) throw upErr;
-            const { data: urlData } = sb.storage.from('case-files').getPublicUrl(path);
+            const { data: urlData } = await sb.storage.from('case-files').createSignedUrl(path, 60 * 60 * 24 * 365); // 1-year signed URL for document vault
             await sb.from('case_documents').insert({
               case_id: state.caseId,
               name: file.name,
-              url: urlData.publicUrl,
+              url: urlData.signedUrl,
               size_bytes: file.size,
               mime_type: file.type,
               uploaded_by: state.profile.id,
@@ -10122,9 +10548,35 @@ function renderVaccineDueAlerts(vaccines) {
         } catch (e) { /* referral code not found — no pre-selection */ }
       }
 
-      // Show login initially while we check for existing session
-      navigate('login');
-      render();
+      // Handle care team invite token from URL
+      const inviteToken = urlParams.get('token');
+      if (inviteToken) {
+        state._careTeamInviteToken = inviteToken;
+        try {
+          const { data: invite } = await sb.from('pending_invites')
+            .select('*, cases:case_id(id, pet_id, pets:pet_id(id, name, breed, photo_url, species, owner_id, owner:users!owner_id(id, name)))')
+            .eq('token', inviteToken)
+            .eq('invite_source', 'care_team')
+            .is('used_at', null)
+            .maybeSingle();
+          if (invite) {
+            state._careTeamInviteData = invite;
+            navigate('care-team-invite');
+            render();
+          } else {
+            navigate('login');
+            render();
+          }
+        } catch (e) {
+          console.warn('Invite token lookup failed:', e);
+          navigate('login');
+          render();
+        }
+      } else {
+        // Show login initially while we check for existing session
+        navigate('login');
+        render();
+      }
 
       sb.auth.onAuthStateChange((event, session) => {
         // IMPORTANT: Do NOT make DB calls (sb.from) synchronously inside this callback.

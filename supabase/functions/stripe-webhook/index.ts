@@ -8,14 +8,24 @@ const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 
 // Map Stripe price IDs to plan names
-const PRICE_TO_PLAN: Record<string, string> = {
+// Reads from STRIPE_PRICE_MAP env var if set (JSON: {"price_id":"Plan Name",...})
+// Falls back to hardcoded defaults
+const DEFAULT_PRICE_MAP: Record<string, string> = {
+  // Current price IDs
+  price_1TLxfzCoogKs3SGPIctkgMhW: "Buddy",
+  price_1TLxg0CoogKs3SGPAdQBsb8d: "Buddy+",
+  price_1T7VxVCoogKs3SGPwcXrK0kI: "Buddy VIP",
+  // Legacy price IDs (for existing subscribers)
   price_1T7Vw5CoogKs3SGPv92mnQvk: "Buddy",
   price_1T7VwjCoogKs3SGPL9GcM0FL: "Buddy+",
-  price_1T7VxVCoogKs3SGPwcXrK0kI: "Buddy VIP",
   // LTO prices map to the same plan names
   price_LTO_buddy_1999: "Buddy",
   price_LTO_buddy_plus_2999: "Buddy+",
 };
+const envPriceMap = Deno.env.get("STRIPE_PRICE_MAP");
+const PRICE_TO_PLAN: Record<string, string> = envPriceMap
+  ? { ...DEFAULT_PRICE_MAP, ...JSON.parse(envPriceMap) }
+  : DEFAULT_PRICE_MAP;
 
 // LTO price IDs — subscriptions with these get a locked promotional rate
 const LTO_PRICE_IDS: Record<string, number> = {

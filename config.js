@@ -21,8 +21,8 @@ const CONFIG = Object.freeze({
   LTO_START: null,
   LTO_DURATION_HOURS: 48,
   LTO_PRICES: {
-    buddy:      { amount: 19.99, display: '$19.99', priceId: 'price_LTO_buddy_1999' },
-    buddy_plus: { amount: 29.99, display: '$29.99', priceId: 'price_LTO_buddy_plus_2999' },
+    buddy:      { amount: 14.99, display: '$14.99', priceId: 'price_LTO_buddy_1999' },
+    buddy_plus: { amount: 19.99, display: '$19.99', priceId: 'price_LTO_buddy_plus_2999' },
     // Buddy VIP is not part of the LTO
   },
   LTO_REGULAR_PRICES: {
