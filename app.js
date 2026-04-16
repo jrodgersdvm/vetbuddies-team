@@ -842,7 +842,7 @@
           state.globalNotifChannel = null;
         }
         await unsubscribeFromPush();
-        await sb.auth.signOut();
+        await sb.auth.signOut({ scope: 'local' });
         state.user = null;
         state.profile = null;
         state.cases = [];
@@ -943,7 +943,7 @@
       } catch (err) {
         console.error(err);
         // Clear stale session and return to login rather than showing a blank page
-        await sb.auth.signOut();
+        await sb.auth.signOut({ scope: 'local' });
         state.user = null;
         state.profile = null;
         navigate('login');
