@@ -10697,9 +10697,14 @@ function renderVaccineDueAlerts(vaccines) {
       state.pwaInstallPrompt = e;
     });
 
-    // Register service worker
+    // Register service worker — force-update any stale SW first
     if ('serviceWorker' in navigator) {
-      navigator.serviceWorker.register('/sw.js').then(reg => {
+      navigator.serviceWorker.getRegistrations().then(regs => {
+        const updates = regs.map(r => r.update().catch(() => {}));
+        return Promise.all(updates);
+      }).then(() => {
+        return navigator.serviceWorker.register('/sw.js');
+      }).then(reg => {
         console.log('SW registered:', reg.scope);
       }).catch(err => {
         console.warn('SW registration failed:', err);
