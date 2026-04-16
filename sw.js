@@ -1,5 +1,5 @@
 // Service Worker for Vet Buddies
-const CACHE_NAME = 'vetbuddies-v2';
+const CACHE_NAME = 'vetbuddies-v3';
 const STATIC_ASSETS = [
   '/',
   '/index.html',
@@ -35,25 +35,11 @@ self.addEventListener('fetch', event => {
   // Skip non-GET requests
   if (event.request.method !== 'GET') return;
 
-  // Skip Supabase API, Stripe, and Anthropic calls — always go to network
-  if (url.hostname.includes('supabase') || url.hostname.includes('stripe') || url.hostname.includes('anthropic')) return;
-
-  // CDN scripts and fonts: cache-first (they're versioned)
-  if (url.hostname === 'cdnjs.cloudflare.com' || url.hostname === 'cdn.jsdelivr.net' || url.hostname === 'fonts.googleapis.com' || url.hostname === 'fonts.gstatic.com') {
-    event.respondWith(
-      caches.match(event.request).then(cached => {
-        if (cached) return cached;
-        return fetch(event.request).then(resp => {
-          if (resp.ok) {
-            const clone = resp.clone();
-            caches.open(CACHE_NAME).then(cache => cache.put(event.request, clone));
-          }
-          return resp;
-        });
-      })
-    );
-    return;
-  }
+  // Skip all third-party origins — let the browser handle them directly.
+  // SW fetch() on cross-origin URLs is subject to connect-src CSP, which
+  // blocks CDN/font origins. Returning without calling event.respondWith()
+  // falls through to the browser's default network behaviour.
+  if (url.origin !== self.location.origin) return;
 
   // App shell (same-origin static assets): network-first with cache fallback
   // This ensures users always get fresh code after deploys.
