@@ -22,6 +22,33 @@
   <a href="#main-content" class="skip-link" style="position:absolute;left:-9999px;top:auto;width:1px;height:1px;overflow:hidden;z-index:10000;padding:8px 16px;background:#336026;color:white;font-weight:600;text-decoration:none;border-radius:0 0 4px 0;" onfocus="this.style.cssText='position:fixed;left:0;top:0;z-index:10000;padding:8px 16px;background:#336026;color:white;font-weight:600;text-decoration:none;border-radius:0 0 4px 0;'" onblur="this.style.cssText='position:absolute;left:-9999px;top:auto;width:1px;height:1px;overflow:hidden;'">Skip to main content</a>
   <div id="app" role="application" aria-label="Vet Buddies"></div>
 
+  <script>
+    // Nuclear SW cache bust — runs before app.js to break the stale-cache cycle.
+    // The old SW (v1) used stale-while-revalidate and hit CSP errors on background
+    // fetches, so it could never update its cache. This inline script runs even when
+    // the old SW serves a cached index.html because Netlify's _headers CSP allows
+    // 'unsafe-inline'. Once all SWs are unregistered and caches cleared, the fresh
+    // sw.js (v3, network-first) will be registered by app.js on the next load.
+    (function() {
+      var SW_VERSION = 3; // bump this to force another cache bust
+      var key = 'vetbuddies_sw_version';
+      try {
+        var stored = parseInt(localStorage.getItem(key) || '0', 10);
+        if (stored < SW_VERSION && 'serviceWorker' in navigator) {
+          navigator.serviceWorker.getRegistrations().then(function(regs) {
+            regs.forEach(function(r) { r.unregister(); });
+          });
+          caches.keys().then(function(keys) {
+            keys.forEach(function(k) { caches.delete(k); });
+          });
+          localStorage.setItem(key, String(SW_VERSION));
+          // Reload once so the browser fetches everything fresh from the network
+          if (stored > 0) { window.location.reload(); }
+        }
+      } catch(e) {}
+    })();
+  </script>
+
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
   <script src="config.js"></script>
   <script src="utils.js"></script>
