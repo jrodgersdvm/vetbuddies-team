@@ -2584,7 +2584,7 @@ async function calculateBuddyScorecard(buddyId) {
           <div style="color:var(--text-secondary);margin-bottom:16px;">Your Buddy ${buddy ? '(' + esc(buddy.name) + ') ' : ''}will reach out within 48 hours to start building your Living Care Plan together. In the meantime, feel free to explore!</div>
           <div style="display:flex;gap:12px;justify-content:center;flex-wrap:wrap;">
             <button class="btn btn-primary" data-action="nav-client-case" data-case-id="${petCase.id}" data-tab="messages">Send a Message</button>
-            <button class="btn btn-secondary" data-action="nav-client-case" data-case-id="${petCase.id}" data-tab="careplan">View Care Plan</button>
+            <button class="btn btn-secondary" data-action="nav-knowledge-base">Ask a Question</button>
           </div>
           <div style="margin-top:12px;">
             <button data-action="dismiss-welcome" style="background:none;border:none;color:var(--text-secondary);font-size:13px;cursor:pointer;text-decoration:underline;">Got it!</button>
@@ -2599,8 +2599,7 @@ async function calculateBuddyScorecard(buddyId) {
       const nextAppt = (state.appointments || []).find(a => a.status !== 'cancelled' && new Date(a.scheduled_at) >= new Date());
       const activeGoals = (lp.active_care_goals || []).filter(g => g.status !== 'completed');
       const completedGoals = (lp.active_care_goals || []).filter(g => g.status === 'completed');
-      const recentLog = [...(lp.engagement_log || [])].sort((a, b) => new Date(b.created_at) - new Date(a.created_at)).slice(0, 3);
-      const milestones = (lp.milestones_and_wins || []).slice(-3);
+      // (recentLog and milestones summaries removed — full data now shown inline in care plan)
 
       // Care plan summary fields
       const summaryFields = [
@@ -2638,299 +2637,40 @@ async function calculateBuddyScorecard(buddyId) {
       const _referralsRewarded = _referrals.filter(r => r.reward_status === 'rewarded');
       const _referralCreditTotal = _referralsRewarded.reduce((sum, r) => sum + (parseFloat(r.reward_amount) || 0), 0);
 
+      // ── Genetic Insights for dashboard ──
+      const _patientInsights = (state.geneticInsights || []).filter(g => g.case_id === petCase.id);
+
+      // Full engagement log (not just 3)
+      const fullLog = [...(lp.engagement_log || [])].sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+      const allMilestones = lp.milestones_and_wins || [];
+
       return renderLayout(`
         ${expiredBanner}
         ${trialBanner}
         ${welcomeBanner}
         ${coOwnerInviteBanner}
 
-        <div class="pet-profile-card${_isLegacy ? ' pet-profile-legacy' : ''}">
+        <!-- ═══ Compact Pet Header ═══ -->
+        <div class="pet-profile-card${_isLegacy ? ' pet-profile-legacy' : ''}" style="padding-bottom:12px;">
           ${_isLegacy ? '<div class="pet-profile-legacy-label">In loving memory</div>' : ''}
           <div class="pet-profile-header">
             ${renderPetPhoto(pet, 'hero')}
             <div class="pet-profile-header-info">
-              <div style="font-size:14px; color:var(--text-secondary);">Welcome back, ${esc(state.profile.name)}</div>
               <div class="pet-profile-name">${emoji} ${esc(pet.name)}</div>
               <div style="font-size:13px; color:var(--text-secondary);">${esc(pet.breed || '')}${_petAge ? ' · ' + _petAge : ''}</div>
               ${buddy ? `<div style="font-size:13px; color:var(--text-secondary); margin-top:2px;">Vet Buddy: <strong>${esc(buddy.name)}</strong></div>` : ''}
-              <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:6px;">
+              <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:4px;">
                 <div class="pet-care-level-badge" title="Care Level ${_petLevel.level}">
                   Level ${_petLevel.level} · ${_petLevel.label}
                 </div>
                 ${getUserTier() === 'buddy_vip' ? '<div class="vip-profile-badge">👑 VIP</div>' : ''}
-                ${canAccessFeature('community_score') && _communityScore > 0 ? `<div class="community-score-chip" title="Community Score">${_communityScore} Community</div>` : ''}
+                ${_petCareLevel.streak_days > 1 ? `<span class="pet-streak-indicator" style="margin:0;font-size:12px;">🔥 ${_petCareLevel.streak_days}-day streak</span>` : ''}
               </div>
             </div>
             <div style="display:flex;gap:8px;flex-wrap:wrap;align-self:flex-start;">
               <button class="btn btn-primary btn-small" data-action="nav-client-case" data-case-id="${petCase.id}" data-tab="messages" style="font-size:13px;">💬 Messages${state.unreadCount ? ' (' + state.unreadCount + ')' : ''}</button>
-              <button class="btn btn-secondary btn-small" data-action="nav-client-case" data-case-id="${petCase.id}" data-tab="careplan" style="font-size:13px;">📋 Full Care Plan</button>
             </div>
           </div>
-
-          <div class="pet-xp-bar-container">
-            <div class="pet-xp-bar-labels">
-              <span>${_xpCurrent} XP${getXPMultiplier() > 1 ? ` <span class="xp-multiplier-chip">${getXPMultiplier()}x</span>` : ''}</span>
-              <span>${_nextLevel ? _nextLevel.xp + ' XP for Level ' + _nextLevel.level : 'Max Level!'}</span>
-            </div>
-            <div class="pet-xp-bar">
-              <div class="pet-xp-bar-fill" style="width:${Math.min(_xpProgress, 100)}%"></div>
-            </div>
-            ${_petCareLevel.streak_days > 1 ? `<div class="pet-streak-indicator">🔥 ${_petCareLevel.streak_days}-day streak</div>` : ''}
-          </div>
-
-          <div class="pet-quick-stats">
-            <div class="pet-quick-stat">
-              <div class="pet-quick-stat-value">${_petCareLevel.streak_days || 0}</div>
-              <div class="pet-quick-stat-label">Streak</div>
-            </div>
-            <div class="pet-quick-stat">
-              <div class="pet-quick-stat-value">${_petBadges.length}</div>
-              <div class="pet-quick-stat-label">Badges</div>
-            </div>
-            <div class="pet-quick-stat">
-              <div class="pet-quick-stat-value">${_teamSize}</div>
-              <div class="pet-quick-stat-label">Team</div>
-            </div>
-            <div class="pet-quick-stat">
-              <div class="pet-quick-stat-value">${_userCareStats.assists_given || 0}</div>
-              <div class="pet-quick-stat-label">Pets Helped</div>
-            </div>
-          </div>
-
-          <div class="pet-badge-shelf">
-            <div class="pet-badge-shelf-title">Badges Earned</div>
-            <div class="pet-badge-shelf-row">
-              ${_petBadges.length > 0 ? _petBadges.sort((a,b) => a.display_order - b.display_order).map(b => {
-                const def = BADGE_DEFINITIONS[b.badge_type] || {};
-                return `<div class="pet-badge-item" title="${esc(b.badge_label)}">
-                  <span class="pet-badge-emoji">${def.emoji || '🏅'}</span>
-                  <span class="pet-badge-label">${esc(b.badge_label)}</span>
-                </div>`;
-              }).join('') : '<div class="pet-badge-empty">Complete care actions to earn badges</div>'}
-            </div>
-          </div>
-
-          <div class="care-team-section">
-            <div class="care-team-header">
-              <span class="care-team-title">Care Team</span>
-              ${canAccessFeature('invite_helpers') ? (() => {
-                const currentHelpers = _careTeamMembers.filter(m => m.role === 'helper').length;
-                const cap = getHelperCap(petCase?.id);
-                const canInvite = cap === Infinity || currentHelpers < cap;
-                return canInvite
-                  ? `<button class="btn btn-secondary btn-small" data-action="toggle-invite-helper" data-case-id="${petCase.id}" data-pet-id="${pet.id}">+ Invite Helper</button>`
-                  : `<span style="font-size:11px;color:var(--text-secondary);">Helper limit reached (${currentHelpers}/${cap})</span>`;
-              })() : (getUserTier() === 'buddy' ? `<span class="tier-gate-hint" data-action="show-tier-gate" data-feature="invite_helpers">+ Invite Helper ✨</span>` : '')}
-            </div>
-            <div class="care-team-list">
-              <div class="care-team-member">
-                ${renderAvatar(state.profile?.avatar_initials, state.profile?.avatar_color || '#888')}
-                <div class="care-team-member-info">
-                  <div class="care-team-member-name">${esc(state.profile?.name || 'You')}</div>
-                  <div class="care-team-role-chip role-owner">Owner</div>
-                </div>
-              </div>
-              ${buddy ? `<div class="care-team-member">
-                ${renderAvatar(buddy.avatar_initials, buddy.avatar_color || '#9b59b6')}
-                <div class="care-team-member-info">
-                  <div class="care-team-member-name">${esc(buddy.name)}</div>
-                  <div class="care-team-role-chip role-buddy">Buddy</div>
-                </div>
-              </div>` : ''}
-              ${(state.petCoOwners || []).map(co => `<div class="care-team-member">
-                <div class="avatar-circle" style="background:#888;width:28px;height:28px;font-size:11px;">${(co.user?.name || co.invited_email || '?').charAt(0).toUpperCase()}</div>
-                <div class="care-team-member-info">
-                  <div class="care-team-member-name">${esc(co.user?.name || co.invited_email || 'Co-owner')}</div>
-                  <div class="care-team-role-chip role-owner">Co-owner</div>
-                </div>
-              </div>`).join('')}
-              ${_careTeamMembers.map(m => `<div class="care-team-member">
-                <div class="avatar-circle" style="background:#e67e22;width:28px;height:28px;font-size:11px;">${(m.display_name || '?').charAt(0).toUpperCase()}</div>
-                <div class="care-team-member-info">
-                  <div class="care-team-member-name">${esc(m.display_name || 'Helper')}</div>
-                  <div class="care-team-role-chip role-helper">Helper</div>
-                </div>
-              </div>`).join('')}
-            </div>
-            ${state._showInviteHelper ? `
-            <div class="invite-helper-form">
-              <div class="form-group"><label>Email address</label><input type="email" data-field="helper-invite-email" placeholder="friend@example.com" class="form-input"></div>
-              <div class="form-group"><label>Message (optional)</label><input type="text" data-field="helper-invite-msg" placeholder="Help me care for ${esc(pet.name)}!" class="form-input"></div>
-              <div style="display:flex;gap:8px;align-items:center;">
-                <button class="btn btn-primary btn-small" data-action="send-helper-invite" data-case-id="${petCase.id}" data-pet-id="${pet.id}">Send Invite</button>
-                <button class="btn btn-secondary btn-small" data-action="toggle-invite-helper">Cancel</button>
-                <span style="font-size:11px;color:var(--text-secondary);margin-left:auto;">+30 XP when they accept</span>
-              </div>
-            </div>` : ''}
-          </div>
-
-
-          <div class="care-team-section" style="margin-top:0;">
-            ${!_hasCareTeam && _pendingCareTeamInvites.length === 0 ? `
-            <div class="card" style="background:linear-gradient(135deg, #f0f7ef 0%, #e8f5e6 100%); border:1px solid #c8e6c4; text-align:center; padding:24px;">
-              <div style="font-family:'Fraunces',serif; font-size:18px; font-weight:600; color:#336026; margin-bottom:8px;">${esc(pet.name)} has a care team — let's make it official.</div>
-              <div style="font-size:14px; color:var(--text-secondary); margin-bottom:16px;">Who else helps care for ${esc(pet.name)}? Invite them to Vet Buddies so everyone stays on the same page.</div>
-              <button class="btn btn-primary" data-action="open-care-team-invite" data-case-id="${petCase.id}" data-pet-id="${pet.id}" data-pet-name="${esc(pet.name)}" data-pet-breed="${esc(pet.breed || '')}" data-owner-name="${esc(state.profile?.name || '')}">+ Invite someone</button>
-            </div>
-            ` : `
-            <div class="care-team-header">
-              <span class="care-team-title">${esc(pet.name)}'s Care Team</span>
-              <button class="btn btn-secondary btn-small" data-action="open-care-team-invite" data-case-id="${petCase.id}" data-pet-id="${pet.id}" data-pet-name="${esc(pet.name)}" data-pet-breed="${esc(pet.breed || '')}" data-owner-name="${esc(state.profile?.name || '')}">+ Add</button>
-            </div>
-            <div style="display:flex; gap:16px; flex-wrap:wrap; align-items:flex-start; margin:12px 0;">
-              ${_caregivers.map((m, i) => `<div style="text-align:center; min-width:56px;">
-                <div class="avatar-circle" style="background:${_careTeamColors[i % _careTeamColors.length]};width:44px;height:44px;font-size:16px;margin:0 auto;">${(m.display_name || '?').charAt(0).toUpperCase()}</div>
-                <div style="font-size:11px; margin-top:4px; color:var(--text-primary); max-width:64px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${esc(m.display_name || 'Caregiver')}</div>
-              </div>`).join('')}
-              <div style="text-align:center; min-width:56px; cursor:pointer;" data-action="open-care-team-invite" data-case-id="${petCase.id}" data-pet-id="${pet.id}" data-pet-name="${esc(pet.name)}" data-pet-breed="${esc(pet.breed || '')}" data-owner-name="${esc(state.profile?.name || '')}">
-                <div class="avatar-circle" style="background:#f0f0f0;width:44px;height:44px;font-size:20px;margin:0 auto;color:#999;border:2px dashed #ccc;">+</div>
-                <div style="font-size:11px; margin-top:4px; color:var(--text-secondary);">Add</div>
-              </div>
-            </div>
-            ${_xpCurrent > 0 ? `<div style="font-size:12px; color:var(--text-secondary); margin-bottom:8px;">Your team has earned ${_xpCurrent} XP together for ${esc(pet.name)}.</div>` : ''}
-            `}
-            ${_pendingCareTeamInvites.length > 0 ? `
-            <div style="margin-top:8px;">
-              ${_pendingCareTeamInvites.map(inv => `<div style="display:flex; align-items:center; gap:8px; padding:6px 0; font-size:13px; color:var(--text-secondary);">
-                <span style="flex:1;">${esc(inv.first_name || inv.email)}${inv.last_name ? ' ' + esc(inv.last_name) : ''}</span>
-                <span class="badge" style="background:#f5f5f5; color:#999; font-size:10px;">Pending</span>
-                <a href="#" style="font-size:11px; color:var(--primary);" data-action="resend-care-team-invite" data-invite-id="${inv.id}" data-email="${esc(inv.email)}">Resend</a>
-              </div>`).join('')}
-            </div>` : ''}
-            ${_referrals.length > 0 ? `
-            <div style="margin-top:12px; padding-top:12px; border-top:1px solid var(--border);">
-              <div style="font-size:13px; color:var(--text-secondary);">You've brought ${_referrals.length} ${_referrals.length === 1 ? 'person' : 'people'} into ${esc(pet.name)}'s care team.</div>
-              ${_referralCreditTotal > 0 ? `<div style="font-size:13px; color:var(--primary); font-weight:600; margin-top:4px;">Referral credits earned: $${_referralCreditTotal.toFixed(2)}</div>` : ''}
-              <div style="margin-top:6px;">
-                ${_referrals.map(r => {
-                  const rStatus = r.reward_status === 'rewarded' ? 'Subscribed' : (r.referred_user_id ? 'Joined' : 'Pending');
-                  const rColor = r.reward_status === 'rewarded' ? '#2ECC71' : (r.referred_user_id ? '#3498DB' : '#999');
-                  return `<div style="display:flex; align-items:center; gap:8px; font-size:12px; padding:3px 0;">
-                    <span style="flex:1; color:var(--text-secondary);">${esc(r.referred_email)}</span>
-                    <span style="color:${rColor}; font-weight:500;">${rStatus}</span>
-                  </div>`;
-                }).join('')}
-              </div>
-            </div>` : ''}
-          </div>
-
-          ${(() => {
-            if (!canAccessFeature('care_requests_post')) {
-              return renderTierUpgradePrompt('care_requests_post');
-            }
-            return `<div class="care-requests-section">
-              <div class="care-requests-header">
-                <span class="care-requests-title">Care Requests</span>
-                <button class="btn btn-secondary btn-small" data-action="toggle-post-care-request" data-pet-id="${pet.id}">+ Post a request for ${esc(pet.name)}</button>
-              </div>
-              ${state._showPostCareRequest ? `
-              <div class="care-request-form">
-                <div class="form-group"><label>Request type</label>
-                  <select data-field="cr-type" class="form-input">
-                    <option value="meds_coverage">Medication coverage</option>
-                    <option value="check_in">Check-in visit</option>
-                    <option value="transport">Transport help</option>
-                    <option value="other">Other</option>
-                  </select>
-                </div>
-                <div class="form-group"><label>Title</label><input type="text" data-field="cr-title" placeholder="What do you need help with?" class="form-input"></div>
-                <div class="form-group"><label>Description</label><textarea data-field="cr-desc" placeholder="Details..." class="form-input" style="height:60px;"></textarea></div>
-                <div style="display:flex;gap:8px;flex-wrap:wrap;">
-                  <div class="form-group" style="flex:1;min-width:140px;"><label>Needed by</label><input type="date" data-field="cr-needed-by" class="form-input"></div>
-                  <div class="form-group" style="flex:1;min-width:140px;"><label>Location hint</label><input type="text" data-field="cr-location" placeholder="e.g. NW Portland" class="form-input"></div>
-                </div>
-                ${getUserTier() === 'buddy_vip' ? '<label style="font-size:12px;display:flex;align-items:center;gap:6px;margin-bottom:8px;"><input type="checkbox" data-field="cr-private"> Private (visible only to your care circle)</label>' : ''}
-                <div style="display:flex;gap:8px;">
-                  <button class="btn btn-primary btn-small" data-action="save-care-request" data-pet-id="${pet.id}">Post Request</button>
-                  <button class="btn btn-secondary btn-small" data-action="toggle-post-care-request">Cancel</button>
-                </div>
-              </div>` : ''}
-              ${_openCareRequests.length > 0 ? `
-              <div class="care-requests-feed">
-                <div style="font-size:12px;font-weight:600;color:var(--text-secondary);margin:10px 0 6px;text-transform:uppercase;letter-spacing:0.5px;">Open requests near you</div>
-                ${_openCareRequests.map(r => {
-                  const rPet = r.pets || {};
-                  const rEmoji = SPECIES_EMOJI[rPet.species?.toLowerCase()] || '🐾';
-                  const rTypeLabel = { meds_coverage: '💊 Medication', check_in: '👋 Check-in', transport: '🚗 Transport', other: '📋 Other' }[r.request_type] || r.request_type;
-                  return `<div class="care-request-card${r.is_private ? ' care-request-private' : ''}">
-                    <div class="care-request-card-header">
-                      <span>${rEmoji} <strong>${esc(rPet.name || 'Pet')}</strong></span>
-                      <span class="care-request-xp-pill">+${r.xp_reward || 25} XP</span>
-                    </div>
-                    <div class="care-request-card-title">${esc(r.title)}</div>
-                    ${r.description ? `<div class="care-request-card-desc">${esc(r.description)}</div>` : ''}
-                    <div class="care-request-card-meta">
-                      <span class="care-request-type-label">${rTypeLabel}</span>
-                      ${r.location_hint ? `<span>📍 ${esc(r.location_hint)}</span>` : ''}
-                      ${r.needed_by ? `<span>⏰ ${formatDate(r.needed_by)}</span>` : ''}
-                    </div>
-                    ${canAccessFeature('care_requests_claim') ? `<button class="btn btn-primary btn-small" data-action="claim-care-request" data-request-id="${r.id}">Offer to help</button>` : ''}
-                  </div>`;
-                }).join('')}
-              </div>` : `<div class="care-requests-empty">No open requests nearby yet. Be the first to post one!</div>`}
-            </div>`;
-          })()}
-
-          ${(() => {
-            if (!canAccessFeature('community_impact')) {
-              return renderTierUpgradePrompt('community_impact');
-            }
-            const _assistsGiven = _userCareStats.assists_given || 0;
-            const _assistsReceived = _userCareStats.assists_received || 0;
-            const _contextNote = _assistsGiven > _assistsReceived ? 'You give more than you receive' : _assistsReceived > _assistsGiven ? 'Your community is supporting you' : 'Balanced giving and receiving';
-            const _myClaimedRequests = state._myClaimedRequests || [];
-            const _earnedUserBadges = _userBadges.map(b => b.badge_type);
-            return `<div class="community-impact-section">
-              <div class="community-impact-title">My Impact</div>
-              <div class="community-impact-stats">
-                <div class="community-stat community-stat-teal">
-                  <div class="community-stat-value">${_assistsGiven}</div>
-                  <div class="community-stat-label">Care assists given</div>
-                </div>
-                <div class="community-stat community-stat-amber">
-                  <div class="community-stat-value">${_assistsReceived}</div>
-                  <div class="community-stat-label">Care assists received</div>
-                </div>
-              </div>
-              <div class="community-score-display">
-                <span class="community-score-number">${_communityScore}</span> Community Score
-                <span class="community-score-note">${_contextNote}</span>
-              </div>
-              <div class="user-badge-shelf">
-                <div class="user-badge-shelf-title">Community Badges</div>
-                <div class="user-badge-shelf-row">
-                  ${Object.entries(COMMUNITY_BADGE_DEFINITIONS).map(([type, def]) => {
-                    const earned = _earnedUserBadges.includes(type);
-                    const locked = (type === 'community_pillar' || type === 'care_village') && getUserTier() !== 'buddy_vip';
-                    return `<div class="user-badge-pill ${earned ? 'earned' : 'locked'}" title="${earned ? def.label : (locked ? 'Buddy VIP only: ' : '') + def.unlock}">
-                      <span>${earned ? def.emoji : '🔒'}</span>
-                      <span>${def.label}</span>
-                    </div>`;
-                  }).join('')}
-                </div>
-              </div>
-              ${_myClaimedRequests.length > 0 ? `
-              <div class="my-helping-list">
-                <div class="my-helping-title">Pets I'm Helping</div>
-                ${_myClaimedRequests.map(r => {
-                  const rPet = r.pets || {};
-                  return `<div class="my-helping-item">
-                    <span>${SPECIES_EMOJI[rPet.species?.toLowerCase()] || '🐾'} ${esc(rPet.name || 'Pet')}</span>
-                    <span style="color:var(--text-secondary);font-size:12px;">${esc(r.title || '')}</span>
-                    <span class="care-request-xp-pill">+${r.xp_reward || 25} XP</span>
-                  </div>`;
-                }).join('')}
-              </div>` : ''}
-            </div>`;
-          })()}
-
-          <div class="pet-care-story-section">
-            <label class="pet-care-story-label">Your pet's story</label>
-            <textarea class="pet-care-story-textarea" data-field="pet-care-story" placeholder="Share what makes ${esc(pet.name)} special...">${esc(pet.care_story || '')}</textarea>
-            <button class="btn btn-secondary btn-small pet-care-story-save" data-action="save-care-story" data-pet-id="${pet.id}">Save Story</button>
-          </div>
-
-          ${_isLegacy ? '<div class="pet-legacy-note">This care record is permanently preserved.</div>' : ''}
         </div>
 
         ${petSwitcher}
@@ -2947,66 +2687,156 @@ async function calculateBuddyScorecard(buddyId) {
           </div>
         </div>` : ''}
 
-        ${hasCarePlan ? `
-        <div class="card" style="margin-bottom:16px;">
-          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
-            <div class="card-title" style="margin:0;">Care Summary</div>
+        <!-- ═══ LIVING CARE PLAN — Primary Content ═══ -->
+        <div style="margin-bottom:8px;display:flex;justify-content:space-between;align-items:center;">
+          <div>
+            <h2 style="font-family:'Fraunces',serif;font-size:22px;font-weight:700;color:#336026;margin:0;">${esc(pet.name)}'s Living Care Plan</h2>
+            <div style="font-size:13px;color:var(--text-secondary);margin-top:2px;">Updated collaboratively by you and your Vet Buddy</div>
           </div>
-          ${lp.pet_profile ? `<div style="font-size:13px;line-height:1.6;color:var(--text-secondary);margin-bottom:12px;padding:10px 12px;background:var(--bg);border-radius:8px;">${esc(lp.pet_profile)}</div>` : ''}
-          ${summaryFields.length > 0 ? `<div style="display:grid;gap:0;">
+          <div style="display:flex;gap:8px;">
+            <button class="btn btn-secondary btn-small" data-action="nav-client-case" data-case-id="${petCase.id}" data-tab="careplan" style="font-size:12px;">View Full Details</button>
+          </div>
+        </div>
+
+        <!-- Section 1: Pet Profile -->
+        <div class="card" style="border-left:4px solid var(--primary);margin-bottom:12px;">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+            <div class="card-title" style="margin:0;">🐾 Pet Profile</div>
+          </div>
+          ${lp.pet_profile ? `<div style="font-size:13px;line-height:1.6;color:var(--text);padding:10px 12px;background:var(--bg);border-radius:8px;">${esc(lp.pet_profile)}</div>` : `<div style="font-size:13px;color:var(--text-secondary);font-style:italic;">No pet profile details yet — your Buddy will help fill this in after your first check-in.</div>`}
+          ${summaryFields.length > 0 ? `<div style="display:grid;gap:0;margin-top:10px;">
             ${summaryFields.map(([label, val]) => `
               <div style="display:flex;gap:12px;padding:8px 0;border-bottom:1px solid var(--border);font-size:13px;">
                 <div style="min-width:110px;color:var(--text-secondary);font-weight:600;">${label}</div>
                 <div style="color:var(--text);line-height:1.5;">${esc(val)}</div>
               </div>`).join('')}
           </div>` : ''}
-        </div>` : `
-        <div class="card" style="margin-bottom:16px;text-align:center;padding:24px;">
-          <div style="font-size:32px;margin-bottom:8px;">📋</div>
-          <div style="font-weight:600;color:#336026;margin-bottom:4px;">Your Living Care Plan</div>
-          <div style="font-size:13px;color:var(--text-secondary);line-height:1.5;">Your Buddy will start building your pet's care plan after your first check-in. It will appear right here.</div>
-        </div>`}
+        </div>
 
-        ${activeGoals.length > 0 ? `
-        <div class="card" style="border-left:4px solid var(--green);margin-bottom:16px;">
-          <div class="card-title" style="margin-bottom:10px;">Active Care Goals</div>
-          ${activeGoals.map(g => `
-            <div style="display:flex;align-items:flex-start;gap:10px;padding:8px 0;border-bottom:1px solid var(--border);">
-              <div style="margin-top:2px;font-size:16px;">🎯</div>
-              <div style="flex:1;">
-                <div style="font-size:14px;font-weight:500;">${esc(g.goal_text)}</div>
-                <div style="font-size:11px;color:var(--text-secondary);margin-top:2px;">
-                  ${g.set_by_owner ? 'Set by you' : 'Set by Buddy'}${g.reviewed_at ? ' · Last reviewed ' + formatDate(g.reviewed_at) : ''}
-                </div>
-              </div>
+        <!-- Section 2: Care Team (providers from living plan + app care team) -->
+        <div class="card" style="border-left:4px solid var(--blue);margin-bottom:12px;">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+            <div class="card-title" style="margin:0;">👩‍⚕️ Care Team</div>
+            <button class="btn btn-secondary btn-small" data-action="open-care-team-invite" data-case-id="${petCase.id}" data-pet-id="${pet.id}" data-pet-name="${esc(pet.name)}" data-pet-breed="${esc(pet.breed || '')}" data-owner-name="${esc(state.profile?.name || '')}" style="font-size:12px;">+ Add</button>
+          </div>
+          <div style="display:flex;gap:12px;flex-wrap:wrap;margin-bottom:8px;">
+            <div style="display:flex;align-items:center;gap:8px;padding:6px 12px;background:var(--bg);border-radius:20px;">
+              ${renderAvatar(state.profile?.avatar_initials, state.profile?.avatar_color || '#888', 'sm')}
+              <span style="font-size:13px;font-weight:500;">${esc(state.profile?.name || 'You')}</span>
+              <span class="care-team-role-chip role-owner" style="font-size:10px;">Owner</span>
+            </div>
+            ${buddy ? `<div style="display:flex;align-items:center;gap:8px;padding:6px 12px;background:var(--bg);border-radius:20px;">
+              ${renderAvatar(buddy.avatar_initials, buddy.avatar_color || '#9b59b6', 'sm')}
+              <span style="font-size:13px;font-weight:500;">${esc(buddy.name)}</span>
+              <span class="care-team-role-chip role-buddy" style="font-size:10px;">Buddy</span>
+            </div>` : ''}
+            ${(state.petCoOwners || []).map(co => `<div style="display:flex;align-items:center;gap:8px;padding:6px 12px;background:var(--bg);border-radius:20px;">
+              <div class="avatar-circle" style="background:#888;width:24px;height:24px;font-size:10px;">${(co.user?.name || co.invited_email || '?').charAt(0).toUpperCase()}</div>
+              <span style="font-size:13px;font-weight:500;">${esc(co.user?.name || co.invited_email || 'Co-owner')}</span>
+              <span class="care-team-role-chip role-owner" style="font-size:10px;">Co-owner</span>
             </div>`).join('')}
-          ${completedGoals.length > 0 ? `<div style="font-size:12px;color:var(--green);margin-top:8px;font-weight:500;">${completedGoals.length} goal${completedGoals.length !== 1 ? 's' : ''} completed</div>` : ''}
-        </div>` : ''}
+            ${_careTeamMembers.map(m => `<div style="display:flex;align-items:center;gap:8px;padding:6px 12px;background:var(--bg);border-radius:20px;">
+              <div class="avatar-circle" style="background:#e67e22;width:24px;height:24px;font-size:10px;">${(m.display_name || '?').charAt(0).toUpperCase()}</div>
+              <span style="font-size:13px;font-weight:500;">${esc(m.display_name || 'Helper')}</span>
+              <span class="care-team-role-chip role-helper" style="font-size:10px;">Helper</span>
+            </div>`).join('')}
+          </div>
+          ${lp.care_team.length > 0 ? `
+          <div style="border-top:1px solid var(--border);padding-top:8px;margin-top:4px;">
+            <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.5px;color:var(--text-secondary);margin-bottom:6px;">Veterinary Providers</div>
+            ${lp.care_team.map(ct => `<div style="background:var(--bg);border-radius:8px;padding:10px 12px;margin-bottom:6px;">
+              <div style="font-weight:600;font-size:13px;">${esc(ct.name) || 'Unknown'}</div>
+              <div style="font-size:12px;color:var(--text-secondary);">${esc(ct.role)} ${ct.clinic ? '· ' + esc(ct.clinic) : ''}</div>
+              ${ct.phone || ct.email ? `<div style="font-size:11px;color:var(--text-secondary);margin-top:2px;">${ct.phone ? '📞 ' + esc(ct.phone) : ''} ${ct.email ? '✉️ ' + esc(ct.email) : ''}</div>` : ''}
+            </div>`).join('')}
+          </div>` : ''}
+          ${_pendingCareTeamInvites.length > 0 ? `
+          <div style="margin-top:8px;">
+            ${_pendingCareTeamInvites.map(inv => `<div style="display:flex; align-items:center; gap:8px; padding:6px 0; font-size:13px; color:var(--text-secondary);">
+              <span style="flex:1;">${esc(inv.first_name || inv.email)}${inv.last_name ? ' ' + esc(inv.last_name) : ''}</span>
+              <span class="badge" style="background:#f5f5f5; color:#999; font-size:10px;">Pending</span>
+              <a href="#" style="font-size:11px; color:var(--primary);" data-action="resend-care-team-invite" data-invite-id="${inv.id}" data-email="${esc(inv.email)}">Resend</a>
+            </div>`).join('')}
+          </div>` : ''}
+        </div>
 
-        ${milestones.length > 0 ? `
-        <div class="card" style="border-left:4px solid var(--amber);margin-bottom:16px;background:linear-gradient(135deg,#fffde7 0%,#fff8e1 100%);">
-          <div class="card-title" style="margin-bottom:10px;">Recent Wins</div>
-          ${milestones.map(m => `
+        <!-- Section 3: Active Care Goals -->
+        <div class="card" style="border-left:4px solid var(--green);margin-bottom:12px;">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+            <div class="card-title" style="margin:0;">🎯 Active Care Goals</div>
+            ${completedGoals.length > 0 ? `<span style="font-size:12px;color:var(--green);font-weight:500;">${completedGoals.length} completed</span>` : ''}
+          </div>
+          ${activeGoals.length > 0 ? activeGoals.map(g => {
+            const daysSinceReview = g.reviewed_at ? Math.floor((Date.now() - new Date(g.reviewed_at).getTime()) / (1000*60*60*24)) : 999;
+            const tier = TIER_DISPLAY[petCase.subscription_tier] || petCase.subscription_tier;
+            const needsQuarterlyReview = (tier === 'Buddy+' || tier === 'Buddy VIP') && daysSinceReview > 85 && g.status === 'active';
+            return `<div style="background:var(--bg);border-radius:8px;padding:12px;margin-bottom:8px;border-left:3px solid var(--amber);">
+              <div style="font-weight:500;font-size:14px;">${esc(g.goal_text)}</div>
+              <div style="font-size:11px;color:var(--text-secondary);margin-top:4px;">
+                ${g.set_by_owner ? '✍️ Set by you' : '📋 Set by Buddy'}${g.reviewed_at ? ' · Last reviewed ' + formatDate(g.reviewed_at) : ''}
+              </div>
+              ${g.dvm_reviewed ? '<span style="display:inline-block;margin-top:4px;background:#e8f5e9;color:#2e7d32;font-size:11px;font-weight:600;padding:2px 8px;border-radius:12px;">✅ DVM-Reviewed</span>' : ''}
+              ${needsQuarterlyReview ? '<div style="margin-top:6px;background:#fff3cd;color:#856404;font-size:12px;padding:4px 8px;border-radius:6px;">⏰ Quarterly Goal Review due</div>' : ''}
+            </div>`;
+          }).join('') : '<div style="font-size:13px;color:var(--text-secondary);font-style:italic;">No care goals set yet — your Buddy will work with you to set meaningful goals for your pet.</div>'}
+        </div>
+
+        <!-- Section 4: Engagement Log -->
+        <div class="card" style="border-left:4px solid var(--purple);margin-bottom:12px;">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+            <div class="card-title" style="margin:0;">📝 Check-in Log</div>
+          </div>
+          ${fullLog.length > 0 ? `<div style="max-height:300px;overflow-y:auto;">
+            ${fullLog.map(entry => `
+              <div style="padding:8px 0;border-bottom:1px solid var(--border);">
+                <div style="font-size:13px;line-height:1.5;">${esc(entry.entry_text)}</div>
+                <div style="font-size:11px;color:var(--text-secondary);margin-top:4px;">— ${esc(entry.created_by) || 'Buddy'} · ${entry.created_at ? formatDate(entry.created_at) : ''}</div>
+              </div>`).join('')}
+          </div>` : '<div style="font-size:13px;color:var(--text-secondary);font-style:italic;">No check-ins logged yet. Your first wellness check-in will appear here.</div>'}
+        </div>
+
+        <!-- Section 5: Milestones & Wins -->
+        <div class="card" style="border-left:4px solid var(--amber);margin-bottom:12px;background:linear-gradient(135deg,#fffde7 0%,#fff8e1 100%);">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+            <div class="card-title" style="margin:0;">🏆 Milestones & Wins</div>
+          </div>
+          ${allMilestones.length > 0 ? allMilestones.map(m => `
             <div style="background:white;border-radius:8px;padding:10px 12px;margin-bottom:6px;border:1px solid #ffe082;">
               <div style="font-weight:600;color:#f57f17;font-size:13px;">🌟 ${esc(m.title)}</div>
               ${m.description ? `<div style="font-size:12px;margin-top:2px;color:var(--text-secondary);">${esc(m.description)}</div>` : ''}
-            </div>`).join('')}
-        </div>` : ''}
+              <div style="font-size:11px;color:var(--text-secondary);margin-top:4px;">— ${esc(m.created_by) || 'Team'} · ${m.created_at ? formatDate(m.created_at) : ''}</div>
+            </div>`).join('') : '<div style="font-size:13px;color:var(--text-secondary);font-style:italic;">No milestones yet — every little win counts! 🎉</div>'}
+        </div>
 
-        ${recentLog.length > 0 ? `
-        <div class="card" style="border-left:4px solid var(--purple);margin-bottom:16px;">
-          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">
-            <div class="card-title" style="margin:0;">Recent Check-ins</div>
-            <button class="btn btn-secondary btn-small" data-action="nav-client-case" data-case-id="${petCase.id}" data-tab="careplan" style="font-size:11px;">View All</button>
+        <!-- Section 6: Genetic Insights (if any) -->
+        ${_patientInsights.length > 0 ? `
+        <div class="card" style="border-left:4px solid #534AB7;margin-bottom:12px;">
+          <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px;">
+            <span style="font-size:18px;">&#x1F9EC;</span>
+            <div class="card-title" style="margin:0;color:#534AB7;">Genetic Insights</div>
+            <span style="font-size:11px;color:#534AB7;background:#EEEDFE;padding:2px 8px;border-radius:10px;">From Dr. El Hamidi Hay</span>
           </div>
-          ${recentLog.map(entry => `
-            <div style="padding:8px 0;border-bottom:1px solid var(--border);">
-              <div style="font-size:13px;line-height:1.5;">${esc(entry.entry_text)}</div>
-              <div style="font-size:11px;color:var(--text-secondary);margin-top:4px;">— ${esc(entry.created_by) || 'Buddy'} · ${entry.created_at ? formatDate(entry.created_at) : ''}</div>
-            </div>`).join('')}
+          ${_patientInsights.map(insight => `<div style="margin-bottom:12px;">
+            <div style="font-weight:600;font-size:14px;margin-bottom:6px;">${esc(insight.title)}</div>
+            <div style="font-size:13px;line-height:1.7;color:#444;margin-bottom:8px;white-space:pre-wrap;">${esc(insight.content)}</div>
+            ${insight.breed_risk_flags && insight.breed_risk_flags.length > 0 ? `<div style="margin-bottom:8px;">
+              <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.5px;color:#854F0B;margin-bottom:4px;">Risk Flags</div>
+              <div style="display:flex;flex-wrap:wrap;gap:6px;">
+                ${insight.breed_risk_flags.map(flag => `<span style="font-size:12px;background:#FFF4E0;color:#854F0B;padding:3px 10px;border-radius:10px;">${esc(flag)}</span>`).join('')}
+              </div>
+            </div>` : ''}
+            ${insight.recommendations && insight.recommendations.length > 0 ? `<div>
+              <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.5px;color:#336026;margin-bottom:6px;">Recommendations</div>
+              <ul style="margin:0;padding-left:18px;">
+                ${insight.recommendations.map(rec => `<li style="font-size:13px;color:#444;line-height:1.7;">${esc(rec)}</li>`).join('')}
+              </ul>
+            </div>` : ''}
+            <div style="font-size:11px;color:var(--text-secondary);margin-top:6px;">Updated ${formatDate(insight.updated_at)}</div>
+          </div>`).join('')}
         </div>` : ''}
 
-        <div class="card" style="border-left:4px solid var(--primary);margin-bottom:16px;cursor:pointer;" data-action="dashboard-upload-records" data-case-id="${petCase.id}">
+        <!-- ═══ Quick Actions ═══ -->
+        <div class="card" style="border-left:4px solid var(--primary);margin-bottom:12px;cursor:pointer;" data-action="dashboard-upload-records" data-case-id="${petCase.id}">
           <div style="display:flex;align-items:center;gap:14px;">
             <div style="font-size:28px;">📋</div>
             <div style="flex:1;">
@@ -3024,10 +2854,213 @@ async function calculateBuddyScorecard(buddyId) {
           <div class="card" style="padding:14px;text-align:center;cursor:pointer;" data-action="nav-client-case" data-case-id="${petCase.id}" data-tab="files">
             <div style="font-size:20px;margin-bottom:4px;">📁</div><div style="font-weight:500;font-size:12px;color:#336026;">Files</div>
           </div>
+          <div class="card" style="padding:14px;text-align:center;cursor:pointer;" data-action="nav-client-case" data-case-id="${petCase.id}" data-tab="medications">
+            <div style="font-size:20px;margin-bottom:4px;">💊</div><div style="font-weight:500;font-size:12px;color:#336026;">Medications</div>
+          </div>
+          <div class="card" style="padding:14px;text-align:center;cursor:pointer;" data-action="nav-client-case" data-case-id="${petCase.id}" data-tab="vaccines">
+            <div style="font-size:20px;margin-bottom:4px;">💉</div><div style="font-weight:500;font-size:12px;color:#336026;">Vaccines</div>
+          </div>
           <div class="card" style="padding:14px;text-align:center;cursor:pointer;" data-action="nav-add-pet">
             <div style="font-size:20px;margin-bottom:4px;">➕</div><div style="font-weight:500;font-size:12px;color:#336026;">Add Pet</div>
           </div>
         </div>
+
+        <!-- ═══ Engagement & Progress (collapsible) ═══ -->
+        <details style="margin-bottom:16px;">
+          <summary style="cursor:pointer;font-family:'Fraunces',serif;font-size:16px;font-weight:600;color:#336026;padding:12px 0;user-select:none;">Progress & Engagement</summary>
+          <div style="padding-top:8px;">
+            <div class="pet-xp-bar-container" style="margin-bottom:16px;">
+              <div class="pet-xp-bar-labels">
+                <span>${_xpCurrent} XP${getXPMultiplier() > 1 ? ` <span class="xp-multiplier-chip">${getXPMultiplier()}x</span>` : ''}</span>
+                <span>${_nextLevel ? _nextLevel.xp + ' XP for Level ' + _nextLevel.level : 'Max Level!'}</span>
+              </div>
+              <div class="pet-xp-bar">
+                <div class="pet-xp-bar-fill" style="width:${Math.min(_xpProgress, 100)}%"></div>
+              </div>
+            </div>
+
+            <div class="pet-quick-stats" style="margin-bottom:16px;">
+              <div class="pet-quick-stat">
+                <div class="pet-quick-stat-value">${_petCareLevel.streak_days || 0}</div>
+                <div class="pet-quick-stat-label">Streak</div>
+              </div>
+              <div class="pet-quick-stat">
+                <div class="pet-quick-stat-value">${_petBadges.length}</div>
+                <div class="pet-quick-stat-label">Badges</div>
+              </div>
+              <div class="pet-quick-stat">
+                <div class="pet-quick-stat-value">${_teamSize}</div>
+                <div class="pet-quick-stat-label">Team</div>
+              </div>
+              <div class="pet-quick-stat">
+                <div class="pet-quick-stat-value">${_userCareStats.assists_given || 0}</div>
+                <div class="pet-quick-stat-label">Pets Helped</div>
+              </div>
+            </div>
+
+            <div class="pet-badge-shelf" style="margin-bottom:16px;">
+              <div class="pet-badge-shelf-title">Badges Earned</div>
+              <div class="pet-badge-shelf-row">
+                ${_petBadges.length > 0 ? _petBadges.sort((a,b) => a.display_order - b.display_order).map(b => {
+                  const def = BADGE_DEFINITIONS[b.badge_type] || {};
+                  return `<div class="pet-badge-item" title="${esc(b.badge_label)}">
+                    <span class="pet-badge-emoji">${def.emoji || '🏅'}</span>
+                    <span class="pet-badge-label">${esc(b.badge_label)}</span>
+                  </div>`;
+                }).join('') : '<div class="pet-badge-empty">Complete care actions to earn badges</div>'}
+              </div>
+            </div>
+
+            <div class="pet-care-story-section" style="margin-bottom:16px;">
+              <label class="pet-care-story-label">Your pet's story</label>
+              <textarea class="pet-care-story-textarea" data-field="pet-care-story" placeholder="Share what makes ${esc(pet.name)} special...">${esc(pet.care_story || '')}</textarea>
+              <button class="btn btn-secondary btn-small pet-care-story-save" data-action="save-care-story" data-pet-id="${pet.id}">Save Story</button>
+            </div>
+          </div>
+        </details>
+
+        <!-- ═══ Community (collapsible, tier-gated) ═══ -->
+        <details style="margin-bottom:16px;">
+          <summary style="cursor:pointer;font-family:'Fraunces',serif;font-size:16px;font-weight:600;color:#336026;padding:12px 0;user-select:none;">Community & Care Requests</summary>
+          <div style="padding-top:8px;">
+            ${state._showInviteHelper ? `
+            <div class="invite-helper-form" style="margin-bottom:16px;">
+              <div class="form-group"><label>Email address</label><input type="email" data-field="helper-invite-email" placeholder="friend@example.com" class="form-input"></div>
+              <div class="form-group"><label>Message (optional)</label><input type="text" data-field="helper-invite-msg" placeholder="Help me care for ${esc(pet.name)}!" class="form-input"></div>
+              <div style="display:flex;gap:8px;align-items:center;">
+                <button class="btn btn-primary btn-small" data-action="send-helper-invite" data-case-id="${petCase.id}" data-pet-id="${pet.id}">Send Invite</button>
+                <button class="btn btn-secondary btn-small" data-action="toggle-invite-helper">Cancel</button>
+                <span style="font-size:11px;color:var(--text-secondary);margin-left:auto;">+30 XP when they accept</span>
+              </div>
+            </div>` : `
+            ${canAccessFeature('invite_helpers') ? (() => {
+              const currentHelpers = _careTeamMembers.filter(m => m.role === 'helper').length;
+              const cap = getHelperCap(petCase?.id);
+              const canInvite = cap === Infinity || currentHelpers < cap;
+              return canInvite
+                ? `<button class="btn btn-secondary btn-small" data-action="toggle-invite-helper" data-case-id="${petCase.id}" data-pet-id="${pet.id}" style="margin-bottom:12px;">+ Invite Helper</button>`
+                : `<span style="font-size:11px;color:var(--text-secondary);margin-bottom:12px;display:block;">Helper limit reached (${currentHelpers}/${cap})</span>`;
+            })() : (getUserTier() === 'buddy' ? `<span class="tier-gate-hint" data-action="show-tier-gate" data-feature="invite_helpers" style="margin-bottom:12px;display:block;">+ Invite Helper ✨</span>` : '')}`}
+
+            ${(() => {
+              if (!canAccessFeature('care_requests_post')) {
+                return renderTierUpgradePrompt('care_requests_post');
+              }
+              return `<div class="care-requests-section">
+                <div class="care-requests-header">
+                  <span class="care-requests-title">Care Requests</span>
+                  <button class="btn btn-secondary btn-small" data-action="toggle-post-care-request" data-pet-id="${pet.id}">+ Post a request for ${esc(pet.name)}</button>
+                </div>
+                ${state._showPostCareRequest ? `
+                <div class="care-request-form">
+                  <div class="form-group"><label>Request type</label>
+                    <select data-field="cr-type" class="form-input">
+                      <option value="meds_coverage">Medication coverage</option>
+                      <option value="check_in">Check-in visit</option>
+                      <option value="transport">Transport help</option>
+                      <option value="other">Other</option>
+                    </select>
+                  </div>
+                  <div class="form-group"><label>Title</label><input type="text" data-field="cr-title" placeholder="What do you need help with?" class="form-input"></div>
+                  <div class="form-group"><label>Description</label><textarea data-field="cr-desc" placeholder="Details..." class="form-input" style="height:60px;"></textarea></div>
+                  <div style="display:flex;gap:8px;flex-wrap:wrap;">
+                    <div class="form-group" style="flex:1;min-width:140px;"><label>Needed by</label><input type="date" data-field="cr-needed-by" class="form-input"></div>
+                    <div class="form-group" style="flex:1;min-width:140px;"><label>Location hint</label><input type="text" data-field="cr-location" placeholder="e.g. NW Portland" class="form-input"></div>
+                  </div>
+                  ${getUserTier() === 'buddy_vip' ? '<label style="font-size:12px;display:flex;align-items:center;gap:6px;margin-bottom:8px;"><input type="checkbox" data-field="cr-private"> Private (visible only to your care circle)</label>' : ''}
+                  <div style="display:flex;gap:8px;">
+                    <button class="btn btn-primary btn-small" data-action="save-care-request" data-pet-id="${pet.id}">Post Request</button>
+                    <button class="btn btn-secondary btn-small" data-action="toggle-post-care-request">Cancel</button>
+                  </div>
+                </div>` : ''}
+                ${_openCareRequests.length > 0 ? `
+                <div class="care-requests-feed">
+                  <div style="font-size:12px;font-weight:600;color:var(--text-secondary);margin:10px 0 6px;text-transform:uppercase;letter-spacing:0.5px;">Open requests near you</div>
+                  ${_openCareRequests.map(r => {
+                    const rPet = r.pets || {};
+                    const rEmoji = SPECIES_EMOJI[rPet.species?.toLowerCase()] || '🐾';
+                    const rTypeLabel = { meds_coverage: '💊 Medication', check_in: '👋 Check-in', transport: '🚗 Transport', other: '📋 Other' }[r.request_type] || r.request_type;
+                    return `<div class="care-request-card${r.is_private ? ' care-request-private' : ''}">
+                      <div class="care-request-card-header">
+                        <span>${rEmoji} <strong>${esc(rPet.name || 'Pet')}</strong></span>
+                        <span class="care-request-xp-pill">+${r.xp_reward || 25} XP</span>
+                      </div>
+                      <div class="care-request-card-title">${esc(r.title)}</div>
+                      ${r.description ? `<div class="care-request-card-desc">${esc(r.description)}</div>` : ''}
+                      <div class="care-request-card-meta">
+                        <span class="care-request-type-label">${rTypeLabel}</span>
+                        ${r.location_hint ? `<span>📍 ${esc(r.location_hint)}</span>` : ''}
+                        ${r.needed_by ? `<span>⏰ ${formatDate(r.needed_by)}</span>` : ''}
+                      </div>
+                      ${canAccessFeature('care_requests_claim') ? `<button class="btn btn-primary btn-small" data-action="claim-care-request" data-request-id="${r.id}">Offer to help</button>` : ''}
+                    </div>`;
+                  }).join('')}
+                </div>` : `<div class="care-requests-empty">No open requests nearby yet. Be the first to post one!</div>`}
+              </div>`;
+            })()}
+
+            ${(() => {
+              if (!canAccessFeature('community_impact')) {
+                return renderTierUpgradePrompt('community_impact');
+              }
+              const _assistsGiven = _userCareStats.assists_given || 0;
+              const _assistsReceived = _userCareStats.assists_received || 0;
+              const _contextNote = _assistsGiven > _assistsReceived ? 'You give more than you receive' : _assistsReceived > _assistsGiven ? 'Your community is supporting you' : 'Balanced giving and receiving';
+              const _myClaimedRequests = state._myClaimedRequests || [];
+              const _earnedUserBadges = _userBadges.map(b => b.badge_type);
+              return `<div class="community-impact-section">
+                <div class="community-impact-title">My Impact</div>
+                <div class="community-impact-stats">
+                  <div class="community-stat community-stat-teal">
+                    <div class="community-stat-value">${_assistsGiven}</div>
+                    <div class="community-stat-label">Care assists given</div>
+                  </div>
+                  <div class="community-stat community-stat-amber">
+                    <div class="community-stat-value">${_assistsReceived}</div>
+                    <div class="community-stat-label">Care assists received</div>
+                  </div>
+                </div>
+                <div class="community-score-display">
+                  <span class="community-score-number">${_communityScore}</span> Community Score
+                  <span class="community-score-note">${_contextNote}</span>
+                </div>
+                <div class="user-badge-shelf">
+                  <div class="user-badge-shelf-title">Community Badges</div>
+                  <div class="user-badge-shelf-row">
+                    ${Object.entries(COMMUNITY_BADGE_DEFINITIONS).map(([type, def]) => {
+                      const earned = _earnedUserBadges.includes(type);
+                      const locked = (type === 'community_pillar' || type === 'care_village') && getUserTier() !== 'buddy_vip';
+                      return `<div class="user-badge-pill ${earned ? 'earned' : 'locked'}" title="${earned ? def.label : (locked ? 'Buddy VIP only: ' : '') + def.unlock}">
+                        <span>${earned ? def.emoji : '🔒'}</span>
+                        <span>${def.label}</span>
+                      </div>`;
+                    }).join('')}
+                  </div>
+                </div>
+                ${_myClaimedRequests.length > 0 ? `
+                <div class="my-helping-list">
+                  <div class="my-helping-title">Pets I'm Helping</div>
+                  ${_myClaimedRequests.map(r => {
+                    const rPet = r.pets || {};
+                    return `<div class="my-helping-item">
+                      <span>${SPECIES_EMOJI[rPet.species?.toLowerCase()] || '🐾'} ${esc(rPet.name || 'Pet')}</span>
+                      <span style="color:var(--text-secondary);font-size:12px;">${esc(r.title || '')}</span>
+                      <span class="care-request-xp-pill">+${r.xp_reward || 25} XP</span>
+                    </div>`;
+                  }).join('')}
+                </div>` : ''}
+              </div>`;
+            })()}
+
+            ${_referrals.length > 0 ? `
+            <div style="margin-top:12px; padding-top:12px; border-top:1px solid var(--border);">
+              <div style="font-size:13px; color:var(--text-secondary);">You've brought ${_referrals.length} ${_referrals.length === 1 ? 'person' : 'people'} into ${esc(pet.name)}'s care team.</div>
+              ${_referralCreditTotal > 0 ? `<div style="font-size:13px; color:var(--primary); font-weight:600; margin-top:4px;">Referral credits earned: $${_referralCreditTotal.toFixed(2)}</div>` : ''}
+            </div>` : ''}
+          </div>
+        </details>
+
+        ${_isLegacy ? '<div class="pet-legacy-note">This care record is permanently preserved.</div>' : ''}
 
         ${renderSubscriptionCard()}
       `);
@@ -5191,7 +5224,7 @@ async function calculateBuddyScorecard(buddyId) {
         </div>
         <div style="margin-top:14px;display:flex;gap:8px;">
           <button class="btn btn-primary" onclick="window.print()">🖨️ Print / Save PDF</button>
-          <button class="btn btn-secondary" data-action="nav-client-case" data-tab="careplan">← Back to Living Care Plan</button>
+          <button class="btn btn-secondary" data-action="nav-client-dashboard">← Back to Living Care Plan</button>
         </div>
       `;
       return renderLayout(summaryHtml);
@@ -6253,9 +6286,8 @@ async function calculateBuddyScorecard(buddyId) {
 
       const navsByRole = {
         client: [
-          { label: 'My Pet', icon: '🐕', action: 'nav-client-dashboard' },
+          { label: 'Care Plan', icon: '📋', action: 'nav-client-dashboard' },
           { label: 'Messages', icon: '💬', action: 'nav-client-case', tab: 'messages' },
-          { label: 'Care Plan', icon: '📋', action: 'nav-client-case', tab: 'careplan' },
           { label: 'Knowledge Base', icon: '📚', action: 'nav-knowledge-base' },
           { label: 'Health Timeline', icon: '📊', action: 'nav-health-timeline' },
           { label: 'Referrals', icon: '🎁', action: 'nav-referral-dashboard' },
@@ -6343,9 +6375,8 @@ async function calculateBuddyScorecard(buddyId) {
       // Bottom nav items per role (mobile only — max 5)
       const bottomNavByRole = {
         client: [
-          { label: 'Home', icon: '🏠', action: 'nav-client-dashboard' },
+          { label: 'Care Plan', icon: '📋', action: 'nav-client-dashboard' },
           { label: 'Messages', icon: '💬', action: 'nav-client-case', tab: 'messages', badge: state.clientUnreadCount || state.unreadCount },
-          { label: 'Care Plan', icon: '📋', action: 'nav-client-case', tab: 'careplan' },
           { label: 'Knowledge Base', icon: '📚', action: 'nav-knowledge-base' },
           { label: 'Health Timeline', icon: '📊', action: 'nav-health-timeline' },
           { label: 'Referrals', icon: '🎁', action: 'nav-referral-dashboard' },
