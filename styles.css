@@ -2051,6 +2051,7 @@
       max-width: calc(100vw - 32px);
       max-height: 480px;
       background: white;
+      color: #336026;
       border-radius: 12px;
       box-shadow: 0 8px 32px rgba(0,0,0,0.18);
       z-index: 200;

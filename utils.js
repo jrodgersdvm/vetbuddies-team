@@ -23,6 +23,34 @@ function formatDateTime(date) {
   return d.toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric', hour: '2-digit', minute: '2-digit' });
 }
 
+// HIBP k-anonymity password check. Returns true if the password appears in
+// known breach corpora. Sends only the first 5 chars of SHA-1(password) over
+// the wire; the full hash never leaves the client. Fails open on network
+// error so a HIBP outage doesn't block all signups.
+async function isPasswordPwned(password) {
+  try {
+    const buf = new TextEncoder().encode(password);
+    const hashBuf = await crypto.subtle.digest('SHA-1', buf);
+    const hash = Array.from(new Uint8Array(hashBuf))
+      .map(b => b.toString(16).padStart(2, '0')).join('').toUpperCase();
+    const prefix = hash.slice(0, 5);
+    const suffix = hash.slice(5);
+    const resp = await fetch(`https://api.pwnedpasswords.com/range/${prefix}`, {
+      headers: { 'Add-Padding': 'true' },
+    });
+    if (!resp.ok) return false;
+    const text = await resp.text();
+    for (const line of text.split('\n')) {
+      const [lineSuffix, countStr] = line.trim().split(':');
+      if (lineSuffix === suffix && parseInt(countStr, 10) > 0) return true;
+    }
+    return false;
+  } catch (err) {
+    console.warn('HIBP check failed, allowing signup:', err);
+    return false;
+  }
+}
+
 function showToast(message, type = 'info') {
   const toast = document.createElement('div');
   toast.className = `toast ${type}`;
@@ -139,13 +167,13 @@ const TIER_XP_MULTIPLIER = { 1: 1, 2: 1.25, 3: 1.5 };
 const TIER_HELPER_CAP = { 1: 0, 2: 2, 3: Infinity };
 
 const TIER_UPGRADE_COPY = {
-  'care_requests_post': { desc: 'Post care requests and tap into your local pet care community', tier: 'Buddy+', price: '$29.99/mo' },
-  'care_requests_claim': { desc: 'Claim care requests and help pets in your community', tier: 'Buddy+', price: '$29.99/mo' },
-  'community_score': { desc: 'Track your community impact and earn recognition badges', tier: 'Buddy+', price: '$29.99/mo' },
-  'community_impact': { desc: 'See your full community impact dashboard', tier: 'Buddy+', price: '$29.99/mo' },
-  'invite_helpers': { desc: 'Invite friends and family to your pet\'s care team', tier: 'Buddy+', price: '$29.99/mo' },
-  'profile_customization': { desc: 'Unlock exclusive profile frames and your private care circle', tier: 'Buddy VIP', price: '$279/mo' },
-  'private_care_circle': { desc: 'Create a private, invite-only care circle for your pet', tier: 'Buddy VIP', price: '$279/mo' },
+  'care_requests_post': { desc: 'Post care requests and tap into your local pet care community' },
+  'care_requests_claim': { desc: 'Claim care requests and help pets in your community' },
+  'community_score': { desc: 'Track your community impact and earn recognition badges' },
+  'community_impact': { desc: 'See your full community impact dashboard' },
+  'invite_helpers': { desc: 'Invite friends and family to your pet\'s care team' },
+  'profile_customization': { desc: 'Unlock exclusive profile frames and your private care circle' },
+  'private_care_circle': { desc: 'Create a private, invite-only care circle for your pet' },
 };
 
 function getTierLevel(tierName) {
@@ -201,64 +229,24 @@ function isQuietHoursActive() {
   return currentMins >= startMins || currentMins < endMins;
 }
 
-// ── Limited Time Offer (LTO) Helpers ─────────────────────
-function getLTOExpiry() {
-  if (!CONFIG.LTO_START) return null;
-  const start = new Date(CONFIG.LTO_START);
-  if (isNaN(start.getTime())) return null;
-  return new Date(start.getTime() + CONFIG.LTO_DURATION_HOURS * 60 * 60 * 1000);
-}
-
-function isLTOActive() {
-  const expiry = getLTOExpiry();
-  if (!expiry) return false;
-  const now = new Date();
-  const start = new Date(CONFIG.LTO_START);
-  return now >= start && now < expiry;
-}
-
-function getLTOTimeRemaining() {
-  const expiry = getLTOExpiry();
-  if (!expiry) return null;
-  const diff = expiry.getTime() - Date.now();
-  if (diff <= 0) return null;
-  const days = Math.floor(diff / (1000 * 60 * 60 * 24));
-  const hours = Math.floor((diff % (1000 * 60 * 60 * 24)) / (1000 * 60 * 60));
-  const minutes = Math.floor((diff % (1000 * 60 * 60)) / (1000 * 60));
-  const seconds = Math.floor((diff % (1000 * 60)) / 1000);
-  return { days, hours, minutes, seconds, totalMs: diff };
-}
-
-function getActivePricing(planKey) {
-  const ltoEntry = CONFIG.LTO_PRICES[planKey];
-  const regular = CONFIG.LTO_REGULAR_PRICES[planKey];
-  if (!regular) return null;
-  if (isLTOActive() && ltoEntry) {
-    return {
-      isLTO: true,
-      price: ltoEntry.display,
-      amount: ltoEntry.amount,
-      priceId: ltoEntry.priceId,
-      regularPrice: regular.display,
-      regularAmount: regular.amount,
-    };
-  }
+// ── Pricing helper ───────────────────────────────────────
+// Single-tier pricing. getActivePricing() returns the Buddy plan for any key
+// so legacy callers that ask for 'buddy_plus' or 'buddy_vip' get usable data
+// without crashing.
+function getActivePricing(_planKey) {
   return {
     isLTO: false,
-    price: regular.display,
-    amount: regular.amount,
-    priceId: CONFIG.STRIPE_PLANS[planKey],
-    regularPrice: regular.display,
-    regularAmount: regular.amount,
+    price: CONFIG.BUDDY_PRICE_DISPLAY,
+    amount: CONFIG.BUDDY_PRICE_AMOUNT,
+    priceId: CONFIG.STRIPE_PLANS.buddy,
+    regularPrice: CONFIG.BUDDY_PRICE_DISPLAY,
+    regularAmount: CONFIG.BUDDY_PRICE_AMOUNT,
   };
 }
 
-function formatLTOCountdown(remaining) {
-  if (!remaining) return '';
-  const parts = [];
-  if (remaining.days > 0) parts.push(`${remaining.days}d`);
-  parts.push(`${String(remaining.hours).padStart(2, '0')}h`);
-  parts.push(`${String(remaining.minutes).padStart(2, '0')}m`);
-  parts.push(`${String(remaining.seconds).padStart(2, '0')}s`);
-  return parts.join(' ');
-}
+// LTO feature was retired with the move to a single tier. Stubs remain so
+// existing callers (renderLTOCountdownBanner, checkout metadata, onboarding)
+// no-op cleanly. Safe to delete once all call sites are trimmed.
+function isLTOActive() { return false; }
+function getLTOTimeRemaining() { return null; }
+function formatLTOCountdown(_remaining) { return ''; }

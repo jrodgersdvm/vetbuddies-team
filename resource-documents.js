@@ -1,15 +1,15 @@
     const RESOURCE_DOCUMENTS = {
       'Tier Overview': `
-        <h3>Vet Buddies Subscription Tiers</h3>
-        <p>Vet Buddies offers three tiers of care coordination, each designed to keep pets healthier between vet visits.</p>
+        <h3>Vet Buddies Subscription — Buddy</h3>
+        <p>Vet Buddies currently offers one membership, <strong>Buddy — $9.99/month</strong>. Every client gets the same core care coordination experience.</p>
         <table>
-          <tr><th></th><th>Buddy — $20/mo</th><th>Buddy+ — $30/mo</th><th>Buddy VIP — $279/mo</th></tr>
-          <tr><td><strong>Vet Buddy Check-ins</strong></td><td>1 per month</td><td>1 per week</td><td>1 per week</td></tr>
-          <tr><td><strong>Veterinarian Check-ins</strong></td><td>—</td><td>—</td><td>1 per month</td></tr>
-          <tr><td><strong>Digital Living Care Plan</strong></td><td>✓</td><td>✓</td><td>✓</td></tr>
-          <tr><td><strong>Care Coordination</strong></td><td>✓</td><td>✓</td><td>✓</td></tr>
-          <tr><td><strong>Messaging</strong></td><td>✓</td><td>✓</td><td>✓</td></tr>
-          <tr><td><strong>Document Vault</strong></td><td>✓</td><td>✓</td><td>✓</td></tr>
+          <tr><th></th><th>Buddy — $9.99/mo</th></tr>
+          <tr><td><strong>Vet Buddy Check-ins</strong></td><td>Monthly</td></tr>
+          <tr><td><strong>Digital Living Care Plan</strong></td><td>✓</td></tr>
+          <tr><td><strong>Care Coordination</strong></td><td>✓</td></tr>
+          <tr><td><strong>Messaging</strong></td><td>✓</td></tr>
+          <tr><td><strong>Document Vault</strong></td><td>✓</td></tr>
+          <tr><td><strong>Escalate to Dr. Rodgers</strong></td><td>✓</td></tr>
         </table>
         <h3>What Is a Vet Buddy Check-in?</h3>
         <p>A check-in is a proactive outreach from a trained Vet Buddy (CSU veterinary student) to the client. During a check-in the Buddy:</p>
@@ -19,16 +19,11 @@
           <li>Updates the care plan with the client's responses and any new observations</li>
           <li>Flags anything concerning for escalation to Dr. Rodgers</li>
         </ul>
-        <h3>Veterinarian Check-ins (VIP Only)</h3>
-        <p>Buddy VIP clients receive an additional monthly review from a licensed veterinarian who:</p>
-        <ul>
-          <li>Reviews the Living Care Plan and all Buddy notes from the past month</li>
-          <li>Provides clinical commentary and adjustments to the care plan</li>
-          <li>Sends a direct message to the client with a summary and any recommendations</li>
-        </ul>
         <h3>Free Trial</h3>
-        <p>All new clients receive a <strong>30-day free trial</strong> at the Buddy tier. During the trial they get full access to all Buddy-tier features. At the end of the trial they choose a paid plan or their access pauses.</p>
-        <div class="callout">When discussing tiers with clients, focus on the value of proactive care and peace of mind — not just feature counts. The goal is matching the client to the tier that fits their pet's needs.</div>
+        <p>All new clients receive a <strong>30-day free trial</strong> at the Buddy tier. During the trial they get full access. At the end of the trial they confirm the paid plan at $9.99/mo or their access pauses.</p>
+        <h3>Legacy Tiers</h3>
+        <p>Some older cases are still marked as <em>Buddy+</em> or <em>Buddy VIP</em> from a previous pricing structure. These values remain in place for historical records. Additional tiers may return in the future — the system is designed to support them.</p>
+        <div class="callout">When discussing the plan with clients, focus on the value of proactive care and peace of mind. $9.99/month is the price; the real offer is that they're not alone with their pet's health anymore.</div>
       `,
 
       'Behavioral Consult Protocol': `

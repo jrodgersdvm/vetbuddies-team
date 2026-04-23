@@ -6,51 +6,22 @@ const STRIPE_SECRET_KEY = Deno.env.get("STRIPE_SECRET_KEY")!;
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 
-// LTO configuration — must match config.js values
-const LTO_START: string | null = null; // LTO disabled
-const LTO_DURATION_HOURS = 48;
-const LTO_EXPIRY = LTO_START
-  ? new Date(new Date(LTO_START).getTime() + LTO_DURATION_HOURS * 60 * 60 * 1000)
-  : new Date(0);
+// Allowed price IDs. The new $9.99/mo Buddy price ID is loaded from the
+// STRIPE_BUDDY_PRICE_ID env var (set in Supabase Edge Function secrets).
+// Legacy price IDs remain allowed so existing subscribers can still be
+// served by historical flows (manage billing, etc.).
+const NEW_BUDDY_PRICE_ID = Deno.env.get("STRIPE_BUDDY_PRICE_ID") || "";
 
-// Map of LTO price IDs to validate server-side
-const LTO_PRICE_IDS = new Set([
-  "price_LTO_buddy_1999",
-  "price_LTO_buddy_plus_2999",
+const LEGACY_PRICE_IDS = new Set([
+  "price_1TLxfzCoogKs3SGPIctkgMhW",  // Buddy $99/mo (legacy)
+  "price_1TLxg0CoogKs3SGPAdQBsb8d",  // Buddy+ $149/mo (legacy)
+  "price_1T7VxVCoogKs3SGPwcXrK0kI",  // Buddy VIP $279/mo (legacy)
 ]);
 
-// Standard price IDs
-const STANDARD_PRICE_IDS = new Set([
-  "price_1TLxfzCoogKs3SGPIctkgMhW",  // Buddy $19.99/mo
-  "price_1TLxg0CoogKs3SGPAdQBsb8d",  // Buddy+ $29.99/mo
-  "price_1T7VxVCoogKs3SGPwcXrK0kI",  // Buddy VIP $279/mo
+const ALLOWED_PRICE_IDS = new Set([
+  ...(NEW_BUDDY_PRICE_ID ? [NEW_BUDDY_PRICE_ID] : []),
+  ...LEGACY_PRICE_IDS,
 ]);
-
-function isLTOActiveServerSide(): boolean {
-  const now = new Date();
-  const start = new Date(LTO_START);
-  return now >= start && now < LTO_EXPIRY;
-}
-
-function isLTOPriceAllowed(
-  priceId: string,
-  ltoInitiatedAt: string | null
-): boolean {
-  if (!LTO_PRICE_IDS.has(priceId)) return true; // not an LTO price, always OK
-
-  // LTO price requested — check if offer is still active
-  if (isLTOActiveServerSide()) return true;
-
-  // Edge case: checkout was initiated during LTO but completed after expiry
-  // Honor the LTO price if initiated within the offer window
-  if (ltoInitiatedAt) {
-    const initiated = new Date(ltoInitiatedAt);
-    const start = new Date(LTO_START);
-    if (initiated >= start && initiated < LTO_EXPIRY) return true;
-  }
-
-  return false;
-}
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -81,37 +52,13 @@ serve(async (req) => {
       });
     }
 
-    const {
-      price_id,
-      success_url,
-      cancel_url,
-      lto_initiated_at,
-      lto_locked_rate,
-    } = await req.json();
+    const { price_id, success_url, cancel_url } = await req.json();
 
-    // Validate price ID
-    if (!STANDARD_PRICE_IDS.has(price_id) && !LTO_PRICE_IDS.has(price_id)) {
+    if (!ALLOWED_PRICE_IDS.has(price_id)) {
       return new Response(JSON.stringify({ error: "Invalid price ID" }), {
         status: 400,
         headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
-    }
-
-    // Server-side LTO validation — prevent client-side manipulation
-    if (
-      LTO_PRICE_IDS.has(price_id) &&
-      !isLTOPriceAllowed(price_id, lto_initiated_at)
-    ) {
-      return new Response(
-        JSON.stringify({
-          error:
-            "This promotional price has expired. Please refresh for current pricing.",
-        }),
-        {
-          status: 400,
-          headers: { ...corsHeaders, "Content-Type": "application/json" },
-        }
-      );
     }
 
     // Look up or create Stripe customer
@@ -135,29 +82,19 @@ serve(async (req) => {
         .eq("auth_id", user.id);
     }
 
-    // Build checkout session metadata
     const metadata: Record<string, string> = {
       supabase_auth_id: user.id,
     };
-    if (lto_locked_rate && LTO_PRICE_IDS.has(price_id)) {
-      metadata.lto_locked_rate = "true";
-      metadata.lto_initiated_at = lto_initiated_at || new Date().toISOString();
-    }
 
-    // Create Stripe Checkout session
-    const checkoutParams: Record<string, unknown> = {
+    const session = await stripe.checkout.sessions.create({
       customer: customerId,
       mode: "subscription",
       line_items: [{ price: price_id, quantity: 1 }],
       success_url,
       cancel_url,
       metadata,
-      subscription_data: {
-        metadata,
-      },
-    };
-
-    const session = await stripe.checkout.sessions.create(checkoutParams);
+      subscription_data: { metadata },
+    });
 
     return new Response(JSON.stringify({ url: session.url }), {
       headers: { ...corsHeaders, "Content-Type": "application/json" },

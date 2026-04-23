@@ -7,31 +7,31 @@ const STRIPE_WEBHOOK_SECRET = Deno.env.get("STRIPE_WEBHOOK_SECRET")!;
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 
-// Map Stripe price IDs to plan names
-// Reads from STRIPE_PRICE_MAP env var if set (JSON: {"price_id":"Plan Name",...})
-// Falls back to hardcoded defaults
+// Map Stripe price IDs to plan names.
+// The new $9.99 Buddy price ID is picked up from the STRIPE_BUDDY_PRICE_ID
+// env var (set in Supabase Edge Function secrets). Legacy entries remain so
+// historical webhook events still resolve to a plan name.
+const NEW_BUDDY_PRICE_ID = Deno.env.get("STRIPE_BUDDY_PRICE_ID") || "";
+
 const DEFAULT_PRICE_MAP: Record<string, string> = {
-  // Current price IDs
+  ...(NEW_BUDDY_PRICE_ID ? { [NEW_BUDDY_PRICE_ID]: "Buddy" } : {}),
+  // Legacy price IDs (kept so historical subscriptions still resolve)
   price_1TLxfzCoogKs3SGPIctkgMhW: "Buddy",
   price_1TLxg0CoogKs3SGPAdQBsb8d: "Buddy+",
   price_1T7VxVCoogKs3SGPwcXrK0kI: "Buddy VIP",
-  // Legacy price IDs (for existing subscribers)
   price_1T7Vw5CoogKs3SGPv92mnQvk: "Buddy",
   price_1T7VwjCoogKs3SGPL9GcM0FL: "Buddy+",
-  // LTO prices map to the same plan names
-  price_LTO_buddy_1999: "Buddy",
-  price_LTO_buddy_plus_2999: "Buddy+",
 };
 const envPriceMap = Deno.env.get("STRIPE_PRICE_MAP");
-const PRICE_TO_PLAN: Record<string, string> = envPriceMap
-  ? { ...DEFAULT_PRICE_MAP, ...JSON.parse(envPriceMap) }
-  : DEFAULT_PRICE_MAP;
-
-// LTO price IDs — subscriptions with these get a locked promotional rate
-const LTO_PRICE_IDS: Record<string, number> = {
-  price_LTO_buddy_1999: 19.99,
-  price_LTO_buddy_plus_2999: 29.99,
-};
+let parsedEnvPriceMap: Record<string, string> = {};
+if (envPriceMap) {
+  try {
+    parsedEnvPriceMap = JSON.parse(envPriceMap);
+  } catch (e) {
+    console.error("Invalid STRIPE_PRICE_MAP env var, falling back to defaults:", e);
+  }
+}
+const PRICE_TO_PLAN: Record<string, string> = { ...DEFAULT_PRICE_MAP, ...parsedEnvPriceMap };
 
 serve(async (req) => {
   if (req.method === "OPTIONS") {
@@ -64,25 +64,12 @@ serve(async (req) => {
       const subscriptionId = session.subscription as string;
       const subscription = await stripe.subscriptions.retrieve(subscriptionId);
       const priceId = subscription.items.data[0]?.price?.id;
-      const planName = PRICE_TO_PLAN[priceId] || "Buddy";
 
-      // Build user update
       const userUpdate: Record<string, unknown> = {
         subscription_status: "active",
         subscription_tier_stripe: priceId,
         stripe_subscription_id: subscriptionId,
       };
-
-      // Lock in LTO rate if applicable
-      const isLTOSubscription =
-        session.metadata?.lto_locked_rate === "true" ||
-        (priceId && priceId in LTO_PRICE_IDS);
-
-      if (isLTOSubscription && priceId && priceId in LTO_PRICE_IDS) {
-        userUpdate.promotional_price = LTO_PRICE_IDS[priceId];
-        userUpdate.promotional_label = "Founding Rate - Locked In";
-        userUpdate.promotional_locked_at = new Date().toISOString();
-      }
 
       await supabase
         .from("users")

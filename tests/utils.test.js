@@ -58,7 +58,10 @@ globalThis.CONFIG = {
   SUPABASE_URL: 'https://test.supabase.co',
   SUPABASE_KEY: 'test-key',
   VAPID_PUBLIC_KEY: 'test-vapid',
-  STRIPE_PLANS: { buddy: 'price_test1', buddy_plus: 'price_test2', buddy_vip: 'price_test3' },
+  STRIPE_PLANS: { buddy: 'price_test1' },
+  STRIPE_PAYMENT_LINK: 'https://buy.stripe.com/test',
+  BUDDY_PRICE_DISPLAY: '$9.99',
+  BUDDY_PRICE_AMOUNT: 9.99,
   TRIAL_DURATION_DAYS: 30,
 };
 
