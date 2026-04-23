@@ -44,6 +44,33 @@ Rules:
 - For summary, use plain language a pet owner can understand
 - Do NOT fabricate information not present in the document`;
 
+const ACTIVITY_DIGEST_PROMPT = `You are a veterinary care-plan synthesis assistant. You read a chronological digest of case activity (messages, staff notes, timeline entries, appointments, escalations) for a {species} named {pet_name} and extract the information that should update the pet's Living Care Plan.
+
+Return ONLY valid JSON with this exact structure (same shape as document extraction, so downstream code can merge identically):
+
+{
+  "document_date": "YYYY-MM-DD — today's date (the digest date)",
+  "document_type": "activity_digest",
+  "summary": "2-3 sentence plain-language summary of what's new and noteworthy for the pet owner since the care plan was last updated",
+  "diagnoses": ["diagnoses explicitly mentioned by staff or a vet in the activity — do NOT infer from symptoms alone"],
+  "medications": [{"name": "string", "dose": "string or null", "frequency": "string or null", "start_date": "YYYY-MM-DD or null"}],
+  "vaccines": [{"name": "string", "administered_date": "YYYY-MM-DD or null", "due_date": "YYYY-MM-DD or null", "notes": "string or null"}],
+  "vitals": {"weight": "number as string in lbs or null", "temperature": "number as string in F or null"},
+  "recommendations": ["vet/staff recommendations captured in the activity"],
+  "care_goals": ["actionable, owner-friendly care goals derived from the activity — e.g. new symptoms to monitor, follow-up actions, behavior/diet adjustments agreed on"],
+  "pet_profile_additions": "string with new conditions, allergies, behavior notes, preferences, or key findings revealed in the activity that are worth appending to the pet's profile. Use plain language. Return an empty string if nothing new."
+}
+
+Rules:
+- Return ONLY the JSON object, no markdown fences, no other text
+- Use null for fields where information is not found
+- Use empty arrays [] when a category has no entries
+- Only extract what is explicitly stated in the activity — do NOT fabricate, guess, or infer clinical diagnoses from symptom descriptions
+- Prefer signals from staff/vet entries (author role noted in each item) over client messages when they conflict
+- Deduplicate — if the same medication or observation appears multiple times, include it once
+- Skip items that clearly already appear in the existing care plan context
+- For care_goals, translate discussion into concrete owner-facing action items`;
+
 serve(async (req: Request) => {
   // CORS headers
   const headers = {
@@ -82,87 +109,115 @@ serve(async (req: Request) => {
       );
     }
 
-    const { document_url, mime_type, file_name, pet_name, pet_species } = await req.json();
+    const body = await req.json();
+    const { mode, document_url, mime_type, file_name, pet_name, pet_species, text_bundle, existing_plan_summary } = body;
 
-    if (!document_url || !mime_type) {
-      return new Response(
-        JSON.stringify({ success: false, error: "Missing document_url or mime_type" }),
-        { status: 400, headers }
-      );
+    const isTextBundle = mode === "text_bundle";
+
+    if (isTextBundle) {
+      if (!text_bundle || typeof text_bundle !== "string" || text_bundle.trim().length === 0) {
+        return new Response(
+          JSON.stringify({ success: false, error: "Missing text_bundle for activity digest" }),
+          { status: 400, headers }
+        );
+      }
+    } else {
+      if (!document_url || !mime_type) {
+        return new Response(
+          JSON.stringify({ success: false, error: "Missing document_url or mime_type" }),
+          { status: 400, headers }
+        );
+      }
+      if (!SUPPORTED_MIME_TYPES.has(mime_type)) {
+        return new Response(
+          JSON.stringify({ success: false, error: `Unsupported file type: ${mime_type}. AI extraction supports PDF, images, and text files.` }),
+          { status: 400, headers }
+        );
+      }
     }
 
-    if (!SUPPORTED_MIME_TYPES.has(mime_type)) {
-      return new Response(
-        JSON.stringify({ success: false, error: `Unsupported file type: ${mime_type}. AI extraction supports PDF, images, and text files.` }),
-        { status: 400, headers }
-      );
-    }
-
-    // Fetch the document from Supabase Storage
-    const fileResponse = await fetch(document_url);
-    if (!fileResponse.ok) {
-      return new Response(
-        JSON.stringify({ success: false, error: "Failed to fetch document from storage" }),
-        { status: 500, headers }
-      );
-    }
-
-    const fileBytes = await fileResponse.arrayBuffer();
-    const fileBuffer = new Uint8Array(fileBytes);
-
-    // Check file size (limit to 20MB for Claude)
-    if (fileBuffer.length > 20 * 1024 * 1024) {
-      return new Response(
-        JSON.stringify({ success: false, error: "File too large for AI analysis (max 20MB)" }),
-        { status: 400, headers }
-      );
-    }
-
-    // Build the prompt with pet context
-    const systemPrompt = EXTRACTION_PROMPT
+    // Build the prompt with pet context (chose template based on mode)
+    const basePrompt = isTextBundle ? ACTIVITY_DIGEST_PROMPT : EXTRACTION_PROMPT;
+    const systemPrompt = basePrompt
       .replace("{species}", pet_species || "pet")
       .replace("{pet_name}", pet_name || "the patient");
 
-    // Build the content array based on file type
+    // Build the content array
     const userContent: Array<Record<string, unknown>> = [];
 
-    if (mime_type === "text/plain" || mime_type === "text/csv") {
-      // Text files: decode and send as text
-      const textContent = new TextDecoder().decode(fileBuffer);
+    if (isTextBundle) {
+      // Cap the bundle at ~120k chars (~30k tokens) to stay well under Claude's input window
+      // and leave room for the system prompt + response.
+      const MAX_BUNDLE_CHARS = 120_000;
+      const trimmedBundle = text_bundle.length > MAX_BUNDLE_CHARS
+        ? text_bundle.slice(-MAX_BUNDLE_CHARS)
+        : text_bundle;
+      const existingPlanBlock = existing_plan_summary
+        ? `\n\n--- Existing care plan context (do not re-extract items already covered) ---\n${String(existing_plan_summary).slice(0, 8_000)}`
+        : "";
       userContent.push({
         type: "text",
-        text: `Here is the medical record text from file "${file_name}":\n\n${textContent.substring(0, 100000)}`,
+        text: `Here is the recent case activity for this patient, in chronological order. Synthesize new information that should update the Living Care Plan.${existingPlanBlock}\n\n--- Activity digest ---\n${trimmedBundle}`,
       });
-    } else if (mime_type === "application/pdf") {
-      // PDF: send as base64 document block
-      const base64Data = btoa(String.fromCharCode(...fileBuffer));
-      userContent.push({
-        type: "document",
-        source: {
-          type: "base64",
-          media_type: "application/pdf",
-          data: base64Data,
-        },
-      });
-      userContent.push({
-        type: "text",
-        text: `Extract all medical information from this veterinary document ("${file_name}").`,
-      });
-    } else if (mime_type.startsWith("image/")) {
-      // Images: send as base64 image block
-      const base64Data = btoa(String.fromCharCode(...fileBuffer));
-      userContent.push({
-        type: "image",
-        source: {
-          type: "base64",
-          media_type: mime_type,
-          data: base64Data,
-        },
-      });
-      userContent.push({
-        type: "text",
-        text: `Extract all medical information from this veterinary document image ("${file_name}").`,
-      });
+    } else {
+      // File-mode: fetch the document from Supabase Storage
+      const fileResponse = await fetch(document_url);
+      if (!fileResponse.ok) {
+        return new Response(
+          JSON.stringify({ success: false, error: "Failed to fetch document from storage" }),
+          { status: 500, headers }
+        );
+      }
+
+      const fileBytes = await fileResponse.arrayBuffer();
+      const fileBuffer = new Uint8Array(fileBytes);
+
+      // Check file size (limit to 20MB for Claude)
+      if (fileBuffer.length > 20 * 1024 * 1024) {
+        return new Response(
+          JSON.stringify({ success: false, error: "File too large for AI analysis (max 20MB)" }),
+          { status: 400, headers }
+        );
+      }
+
+      if (mime_type === "text/plain" || mime_type === "text/csv") {
+        // Text files: decode and send as text
+        const textContent = new TextDecoder().decode(fileBuffer);
+        userContent.push({
+          type: "text",
+          text: `Here is the medical record text from file "${file_name}":\n\n${textContent.substring(0, 100000)}`,
+        });
+      } else if (mime_type === "application/pdf") {
+        // PDF: send as base64 document block
+        const base64Data = btoa(String.fromCharCode(...fileBuffer));
+        userContent.push({
+          type: "document",
+          source: {
+            type: "base64",
+            media_type: "application/pdf",
+            data: base64Data,
+          },
+        });
+        userContent.push({
+          type: "text",
+          text: `Extract all medical information from this veterinary document ("${file_name}").`,
+        });
+      } else if (mime_type.startsWith("image/")) {
+        // Images: send as base64 image block
+        const base64Data = btoa(String.fromCharCode(...fileBuffer));
+        userContent.push({
+          type: "image",
+          source: {
+            type: "base64",
+            media_type: mime_type,
+            data: base64Data,
+          },
+        });
+        userContent.push({
+          type: "text",
+          text: `Extract all medical information from this veterinary document image ("${file_name}").`,
+        });
+      }
     }
 
     // Call Claude API

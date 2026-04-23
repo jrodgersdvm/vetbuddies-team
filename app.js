@@ -129,6 +129,8 @@
       showPushPromptBanner: false,
       showPushPromptInPanel: false,
       _loginInProgress: false,
+      // First-login bio prompt (vet buddies without a bio)
+      showBioPrompt: false,
     };
 
     // ── HTML escape utility (prevents XSS in user-generated content) ──
@@ -539,10 +541,7 @@
       return `<div class="tier-upgrade-prompt">
         <div class="tier-upgrade-icon">✨</div>
         <div class="tier-upgrade-body">
-          <div class="tier-upgrade-text">${copy.desc} — available on <strong>${copy.tier}</strong> (${copy.price}).</div>
-          <div class="tier-upgrade-actions">
-            <a href="https://rodgersvetbuddies.com" target="_blank" class="tier-upgrade-link">Learn more</a>
-          </div>
+          <div class="tier-upgrade-text">${copy.desc}. <em>Coming soon on a future plan.</em></div>
         </div>
       </div>`;
     }
@@ -727,6 +726,157 @@
       }
     }
 
+    // ── Living Care Plan refresh from case activity ───────────
+    // Pulls recent messages, case_notes, timeline_entries, appointments, and escalations,
+    // sends them as a text digest to the extract-medical-record edge function in text_bundle mode,
+    // and routes the structured result through the existing AI review modal.
+    async function refreshCarePlanFromActivity(caseId) {
+      if (!caseId) return;
+      const petName = state.currentCase?.pets?.name || 'Pet';
+      const petSpecies = state.currentCase?.pets?.species || 'unknown';
+
+      // Pull last ~90 days of activity so big cases don't blow the prompt budget.
+      const sinceIso = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString();
+
+      const [msgRes, notesRes, timelineRes, apptRes, escRes] = await Promise.all([
+        sb.from('messages')
+          .select('created_at, content, sender_role, thread_type, message_type, is_urgent, attachment_name')
+          .eq('case_id', caseId)
+          .gte('created_at', sinceIso)
+          .order('created_at', { ascending: true })
+          .limit(300),
+        sb.from('case_notes')
+          .select('created_at, content, author:users!created_by(name, role)')
+          .eq('case_id', caseId)
+          .gte('created_at', sinceIso)
+          .order('created_at', { ascending: true })
+          .limit(100),
+        sb.from('timeline_entries')
+          .select('created_at, type, content, author:users!author_id(name, role)')
+          .eq('case_id', caseId)
+          .gte('created_at', sinceIso)
+          .order('created_at', { ascending: true })
+          .limit(200),
+        sb.from('appointments')
+          .select('scheduled_at, title, type, notes, status')
+          .eq('case_id', caseId)
+          .order('scheduled_at', { ascending: true })
+          .limit(50),
+        sb.from('escalations')
+          .select('created_at, escalation_type, reason, incident_notes, status')
+          .eq('case_id', caseId)
+          .gte('created_at', sinceIso)
+          .order('created_at', { ascending: true })
+          .limit(30),
+      ]);
+
+      const lines = [];
+      const fmt = (iso) => (iso ? new Date(iso).toISOString().slice(0, 16).replace('T', ' ') : '');
+
+      const messages = msgRes.data || [];
+      if (messages.length) {
+        lines.push(`=== Messages (${messages.length}) ===`);
+        for (const m of messages) {
+          if (!m.content) continue;
+          const who = `${m.sender_role || 'unknown'}${m.thread_type === 'staff' ? ' [staff-only]' : ''}${m.is_urgent ? ' [URGENT]' : ''}`;
+          const attach = m.attachment_name ? ` (attached: ${m.attachment_name})` : '';
+          lines.push(`[${fmt(m.created_at)}] ${who}: ${m.content}${attach}`);
+        }
+      }
+
+      const notes = notesRes.data || [];
+      if (notes.length) {
+        lines.push(`\n=== Internal case notes (${notes.length}) ===`);
+        for (const n of notes) {
+          const who = n.author ? `${n.author.name || 'staff'} (${n.author.role || ''})` : 'staff';
+          lines.push(`[${fmt(n.created_at)}] ${who}: ${n.content}`);
+        }
+      }
+
+      const timeline = timelineRes.data || [];
+      if (timeline.length) {
+        lines.push(`\n=== Timeline entries (${timeline.length}) ===`);
+        for (const t of timeline) {
+          const who = t.author ? `${t.author.name || ''} (${t.author.role || ''})` : '';
+          lines.push(`[${fmt(t.created_at)}] ${t.type || 'update'} — ${who}: ${t.content}`);
+        }
+      }
+
+      const appts = apptRes.data || [];
+      if (appts.length) {
+        lines.push(`\n=== Appointments (${appts.length}) ===`);
+        for (const a of appts) {
+          const parts = [a.type, a.title].filter(Boolean).join(' · ');
+          const statusPart = a.status ? ` [${a.status}]` : '';
+          const notesPart = a.notes ? ` — notes: ${a.notes}` : '';
+          lines.push(`[${fmt(a.scheduled_at)}]${statusPart} ${parts}${notesPart}`);
+        }
+      }
+
+      const escs = escRes.data || [];
+      if (escs.length) {
+        lines.push(`\n=== Escalations (${escs.length}) ===`);
+        for (const e of escs) {
+          const parts = [e.escalation_type, e.status].filter(Boolean).join(' · ');
+          const notesPart = e.incident_notes ? ` — ${e.incident_notes}` : '';
+          const reasonPart = e.reason ? ` — reason: ${e.reason}` : '';
+          lines.push(`[${fmt(e.created_at)}] ${parts}${reasonPart}${notesPart}`);
+        }
+      }
+
+      if (lines.length === 0) {
+        state.aiExtractionInProgress = false;
+        render();
+        showToast('No recent activity to digest yet — add messages, notes, or appointments first.', 'info');
+        return;
+      }
+
+      const textBundle = lines.join('\n');
+
+      // Give Claude a short snapshot of what's already in the care plan so it can avoid re-suggesting known items.
+      const lp = state.carePlan?.living_plan || null;
+      let existingPlanSummary = '';
+      if (lp) {
+        const parts = [];
+        if (lp.pet_profile) parts.push('Pet profile: ' + String(lp.pet_profile).slice(0, 1200));
+        if (lp.active_care_goals?.length) {
+          parts.push('Active goals: ' + lp.active_care_goals.filter(g => g.status !== 'completed').map(g => g.goal_text).filter(Boolean).join(' | '));
+        }
+        existingPlanSummary = parts.join('\n');
+      }
+
+      const result = await callEdgeFunction('extract-medical-record', {
+        mode: 'text_bundle',
+        text_bundle: textBundle,
+        existing_plan_summary: existingPlanSummary,
+        case_id: caseId,
+        pet_name: petName,
+        pet_species: petSpecies,
+      });
+
+      if (result.success && result.extraction) {
+        state.aiExtractionResult = result.extraction;
+        state.aiExtractionDocId = null;
+        state.aiExtractionDocName = `Case activity digest — ${new Date().toISOString().slice(0, 10)}`;
+        state.aiExtractionInProgress = false;
+        const checked = {};
+        const ext = result.extraction;
+        (ext.diagnoses || []).forEach((_, i) => { checked['diag_' + i] = true; });
+        (ext.medications || []).forEach((_, i) => { checked['med_' + i] = true; });
+        (ext.vaccines || []).forEach((_, i) => { checked['vax_' + i] = true; });
+        if (ext.vitals?.weight || ext.vitals?.temperature) checked['vitals'] = true;
+        (ext.care_goals || []).forEach((_, i) => { checked['goal_' + i] = true; });
+        if (ext.pet_profile_additions) checked['profile'] = true;
+        state.aiCheckedItems = checked;
+        state.showAiReviewModal = true;
+        render();
+      } else {
+        state.aiExtractionInProgress = false;
+        render();
+        throw new Error(result.error || 'Activity digest extraction failed');
+      }
+    }
+
     // renderStatusDot, renderProgressBar, formatDate, formatDateTime, showToast are in utils.js
 
     // RESOURCE_DOCUMENTS is in resource-documents.js
@@ -810,6 +960,11 @@
 
       if (password.length < 8) {
         showToast('Password must be at least 8 characters', 'error');
+        return;
+      }
+
+      if (await isPasswordPwned(password)) {
+        showToast('This password has appeared in a known data breach. Please choose a different password.', 'error');
         return;
       }
 
@@ -1020,6 +1175,10 @@
           });
         } else if (data.role === 'vet_buddy' || data.role === 'external_vet' || data.role === 'geneticist') {
           navigate(data.role === 'vet_buddy' ? 'buddy-dashboard' : data.role === 'geneticist' ? 'geneticist-dashboard' : 'external-dashboard');
+          // First-login prompt: if a vet buddy hasn't written a bio yet, surface the editor
+          if (data.role === 'vet_buddy' && (!data.bio || !data.bio.trim())) {
+            state.showBioPrompt = true;
+          }
           const caseLoader = data.role === 'geneticist' ? loadGeneticistCases() : loadCases();
           caseLoader.then(async () => {
             await Promise.all([loadUnreadCount(), loadAllUnreadMessages()]);
@@ -2764,8 +2923,18 @@ async function calculateBuddyScorecard(buddyId) {
         <div class="card" style="border-left:4px solid var(--green);margin-bottom:12px;">
           <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
             <div class="card-title" style="margin:0;">🎯 Active Care Goals</div>
-            ${completedGoals.length > 0 ? `<span style="font-size:12px;color:var(--green);font-weight:500;">${completedGoals.length} completed</span>` : ''}
+            <div style="display:flex;gap:8px;align-items:center;">
+              ${completedGoals.length > 0 ? `<span style="font-size:12px;color:var(--green);font-weight:500;">${completedGoals.length} completed</span>` : ''}
+              <button class="btn btn-secondary btn-small" data-action="toggle-add-goal" style="font-size:12px;">${state.showAddGoal ? '✕ Cancel' : '+ Add Goal'}</button>
+            </div>
           </div>
+          ${state.showAddGoal ? `<div style="background:#f0faf8;border-radius:8px;padding:12px;margin-bottom:10px;">
+            <div class="form-group" style="margin-bottom:8px;"><label style="font-size:13px;font-weight:600;">New goal for ${esc(pet.name)}</label>
+              <textarea data-field="goal-text" placeholder="e.g. Help ${esc(pet.name)} lose 2 lbs over the next 3 months with portion control..." style="width:100%;height:60px;"></textarea>
+            </div>
+            <input type="hidden" data-field="goal-set-by-owner" value="true">
+            <button class="btn btn-primary btn-small" data-action="save-new-goal">Save Goal</button>
+          </div>` : ''}
           ${activeGoals.length > 0 ? activeGoals.map(g => {
             const daysSinceReview = g.reviewed_at ? Math.floor((Date.now() - new Date(g.reviewed_at).getTime()) / (1000*60*60*24)) : 999;
             const tier = TIER_DISPLAY[petCase.subscription_tier] || petCase.subscription_tier;
@@ -2778,7 +2947,7 @@ async function calculateBuddyScorecard(buddyId) {
               ${g.dvm_reviewed ? '<span style="display:inline-block;margin-top:4px;background:#e8f5e9;color:#2e7d32;font-size:11px;font-weight:600;padding:2px 8px;border-radius:12px;">✅ DVM-Reviewed</span>' : ''}
               ${needsQuarterlyReview ? '<div style="margin-top:6px;background:#fff3cd;color:#856404;font-size:12px;padding:4px 8px;border-radius:6px;">⏰ Quarterly Goal Review due</div>' : ''}
             </div>`;
-          }).join('') : '<div style="font-size:13px;color:var(--text-secondary);font-style:italic;">No care goals set yet — your Buddy will work with you to set meaningful goals for your pet.</div>'}
+          }).join('') : (!state.showAddGoal ? '<div style="font-size:13px;color:var(--text-secondary);font-style:italic;">No care goals set yet — tap "+ Add Goal" to share one, or your Buddy will help set some on your first check-in.</div>' : '')}
         </div>
 
         <!-- Section 4: Engagement Log -->
@@ -3069,41 +3238,23 @@ async function calculateBuddyScorecard(buddyId) {
     // ── Stripe plan config ──────────────────────────────────────────────
     const STRIPE_PLANS = [
       {
-        id: 'price_1TLxfzCoogKs3SGPIctkgMhW',
+        id: CONFIG.STRIPE_PLANS.buddy,
         name: 'Buddy',
-        price: '$19.99',
+        price: CONFIG.BUDDY_PRICE_DISPLAY,
         tier: 'Buddy',
         emoji: '🐾',
-        features: ['1 check-in per month from your Vet Buddy', 'Digital Living Care Plan', 'Care coordination between vet visits'],
-        highlight: false,
-      },
-      {
-        id: 'price_1TLxg0CoogKs3SGPAdQBsb8d',
-        name: 'Buddy+',
-        price: '$29.99',
-        tier: 'Buddy+',
-        emoji: '⭐',
-        features: ['1 check-in per week from your Vet Buddy', 'Digital Living Care Plan', 'Care coordination between vet visits'],
+        features: ['Monthly check-ins from your Vet Buddy', 'Digital Living Care Plan', 'Care coordination between vet visits'],
         highlight: true,
-      },
-      {
-        id: 'price_1T7VxVCoogKs3SGPwcXrK0kI',
-        name: 'Buddy VIP',
-        price: '$279',
-        tier: 'Buddy VIP',
-        emoji: '👑',
-        features: ['Weekly check-ins from your Vet Buddy', 'Monthly check-ins from a veterinarian', 'Digital Living Care Plan', 'Care coordination between vet visits'],
-        highlight: false,
       },
     ];
 
+    // Legacy price-ID → tier-name map. Kept so existing subscriber metadata
+    // renders correctly. New signups always use CONFIG.STRIPE_PLANS.buddy.
     const PRICE_TO_NAME = {
+      [CONFIG.STRIPE_PLANS.buddy]: 'Buddy',
       'price_1TLxfzCoogKs3SGPIctkgMhW': 'Buddy',
       'price_1TLxg0CoogKs3SGPAdQBsb8d': 'Buddy+',
       'price_1T7VxVCoogKs3SGPwcXrK0kI': 'Buddy VIP',
-      // LTO price IDs
-      [CONFIG.LTO_PRICES.buddy.priceId]: 'Buddy',
-      [CONFIG.LTO_PRICES.buddy_plus.priceId]: 'Buddy+',
     };
 
     // Trial helpers (getTrialDaysRemaining, isTrialActive, etc.) are in utils.js
@@ -3119,13 +3270,10 @@ async function calculateBuddyScorecard(buddyId) {
     }
 
     function renderUpgradePrompt(feature, currentTier) {
-      const needed = FEATURE_MIN_TIER[feature] || 1;
-      const tierName = needed >= 3 ? 'Buddy VIP' : 'Buddy+';
       return `<div style="background:linear-gradient(135deg,#f8f4ff,#fff8f0);border:1px solid var(--border);border-radius:10px;padding:20px;text-align:center;margin:12px 0;">
         <div style="font-size:24px;margin-bottom:8px;">🔒</div>
-        <div style="font-weight:600;margin-bottom:4px;">Upgrade to ${tierName}</div>
-        <div style="font-size:13px;color:var(--text-secondary);margin-bottom:12px;">This feature is available on the ${tierName} plan and above.</div>
-        <button class="btn btn-primary btn-small" data-action="manage-billing">Upgrade Now</button>
+        <div style="font-weight:600;margin-bottom:4px;">Feature coming soon</div>
+        <div style="font-size:13px;color:var(--text-secondary);">This feature isn't available on your current plan yet. We'll let you know when it opens up.</div>
       </div>`;
     }
 
@@ -3584,37 +3732,26 @@ async function calculateBuddyScorecard(buddyId) {
           </div>`;
       }
 
-      // Not subscribed — show plan picker (value-first, pricing subtle)
-      const _ltoActive = isLTOActive();
-      const _planKeyMap = { 'price_1TLxfzCoogKs3SGPIctkgMhW': 'buddy', 'price_1TLxg0CoogKs3SGPAdQBsb8d': 'buddy_plus', 'price_1T7VxVCoogKs3SGPwcXrK0kI': 'buddy_vip' };
+      // Not subscribed — show single-tier plan card
+      const plan = STRIPE_PLANS[0];
       return `
         <div class="card">
           <div class="card-title" style="margin-bottom: 4px;">🐾 Get Started with Vet Buddies</div>
           <div style="color: var(--text-secondary); font-size: 14px; margin-bottom: 8px;">Your pet's own Living Care Plan — built and maintained by a dedicated trained veterinary professional, with Dr. Rodgers as your clinical safety net.</div>
-          <div style="color: var(--text-secondary); font-size: 13px; margin-bottom: 20px;">Choose the level of care that fits your pet's needs:</div>
-          ${_ltoActive ? renderLTOCountdownBanner() : ''}
-          <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px;" class="plans-grid">
-            ${STRIPE_PLANS.map(plan => {
-              const _pk = _planKeyMap[plan.id] || 'buddy_vip';
-              const _pr = getActivePricing(_pk);
-              const _priceHtml = _pr.isLTO
-                ? `<div class="lto-badge" style="margin-top:8px;">Limited Time</div>
-                   <div style="margin-top:4px;"><span class="lto-price-original">${_pr.regularPrice}/mo</span></div>
-                   <div style="font-size:22px;font-weight:700;color:#4F152F;">${_pr.price}<span style="font-size:13px;font-weight:400;color:var(--text-secondary);">/mo</span></div>
-                   <div class="lto-savings">Save $${(_pr.regularAmount - _pr.amount).toFixed(2)}/mo</div>`
-                : `<div style="text-align: center; margin-top: 8px; font-size: 12px; color: var(--text-secondary);">${_pr.price}/mo</div>`;
-              return `
-              <div style="border: 2px solid ${plan.highlight ? 'var(--primary)' : 'var(--border)'}; border-radius: 12px; padding: 20px; position: relative; ${plan.highlight ? 'background: linear-gradient(135deg, #f0faf9 0%, #fff 100%);' : ''} ${_pr.isLTO ? 'border-top: 3px solid #4F152F;' : ''}">
-                ${plan.highlight ? '<div style="position:absolute;top:-12px;left:50%;transform:translateX(-50%);background:var(--primary);color:white;font-size:11px;font-weight:700;padding:3px 12px;border-radius:20px;white-space:nowrap;">MOST POPULAR</div>' : ''}
-                <div style="font-size: 22px; margin-bottom: 6px;">${plan.emoji}</div>
-                <div style="font-size: 17px; font-weight: 700; color: #336026;">${plan.name}</div>
-                <ul style="list-style: none; padding: 0; margin: 12px 0 16px; font-size: 13px; color: var(--text-secondary);">
-                  ${plan.features.map(f => `<li style="padding: 3px 0;">✓ ${f}</li>`).join('')}
-                </ul>
-                <button class="btn ${plan.highlight ? 'btn-primary' : 'btn-secondary'}" data-action="subscribe" data-price-id="${_pr.priceId}" style="width: 100%; font-size: 14px;">${_pr.isLTO ? 'Lock In This Rate' : 'Get Started'}</button>
-                ${!_pr.isLTO ? `<div style="text-align: center; margin-top: 8px; font-size: 12px; color: var(--text-secondary);">${_pr.price}/mo</div>` : ''}
-              </div>`;
-            }).join('')}
+          <div style="color: var(--text-secondary); font-size: 13px; margin-bottom: 20px;">Everything you need to stop worrying alone.</div>
+          <div style="max-width: 360px; margin: 0 auto;">
+            <div style="border: 2px solid var(--primary); border-radius: 12px; padding: 24px; background: linear-gradient(135deg, #f0faf9 0%, #fff 100%);">
+              <div style="font-size: 22px; margin-bottom: 6px;">${plan.emoji}</div>
+              <div style="font-size: 17px; font-weight: 700; color: #336026;">${plan.name}</div>
+              <div style="display: flex; align-items: baseline; gap: 6px; margin-top: 6px;">
+                <span style="font-size: 28px; font-weight: 700; color: #336026;">${plan.price}</span>
+                <span style="color: var(--text-secondary); font-size: 13px;">/mo</span>
+              </div>
+              <ul style="list-style: none; padding: 0; margin: 16px 0; font-size: 13px; color: var(--text-secondary);">
+                ${plan.features.map(f => `<li style="padding: 3px 0;">✓ ${f}</li>`).join('')}
+              </ul>
+              <button class="btn btn-primary" data-action="subscribe" data-price-id="${plan.id}" style="width: 100%; font-size: 14px;">Get Started</button>
+            </div>
           </div>
         </div>`;
     }
@@ -3641,7 +3778,8 @@ async function calculateBuddyScorecard(buddyId) {
           </div>
           <div class="form-group" style="margin-top: 16px;">
             <label>Species</label>
-            <select data-field="new-pet-species" style="width: 100%; padding: 10px; border: 1px solid var(--border); border-radius: 8px; font-size: 15px;">
+            <select data-field="new-pet-species" required style="width: 100%; padding: 10px; border: 1px solid var(--border); border-radius: 8px; font-size: 15px;">
+              <option value="" disabled selected>Select species…</option>
               <option value="Dog">🐕 Dog</option>
               <option value="Cat">🐱 Cat</option>
               <option value="Bird">🐦 Bird</option>
@@ -3876,9 +4014,14 @@ async function calculateBuddyScorecard(buddyId) {
       // Edit pet profile inline section (toggled by showEditPet)
       if (state.showEditPet && ['client','admin','vet_buddy'].includes(state.profile.role)) {
         const p = state.currentCase.pets;
+        const speciesOptions = ['Dog','Cat','Bird','Rabbit','Other']
+          .map(s => `<option value="${s}"${p?.species === s ? ' selected' : ''}>${s}</option>`).join('');
         html += `<div class="card" style="margin-bottom:16px; background:#f0faf8; border:1px solid var(--primary);">
           <div class="card-title" style="margin-bottom:12px;">✏️ Edit Pet Profile</div>
           <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px;">
+            <div class="form-group"><label>Name</label><input type="text" data-field="pet-name" value="${esc(p?.name)}" style="width:100%;"></div>
+            <div class="form-group"><label>Species</label><select data-field="pet-species" style="width:100%;">${speciesOptions}</select></div>
+            <div class="form-group"><label>Breed</label><input type="text" data-field="pet-breed" value="${esc(p?.breed)}" placeholder="e.g. DSH" style="width:100%;"></div>
             <div class="form-group"><label>Weight</label><input type="text" data-field="pet-weight" value="${esc(p?.weight)}" placeholder="e.g. 12 lbs" style="width:100%;"></div>
             <div class="form-group"><label>Date of Birth</label><input type="date" data-field="pet-dob" value="${p?.dob || ''}" style="width:100%;"></div>
           </div>
@@ -3921,10 +4064,22 @@ async function calculateBuddyScorecard(buddyId) {
       let html = `<div class="tab-content ${isVisible ? 'active' : ''}">`;
 
       // Export/Share toolbar
-      html += `<div style="display:flex;justify-content:flex-end;gap:8px;margin-bottom:12px;">
+      html += `<div style="display:flex;justify-content:flex-end;gap:8px;margin-bottom:12px;flex-wrap:wrap;">
+        ${canEdit ? `<button class="btn btn-secondary btn-small" data-action="refresh-care-plan-from-activity" title="Let AI scan recent messages, notes, appointments, and escalations for this case and suggest updates to the care plan" ${state.aiExtractionInProgress ? 'disabled' : ''}>${state.aiExtractionInProgress ? '⏳ Refreshing…' : '🔄 Refresh from activity'}</button>` : ''}
         <button class="btn btn-secondary btn-small" onclick="window.print()" title="Print or save as PDF">🖨️ Print / Save PDF</button>
         <button class="btn btn-secondary btn-small" data-action="export-care-plan" title="Export PDF 📄 Living Care Plan as text">📤 Share</button>
       </div>`;
+
+      // AI refresh in-progress banner (same treatment as the files tab)
+      if (canEdit && state.aiExtractionInProgress) {
+        html += `<div style="background:linear-gradient(135deg,rgba(51,96,38,0.08),rgba(104,149,98,0.08));border:1px solid rgba(51,96,38,0.2);border-radius:10px;padding:14px;margin-bottom:16px;display:flex;align-items:center;gap:12px;">
+          <div class="ai-spinner" style="width:22px;height:22px;border:3px solid var(--border);border-top-color:#336026;border-radius:50%;animation:spin 1s linear infinite;flex-shrink:0;"></div>
+          <div>
+            <div style="font-weight:600;font-size:14px;color:#336026;">Synthesizing care plan updates from case activity…</div>
+            <div style="font-size:12px;color:var(--text-secondary);margin-top:2px;">Claude is reading recent messages, notes, timeline entries, appointments, and escalations.</div>
+          </div>
+        </div>`;
+      }
 
       // ── Section 1: Pet Profile ──
       html += `<div class="care-plan-section view-mode" style="border-left:4px solid var(--primary);margin-bottom:16px;">
@@ -4154,6 +4309,25 @@ async function calculateBuddyScorecard(buddyId) {
           <button class="thread-tab ${state.messageThread === 'staff' ? 'active' : ''}" data-action="switch-thread" data-thread="staff">🔒 Staff Thread</button>
         </div>`;
       }
+
+      // Explicit recipient header — makes it clear who will see the message
+      const buddyForCase = state.currentCase?.assigned_buddy;
+      const buddyName = buddyForCase?.name || (state.currentCase?.assigned_buddy_id ? 'your Vet Buddy' : null);
+      const ownerName = state.currentCase?.pets?.owner?.name;
+      const isClient = state.profile.role === 'client';
+      let recipientLabel = '';
+      if (state.messageThread === 'staff') {
+        recipientLabel = `🔒 Internal staff only — <strong>not visible to the client</strong>`;
+      } else if (isClient) {
+        const parts = [];
+        if (buddyName) parts.push(`<strong>${esc(buddyName)}</strong> (your Vet Buddy)`);
+        parts.push(`<strong>Dr. Rodgers</strong> (DVM)`);
+        recipientLabel = `📨 This message goes to: ${parts.join(' + ')}`;
+      } else {
+        // Staff viewing client thread — recipient is the pet owner
+        recipientLabel = `📨 Client thread — visible to <strong>${esc(ownerName || 'the pet owner')}</strong>${buddyName && !isBuddy ? ` and <strong>${esc(buddyName)}</strong>` : ''}`;
+      }
+      html += `<div style="background:${state.messageThread === 'staff' ? '#fff8e1' : '#f0faf8'};border:1px solid ${state.messageThread === 'staff' ? '#ffd54f' : 'var(--border)'};border-radius:8px;padding:8px 12px;margin-bottom:10px;font-size:12px;color:var(--text-secondary);line-height:1.5;">${recipientLabel}</div>`;
 
       // Filter messages by thread
       const visibleMsgs = state.messages.filter(m => {
@@ -4542,8 +4716,6 @@ async function calculateBuddyScorecard(buddyId) {
               <select data-field="broadcast-tier" style="width:100%;">
                 <option value="all">All clients</option>
                 <option value="Buddy">Buddy tier only</option>
-                <option value="Buddy+">Buddy+ tier only</option>
-                <option value="Buddy VIP">Buddy VIP tier only</option>
                 <option value="Trial">Free Trial only</option>
               </select>
             </div>
@@ -4579,7 +4751,9 @@ async function calculateBuddyScorecard(buddyId) {
           </div>
         </div>
         ${(() => {
-          const tierRevenue = { 'Buddy': 99, 'Buddy+': 149, 'Buddy VIP': 279 };
+          // Buddy: current $9.99/mo pricing. Buddy+/Buddy VIP values are retained
+          // so historical cases still contribute accurately to MRR.
+          const tierRevenue = { 'Buddy': 9.99, 'Buddy+': 149, 'Buddy VIP': 279 };
           const activeCases = state.cases.filter(c => c.status === 'Active' || c.status === 'pending_assignment');
           const mrr = activeCases.reduce((sum, c) => sum + (tierRevenue[c.subscription_tier] || 0), 0);
           const arpu = activeCases.length > 0 ? (mrr / activeCases.length) : 0;
@@ -4594,8 +4768,7 @@ async function calculateBuddyScorecard(buddyId) {
               </div>
               <div style="margin-top:12px;display:flex;gap:16px;font-size:12px;opacity:0.8;">
                 <span>Buddy: ${tierCounts['Buddy'] || 0}</span>
-                <span>Buddy+: ${tierCounts['Buddy+'] || 0}</span>
-                <span>Buddy VIP: ${tierCounts['Buddy VIP'] || 0}</span>
+                ${(tierCounts['Buddy+'] || tierCounts['Buddy VIP']) ? `<span style="opacity:0.6;">Legacy: ${(tierCounts['Buddy+'] || 0) + (tierCounts['Buddy VIP'] || 0)}</span>` : ''}
               </div>
             </div>
           </div>`;
@@ -5085,8 +5258,8 @@ async function calculateBuddyScorecard(buddyId) {
                 <div style="font-size: 10px; font-weight: 700; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 5px;">Tier</div>
                 <select data-field="case-tier" data-case-id="${state.currentCase.id}" style="width:100%; font-size:13px; padding: 6px 8px;">
                   <option value="Buddy"     ${state.currentCase.subscription_tier === 'Buddy'     ? 'selected' : ''}>Buddy</option>
-                  <option value="Buddy+"    ${state.currentCase.subscription_tier === 'Buddy+'    ? 'selected' : ''}>Buddy+</option>
-                  <option value="Buddy VIP" ${state.currentCase.subscription_tier === 'Buddy VIP' ? 'selected' : ''}>Buddy VIP</option>
+                  <option value="Buddy+"    ${state.currentCase.subscription_tier === 'Buddy+'    ? 'selected' : ''}>Buddy+ (legacy)</option>
+                  <option value="Buddy VIP" ${state.currentCase.subscription_tier === 'Buddy VIP' ? 'selected' : ''}>Buddy VIP (legacy)</option>
                 </select>
               </div>
             </div>
@@ -5772,7 +5945,7 @@ async function calculateBuddyScorecard(buddyId) {
     function renderAdminResources() {
       const canEdit = state.profile?.role === 'admin';
       const resources = state.resources.length > 0 ? state.resources : [
-        { id: null, title: 'Tier Overview', description: 'Buddy, Buddy+, and Buddy VIP plan details', icon: '📊', url: null },
+        { id: null, title: 'Tier Overview', description: 'Buddy plan details and free trial info', icon: '📊', url: null },
         { id: null, title: 'Behavioral Consult Protocol', description: 'Step-by-step guide for behavioral escalations', icon: '🧠', url: null },
         { id: null, title: 'Welcome Script', description: 'Onboarding script for new client calls', icon: '📝', url: null },
         { id: null, title: 'Compensation Structure', description: 'CSU student payment and hour tracking', icon: '💰', url: null },
@@ -5852,8 +6025,6 @@ async function calculateBuddyScorecard(buddyId) {
             <label>Subscription Tier</label>
             <select data-field="new-case-tier" style="width:100%;">
               <option value="Buddy">Buddy</option>
-              <option value="Buddy+">Buddy+</option>
-              <option value="Buddy VIP">Buddy VIP</option>
             </select>
           </div>
           <div class="form-group">
@@ -5885,14 +6056,12 @@ async function calculateBuddyScorecard(buddyId) {
 
       let content = '';
       if (step === 1) {
-        const _onboardLTO = isLTOActive();
         content = `
           <div style="text-align:center;margin-bottom:24px;">
             <div style="font-size:48px;margin-bottom:12px;">🐾</div>
             <div style="font-size:22px;font-weight:700;color:#336026;margin-bottom:8px;">Welcome to Vet Buddies!</div>
             <div style="color:var(--text-secondary);">Every pet deserves a Buddy. Let's get you set up.</div>
           </div>
-          ${_onboardLTO ? renderLTOCountdownBanner() : ''}
           <div class="card" style="border:2px solid var(--primary);background:linear-gradient(135deg,#f0faf9 0%,#fff 100%);margin-bottom:20px;text-align:center;">
             <div style="font-size:28px;margin-bottom:8px;">🎉</div>
             <div style="font-size:18px;font-weight:700;color:#336026;margin-bottom:6px;">Try Vet Buddies Free for ${TRIAL_DURATION_DAYS} Days</div>
@@ -5907,22 +6076,25 @@ async function calculateBuddyScorecard(buddyId) {
         // Combined: Add Pet + "What's on your mind?" in one form
         content = `
           <div style="text-align:center;margin-bottom:24px;">
-            <div style="font-size:48px;margin-bottom:12px;">🐕</div>
+            <div style="font-size:48px;margin-bottom:12px;">🐾</div>
             <div style="font-size:22px;font-weight:700;color:#336026;margin-bottom:8px;">Tell us about your pet</div>
             <div style="color:var(--text-secondary);">We'll create a care profile and your Buddy will reach out within 48 hours.</div>
           </div>
           <div class="card">
             <div class="form-group"><label>Pet Name</label><input type="text" data-field="new-pet-name" placeholder="e.g. Biscuit" style="width:100%;" autofocus></div>
             <div class="form-group"><label>Species</label>
-              <select data-field="new-pet-species" style="width:100%;">
+              <select data-field="new-pet-species" required style="width:100%;">
+                <option value="" disabled selected>Select species…</option>
                 <option value="Dog">Dog 🐕</option><option value="Cat">Cat 🐈</option><option value="Bird">Bird 🦜</option><option value="Rabbit">Rabbit 🐇</option><option value="Other">Other 🐾</option>
               </select>
             </div>
             <div class="form-group"><label>Breed (optional)</label><input type="text" data-field="new-pet-breed" placeholder="e.g. Tabby" style="width:100%;"></div>
             <div class="form-group" style="margin-top:8px;padding-top:16px;border-top:1px solid var(--border);">
-              <label style="font-weight:600;">What's most on your mind about your pet's care?</label>
-              <div style="font-size:13px;color:var(--text-secondary);margin-bottom:8px;">This becomes your first care goal — totally optional.</div>
-              <textarea data-field="onboarding-concern" placeholder="e.g. I'm worried about my dog's weight gain since the surgery..." style="width:100%;height:70px;"></textarea>
+              <label style="font-weight:600;">🎯 What are your goals for your pet?</label>
+              <div style="font-size:13px;color:var(--text-secondary);margin-bottom:8px;">Share what you'd like to work on — your Buddy will build these into your Living Care Plan. Add one or more, all optional.</div>
+              <input type="text" data-field="onboarding-goal-1" placeholder="e.g. Help them lose 3 lbs through portion control" style="width:100%;margin-bottom:6px;">
+              <input type="text" data-field="onboarding-goal-2" placeholder="e.g. Reduce anxiety during vet visits" style="width:100%;margin-bottom:6px;">
+              <input type="text" data-field="onboarding-goal-3" placeholder="e.g. Stay on top of senior wellness check-ins" style="width:100%;">
             </div>
           </div>
           <div style="margin-top:20px;">
@@ -6279,6 +6451,11 @@ async function calculateBuddyScorecard(buddyId) {
       }
       html += '</div></div>';
       return renderLayout(html);
+    }
+
+    function renderLoadError(viewName) {
+      const safe = esc(viewName || 'this view');
+      return `<div class="empty-state" style="padding:40px;text-align:center;"><div class="empty-state-text" style="margin-bottom:12px;">Could not load ${safe}. Check your connection and try again.</div><button class="btn-secondary" onclick="location.reload()">Reload</button></div>`;
     }
 
     function renderLayout(content) {
@@ -7023,102 +7200,44 @@ function startLTOCountdownTimer() {
 }
 
 function renderPricingModal() {
-  const ltoActive = isLTOActive();
-  const buddyPricing = getActivePricing('buddy');
-  const buddyPlusPricing = getActivePricing('buddy_plus');
+  const priceId = CONFIG.STRIPE_PLANS.buddy;
+  const priceDisplay = CONFIG.BUDDY_PRICE_DISPLAY;
 
-  const plans = [
-    {
-      name: 'Buddy',
-      key: 'buddy',
-      pricing: buddyPricing,
-      priceId: buddyPricing.priceId,
-      description: '/month',
-      originalPrice: '$99',
-      savings: '$79.01',
-      features: ['1 check-in per month from your Vet Buddy', 'Digital Living Care Plan', 'Care coordination between vet visits'],
-      popular: false
-    },
-    {
-      name: 'Buddy+',
-      key: 'buddy_plus',
-      pricing: buddyPlusPricing,
-      priceId: buddyPlusPricing.priceId,
-      description: '/month',
-      originalPrice: '$149',
-      savings: '$119.01',
-      features: ['1 check-in per week from your Vet Buddy', 'Digital Living Care Plan', 'Care coordination between vet visits'],
-      popular: true
-    },
-    {
-      name: 'Buddy VIP',
-      key: 'buddy_vip',
-      pricing: getActivePricing('buddy_vip'),
-      priceId: CONFIG.STRIPE_PLANS.buddy_vip,
-      description: '/month',
-      originalPrice: null,
-      savings: null,
-      features: ['Weekly check-ins from your Vet Buddy', 'Monthly check-ins from a veterinarian', 'Digital Living Care Plan', 'Care coordination between vet visits'],
-      popular: false
-    }
+  const features = [
+    'Monthly check-ins from your Vet Buddy',
+    'Digital Living Care Plan',
+    'Care coordination between vet visits',
+    'Escalate-to-DVM when you need another set of eyes',
   ];
 
-  const ltoCountdownHtml = ltoActive ? renderLTOCountdownBanner() : '';
-
-  const cardsHtml = plans.map(plan => {
-    const p = plan.pricing;
-    const pricingHtml = p.isLTO
-      ? `<div class="lto-badge">Lock in this rate</div>
-         <div style="display: flex; align-items: baseline; gap: 8px; margin-bottom: 4px;">
-           <span class="lto-price-new">${p.price}</span>
-           <span style="color: var(--text-secondary); font-size: 13px;">${plan.description}</span>
-         </div>
-         <div class="lto-price-original">${p.regularPrice}/month</div>
-         <div class="lto-savings">Save $${(p.regularAmount - p.amount).toFixed(2)}/mo</div>`
-      : `<div style="display: flex; align-items: baseline; gap: 8px; margin-bottom: 4px;">
-           <span style="font-size: 32px; font-weight: 700; color: #336026;">${p.price}</span>
-           <span style="color: var(--text-secondary); font-size: 13px;">${plan.description}</span>
-           ${plan.originalPrice ? `<span style="font-size: 16px; color: #999; text-decoration: line-through;">${plan.originalPrice}</span>` : ''}
-         </div>
-         ${plan.savings ? `<div style="font-size: 13px; font-weight: 600; color: #d44; margin-bottom: 4px;">Save ${plan.savings}/mo</div>` : ''}`;
-
-    return `
-    <div class="card" style="padding: 24px; display: flex; flex-direction: column; position: relative; ${plan.popular ? 'border: 2px solid var(--primary); box-shadow: 0 8px 24px rgba(104, 149, 98, 0.15);' : 'border: 1px solid var(--border);'} ${p.isLTO ? 'border-top: 3px solid #4F152F;' : ''}">
-      ${plan.popular ? '<div style="position: absolute; top: -12px; right: 20px; background: var(--primary); color: white; padding: 4px 12px; border-radius: 20px; font-size: 11px; font-weight: 700;">Most Popular</div>' : ''}
-
-      <div style="margin-bottom: 20px;">
-        <h3 style="font-family: 'Fraunces', serif; font-size: 24px; font-weight: 700; color: #336026; margin-bottom: 4px;">${plan.name}</h3>
-        ${pricingHtml}
-      </div>
-
-      <ul style="flex: 1; margin-bottom: 20px; list-style: none;">
-        ${plan.features.map(feature => `
-          <li style="display: flex; align-items: flex-start; gap: 8px; margin-bottom: 10px; font-size: 13px; color: #336026;">
-            <span style="color: var(--primary); font-weight: 700; margin-top: 2px;">✓</span>
-            <span>${feature}</span>
-          </li>
-        `).join('')}
-      </ul>
-
-      <button class="btn-primary" data-action="checkout-stripe" data-price-id="${plan.priceId}" style="width: 100%; padding: 12px;">
-        ${p.isLTO ? 'Lock In This Rate' : 'Get Started'}
-      </button>
-      ${p.isLTO ? '<div class="lto-lock-badge" style="justify-content:center;margin-top:8px;">🔒 Rate locked for your subscription</div>' : ''}
-    </div>`;
-  }).join('');
+  const featuresHtml = features.map(feature => `
+    <li style="display: flex; align-items: flex-start; gap: 8px; margin-bottom: 10px; font-size: 13px; color: #336026;">
+      <span style="color: var(--primary); font-weight: 700; margin-top: 2px;">✓</span>
+      <span>${feature}</span>
+    </li>
+  `).join('');
 
   return `
     <div class="pricing-modal" style="position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.7); display: flex; align-items: center; justify-content: center; z-index: 1000; padding: 20px;">
-      <div style="background: white; border-radius: 16px; max-width: 1000px; width: 100%; max-height: 90vh; overflow-y: auto;">
+      <div style="background: white; border-radius: 16px; max-width: 420px; width: 100%; max-height: 90vh; overflow-y: auto;">
         <div style="padding: 32px 24px; border-bottom: 1px solid var(--border); position: relative;">
           <button data-action="close-pricing" style="position: absolute; top: 16px; right: 16px; background: none; border: none; font-size: 24px; cursor: pointer; color: #336026;">×</button>
-          <h2 style="font-family: 'Fraunces', serif; font-size: 28px; font-weight: 700; color: #336026; margin-bottom: 8px;">Choose Your Plan</h2>
-          <p style="color: var(--text-secondary);">Pick the perfect Vet Buddies plan for your pet.</p>
+          <h2 style="font-family: 'Fraunces', serif; font-size: 28px; font-weight: 700; color: #336026; margin-bottom: 8px;">Your Vet Buddies plan</h2>
+          <p style="color: var(--text-secondary);">Everything you need to stop worrying alone.</p>
         </div>
         <div style="padding: 32px 24px;">
-          ${ltoCountdownHtml}
-          <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 24px;">
-            ${cardsHtml}
+          <div class="card" style="padding: 24px; display: flex; flex-direction: column; border: 2px solid var(--primary); box-shadow: 0 8px 24px rgba(104, 149, 98, 0.15);">
+            <div style="margin-bottom: 20px;">
+              <h3 style="font-family: 'Fraunces', serif; font-size: 24px; font-weight: 700; color: #336026; margin-bottom: 4px;">Buddy</h3>
+              <div style="display: flex; align-items: baseline; gap: 8px; margin-bottom: 4px;">
+                <span style="font-size: 32px; font-weight: 700; color: #336026;">${priceDisplay}</span>
+                <span style="color: var(--text-secondary); font-size: 13px;">/month</span>
+              </div>
+            </div>
+            <ul style="flex: 1; margin-bottom: 20px; list-style: none;">
+              ${featuresHtml}
+            </ul>
+            <button class="btn-primary" data-action="checkout-stripe" data-price-id="${priceId}" style="width: 100%; padding: 12px;">Get Started</button>
           </div>
         </div>
       </div>
@@ -7166,6 +7285,28 @@ function renderLightbox() {
 
       <div style="color: white; text-align: center; padding: 20px; font-size: 14px;">
         ${esc(title)}
+      </div>
+    </div>
+  `;
+}
+
+function renderBioPromptModal() {
+  const name = state.profile?.name ? state.profile.name.split(' ')[0] : 'there';
+  return `
+    <div class="broadcast-overlay" style="z-index:1100;">
+      <div class="broadcast-card" onclick="event.stopPropagation()" style="max-width:480px;">
+        <div style="font-family:'Fraunces',serif;font-size:20px;font-weight:600;margin-bottom:8px;">Welcome, ${esc(name)}!</div>
+        <div style="font-size:13px;color:#666;margin-bottom:16px;line-height:1.4;">
+          Please add a short bio so clients can get to know you. You can update it anytime from your profile.
+        </div>
+        <div class="form-group">
+          <label>Bio</label>
+          <textarea data-field="bio-prompt-text" placeholder="Tell clients about yourself — your background, interests, and approach..." style="width:100%;height:100px;"></textarea>
+        </div>
+        <div style="display:flex;gap:10px;margin-top:12px;">
+          <button class="btn btn-primary" data-action="save-bio-prompt" style="flex:1;">Save Bio</button>
+          <button class="btn btn-secondary" data-action="dismiss-bio-prompt">Remind Me Later</button>
+        </div>
       </div>
     </div>
   `;
@@ -7494,10 +7635,10 @@ function renderPartnerClinicDashboard() {
 
   // Care plan display for currently selected case
   let carePlanHtml = '';
-  if (state.carePlan?.content) {
-    const cp = typeof state.carePlan.content === 'string' ? JSON.parse(state.carePlan.content) : state.carePlan.content;
+  if (state.carePlan?.living_plan) {
+    const cp = state.carePlan.living_plan;
     const goals = cp.active_care_goals || [];
-    const milestones = cp.milestones || [];
+    const milestones = cp.milestones_and_wins || [];
     carePlanHtml = `
       ${goals.length > 0 ? `<div style="margin-bottom:12px;"><div style="font-weight:600;font-size:13px;margin-bottom:8px;">Active Care Goals</div>
         ${goals.map(g => `<div style="padding:8px 12px;background:var(--bg);border-radius:6px;margin-bottom:6px;font-size:13px;">
@@ -7886,34 +8027,34 @@ function renderVaccineDueAlerts(vaccines) {
               html = renderKnowledgeBase();
             } else {
               state._kbLoaded = true;
-              loadKbConversation().then(function(){ app.innerHTML = renderKnowledgeBase(); attachEventListeners(); scrollKbToBottom(); });
+              loadKbConversation().then(function(){ app.innerHTML = renderKnowledgeBase(); attachEventListeners(); scrollKbToBottom(); }).catch(function(err){ console.error('knowledge-base load failed:', err); state._kbLoaded = false; app.innerHTML = renderLayout(renderLoadError('knowledge base')); attachEventListeners(); });
               app.innerHTML = renderLayout('<div style="text-align:center;padding:40px;"><div class="spinner"></div></div>');
               attachEventListeners(); return;
             }
             break;
           case 'kb-admin':
-            loadKbAdminConversations().then(function(){ app.innerHTML = renderKbAdmin(); attachEventListeners(); });
+            loadKbAdminConversations().then(function(){ app.innerHTML = renderKbAdmin(); attachEventListeners(); }).catch(function(err){ console.error('kb-admin load failed:', err); app.innerHTML = renderLayout(renderLoadError('KB admin')); attachEventListeners(); });
             app.innerHTML = renderLayout('<div style="text-align:center;padding:40px;"><div class="spinner"></div></div>');
             attachEventListeners(); return;
           case 'audit-log':
-            loadAuditLog().then(function(){ state.auditLogs = state.auditLog; app.innerHTML = renderAuditLog(); attachEventListeners(); });
+            loadAuditLog().then(function(){ state.auditLogs = state.auditLog; app.innerHTML = renderAuditLog(); attachEventListeners(); }).catch(function(err){ console.error('audit-log load failed:', err); app.innerHTML = renderLayout(renderLoadError('audit log')); attachEventListeners(); });
             app.innerHTML = renderLayout('<div style="text-align:center;padding:40px;"><div class="spinner"></div></div>');
             attachEventListeners(); return;
           case 'buddy-scorecard':
             html = renderBuddyScorecard();
             break;
           case 'survey-results':
-            loadAllSurveys().then(function(){ app.innerHTML = renderClientSurveyView(); attachEventListeners(); });
+            loadAllSurveys().then(function(){ app.innerHTML = renderClientSurveyView(); attachEventListeners(); }).catch(function(err){ console.error('survey-results load failed:', err); app.innerHTML = renderLayout(renderLoadError('survey results')); attachEventListeners(); });
             app.innerHTML = renderLayout('<div style="text-align:center;padding:40px;"><div class="spinner"></div></div>');
             attachEventListeners(); return;
           case 'referral-dashboard':
-            ensureReferralCode().then(function(){ return loadReferralStats(); }).then(function(){ app.innerHTML = renderReferralDashboard(); attachEventListeners(); });
+            ensureReferralCode().then(function(){ return loadReferralStats(); }).then(function(){ app.innerHTML = renderReferralDashboard(); attachEventListeners(); }).catch(function(err){ console.error('referral-dashboard load failed:', err); app.innerHTML = renderLayout(renderLoadError('referral dashboard')); attachEventListeners(); });
             app.innerHTML = renderLayout('<div style="text-align:center;padding:40px;"><div class="spinner"></div></div>');
             attachEventListeners(); return;
           case 'health-timeline':
             if (state.cases.length > 0) {
               var htPet = state.cases[state.activePetIndex]?.pets;
-              if (htPet) loadHealthTimeline(htPet.id).then(function(){ app.innerHTML = renderHealthTimeline(); attachEventListeners(); });
+              if (htPet) loadHealthTimeline(htPet.id).then(function(){ app.innerHTML = renderHealthTimeline(); attachEventListeners(); }).catch(function(err){ console.error('health-timeline load failed:', err); app.innerHTML = renderLayout(renderLoadError('health timeline')); attachEventListeners(); });
             }
             app.innerHTML = renderLayout('<div style="text-align:center;padding:40px;"><div class="spinner"></div></div>');
             attachEventListeners(); return;
@@ -8041,6 +8182,7 @@ function renderVaccineDueAlerts(vaccines) {
         if(state.showNotifSettings&&typeof renderNotifSettings==='function')mh+=renderNotifSettings();
         if(state.show2FA&&typeof render2FASetup==='function')mh+=render2FASetup();
         if(state.showAiReviewModal&&typeof renderAiReviewModal==='function')mh+=renderAiReviewModal();
+        if(state.showBioPrompt&&typeof renderBioPromptModal==='function')mh+=renderBioPromptModal();
         if(state.showPushPromptBanner)mh+=`<div style="position:fixed;top:16px;left:50%;transform:translateX(-50%);z-index:1100;background:linear-gradient(135deg,#336026,#689562);color:white;border-radius:12px;padding:14px 20px;box-shadow:0 8px 32px rgba(0,0,0,0.2);display:flex;align-items:center;gap:12px;max-width:480px;width:90%;animation:notifSlideIn 0.3s ease-out;"><span style="font-size:20px;">🔔</span><div style="flex:1;"><div style="font-weight:600;font-size:14px;">Your Buddy just sent a message!</div><div style="font-size:12px;opacity:0.9;margin-top:2px;">Enable notifications so you never miss one.</div></div><button data-action="enable-push-from-toast" style="background:white;color:#336026;border:none;border-radius:6px;padding:6px 14px;font-size:12px;font-weight:700;cursor:pointer;white-space:nowrap;">Enable</button><button data-action="dismiss-push-toast" style="background:none;border:none;color:rgba(255,255,255,0.7);font-size:18px;cursor:pointer;padding:0 4px;">×</button></div>`;
         if(state._showPasswordReset)mh+=`<div class="broadcast-overlay" data-action="close-password-reset"><div class="broadcast-card" onclick="event.stopPropagation()" style="max-width:400px;"><div style="font-family:'Fraunces',serif;font-size:18px;font-weight:600;margin-bottom:16px;">🔒 Set New Password</div><div class="form-group"><label>New Password</label><input type="password" data-field="reset-new-password" placeholder="Enter new password (min 6 characters)" style="width:100%;"></div><div class="form-group"><label>Confirm Password</label><input type="password" data-field="reset-confirm-password" placeholder="Confirm new password" style="width:100%;"></div><div style="display:flex;gap:10px;margin-top:8px;"><button class="btn btn-primary" data-action="save-new-password" style="flex:1;">Update Password</button><button class="btn btn-secondary" data-action="close-password-reset">Cancel</button></div></div></div>`;
         var mc=document.getElementById('modal-overlay-container');if(mc)mc.remove();
@@ -8069,6 +8211,20 @@ function renderVaccineDueAlerts(vaccines) {
 
         // ═══ NEW FEATURE INLINE ACTIONS (before switch) ═══
         if (action === 'toggle-dark-mode') { toggleDarkMode(); return; }
+        if (action === 'save-bio-prompt') {
+          const bio = document.querySelector('[data-field="bio-prompt-text"]')?.value.trim() || '';
+          if (!bio) { showToast('Please enter a short bio before saving', 'error'); return; }
+          try {
+            const { error } = await sb.from('users').update({ bio }).eq('id', state.profile.id);
+            if (error) throw error;
+            state.profile.bio = bio;
+            state.showBioPrompt = false;
+            showToast('Bio saved — thanks!', 'success');
+            render();
+          } catch (err) { showToast(err.message || 'Failed to save bio', 'error'); }
+          return;
+        }
+        if (action === 'dismiss-bio-prompt') { state.showBioPrompt = false; render(); return; }
         if (action === 'toggle-faq') { var aid=target.dataset.articleId; var ael=document.querySelector('.kb-article[data-article-id="'+aid+'"]'); if(ael){var ac=ael.querySelector('.kb-article-content');var ai=ael.querySelector('.kb-toggle-icon');if(ac)ac.style.display=ac.style.display==='none'?'block':'none';if(ai)ai.textContent=ac&&ac.style.display==='none'?'+':'\u2212';} return; }
         if (action === 'filter-faq-category') { state.faqCategory=target.dataset.category||'All'; render(); return; }
         if (action === 'kb-send-message') {
@@ -8116,7 +8272,7 @@ function renderVaccineDueAlerts(vaccines) {
         if (action === 'copy-referral-code') { navigator.clipboard.writeText(state.profile?.referral_code||'').then(function(){showToast('Copied!','success');});return; }
         if (action === 'close-password-reset') { state._showPasswordReset=false;render();return; }
         if (action === 'toggle-mute-case') { var cid=target.dataset.caseId;if(!cid)return;var muted=state.notificationSettings.muted_case_ids||[];if(muted.includes(cid)){state.notificationSettings.muted_case_ids=muted.filter(function(id){return id!==cid;});showToast('Notifications unmuted for this case','success');}else{state.notificationSettings.muted_case_ids=[].concat(muted,[cid]);showToast('Notifications muted for this case','info');}saveNotificationSettings().catch(function(){});render();return; }
-        if (action === 'save-new-password') { var np=document.querySelector('[data-field="reset-new-password"]')?.value||'';var cp=document.querySelector('[data-field="reset-confirm-password"]')?.value||'';if(np.length<8){showToast('Password must be at least 8 characters','error');return;}if(np!==cp){showToast('Passwords do not match','error');return;}sb.auth.updateUser({password:np}).then(function(r){if(r.error)throw r.error;state._showPasswordReset=false;showToast('Password updated successfully!','success');render();}).catch(function(e){showToast(e.message||'Failed to update password','error');});return; }
+        if (action === 'save-new-password') { var np=document.querySelector('[data-field="reset-new-password"]')?.value||'';var cp=document.querySelector('[data-field="reset-confirm-password"]')?.value||'';if(np.length<8){showToast('Password must be at least 8 characters','error');return;}if(np!==cp){showToast('Passwords do not match','error');return;}isPasswordPwned(np).then(function(pwned){if(pwned){showToast('This password has appeared in a known data breach. Please choose a different password.','error');return;}sb.auth.updateUser({password:np}).then(function(r){if(r.error)throw r.error;state._showPasswordReset=false;showToast('Password updated successfully!','success');render();}).catch(function(e){showToast(e.message||'Failed to update password','error');});});return; }
         if (action === 'download-ics') { var apt=state.appointments.find(function(a){return a.id===target.dataset.appointmentId;});if(apt){var ics=generateICS(apt,state.currentCase?.pets?.name||'Pet');var b=new Blob([ics],{type:'text/calendar'});var u=URL.createObjectURL(b);var dl=document.createElement('a');dl.href=u;dl.download='vet-buddies-appt.ics';dl.click();URL.revokeObjectURL(u);showToast('Calendar event downloaded!','success');}return; }
         if (action === 'export-care-plan-pdf') { if(state.carePlan&&state.currentCase){showToast('Generating PDF...','info');ensureJsPDF().then(function(){return generateCarePlanPDF(state.carePlan,state.currentCase);}).then(function(bu){var url=URL.createObjectURL(bu);var dl=document.createElement('a');dl.href=url;dl.download='care-plan-'+(state.currentCase.pets?.name||'pet')+'.pdf';dl.click();URL.revokeObjectURL(url);showToast('PDF downloaded!','success');}).catch(function(){showToast('PDF failed','error');});}return; }
         if (action === 'checkout-stripe') { var pid=target.dataset.priceId;if(!pid)return;showToast('Redirecting...','info');var origin=window.location.origin;var checkoutPayload={price_id:pid,success_url:origin+'/?billing=success',cancel_url:origin+'/'};if(isLTOActive()){checkoutPayload.lto_initiated_at=new Date().toISOString();checkoutPayload.lto_locked_rate=true;}callEdgeFunction('stripe-checkout',checkoutPayload).then(function(r){if(r?.url)window.location.href=r.url;}).catch(function(err){showToast(err.message||'Checkout failed','error');});return; }
@@ -8518,10 +8674,6 @@ function renderVaccineDueAlerts(vaccines) {
                 success_url: `${origin}/?billing=success`,
                 cancel_url: `${origin}/`,
               };
-              if (isLTOActive()) {
-                checkoutBody.lto_initiated_at = new Date().toISOString();
-                checkoutBody.lto_locked_rate = true;
-              }
               const { url } = await callEdgeFunction('stripe-checkout', checkoutBody);
               window.location.href = url;
             } catch (err) {
@@ -8555,10 +8707,13 @@ function renderVaccineDueAlerts(vaccines) {
           case 'save-new-pet-and-finish':
           case 'save-new-pet': {
             const petName = document.querySelector('[data-field="new-pet-name"]')?.value?.trim();
-            const petSpecies = document.querySelector('[data-field="new-pet-species"]')?.value || 'Dog';
+            const petSpecies = document.querySelector('[data-field="new-pet-species"]')?.value || '';
             const petBreed = document.querySelector('[data-field="new-pet-breed"]')?.value?.trim() || null;
-            const onboardingConcern = document.querySelector('[data-field="onboarding-concern"]')?.value?.trim() || '';
+            const onboardingGoals = [1, 2, 3]
+              .map(n => document.querySelector(`[data-field="onboarding-goal-${n}"]`)?.value?.trim())
+              .filter(Boolean);
             if (!petName) { showToast('Please enter a pet name', 'error'); break; }
+            if (!petSpecies) { showToast('Please select a species', 'error'); break; }
             // Prevent duplicate submissions — disable button while saving
             const origBtnText = target.textContent;
             target.textContent = 'Saving…';
@@ -8598,8 +8753,15 @@ function renderVaccineDueAlerts(vaccines) {
                 summary: `${petName} · ${petSpecies}${petBreed ? ' · ' + petBreed : ''}`,
                 updated_at: new Date().toISOString(),
               };
-              if (onboardingConcern) {
-                const lp = { pet_profile: '', care_team: [], active_care_goals: [{ goal_text: onboardingConcern, set_by_owner: true, status: 'active' }], engagement_log: [], milestones: [] };
+              if (onboardingGoals.length > 0) {
+                const nowIso = new Date().toISOString();
+                const lp = {
+                  pet_profile: '',
+                  care_team: [],
+                  active_care_goals: onboardingGoals.map(goal_text => ({ goal_text, set_by_owner: true, status: 'active', created_at: nowIso, reviewed_at: null, dvm_reviewed: false })),
+                  engagement_log: [],
+                  milestones_and_wins: [],
+                };
                 carePlanData.content = JSON.stringify(lp);
               }
               await sb.from('care_plans').insert(carePlanData);
@@ -8851,10 +9013,10 @@ function renderVaccineDueAlerts(vaccines) {
           case 'nav-buddy-scorecard': navigate('buddy-scorecard'); break;
           case 'nav-survey-results': navigate('survey-results'); break;
           case 'nav-referral-dashboard':
-            if (!hasFeatureAccess('referral_dashboard')) { showToast('Upgrade to Buddy+ to access the referral dashboard', 'info'); break; }
+            if (!hasFeatureAccess('referral_dashboard')) { showToast('The referral dashboard isn\'t available on your current plan yet', 'info'); break; }
             navigate('referral-dashboard'); break;
           case 'nav-health-timeline':
-            if (!hasFeatureAccess('health_timeline')) { showToast('Upgrade to Buddy+ to access the health timeline', 'info'); break; }
+            if (!hasFeatureAccess('health_timeline')) { showToast('The health timeline isn\'t available on your current plan yet', 'info'); break; }
             navigate('health-timeline'); break;
           case 'nav-partner-clinic-dashboard': navigate('partner-clinic-dashboard'); break;
           case 'nav-admin-cases':
@@ -9047,19 +9209,34 @@ function renderVaccineDueAlerts(vaccines) {
               showToast(err.message || 'Failed to save Living Care Plan', 'error');
             }
             break;
-          case 'log-checkin':
+          case 'log-checkin': {
             const checkInType = target.dataset.type || 'buddy';
-            await sb.from('touchpoints').insert({
-              case_id: target.dataset.caseId,
-              type: checkInType,
-              completed_at: new Date().toISOString(),
-              completed_by: state.profile.id,
-            });
-            await loadTouchpoints(state.caseId);
-            try { await awardCareXP(getCurrentPetId(), 'touchpoint_completed'); } catch(_) {}
-            showToast('Check-in logged', 'success');
-            render();
+            const caseId = target.dataset.caseId;
+            if (!caseId) { showToast('Missing case id — cannot log check-in', 'error'); break; }
+            if (!state.profile?.id) { showToast('You must be signed in to log a check-in', 'error'); break; }
+            const origBtnText = target.textContent;
+            target.disabled = true;
+            target.textContent = 'Logging…';
+            try {
+              const { error } = await sb.from('touchpoints').insert({
+                case_id: caseId,
+                type: checkInType,
+                completed_at: new Date().toISOString(),
+                completed_by: state.profile.id,
+              });
+              if (error) throw error;
+              await loadTouchpoints(state.caseId);
+              try { await awardCareXP(getCurrentPetId(), 'touchpoint_completed'); } catch(_) {}
+              showToast('Check-in logged', 'success');
+              render();
+            } catch (err) {
+              console.error('log-checkin error:', err);
+              showToast(err.message || 'Failed to log check-in', 'error');
+              target.disabled = false;
+              target.textContent = origBtnText;
+            }
             break;
+          }
           case 'escalation-ack':
             if (!['admin', 'vet_buddy'].includes(state.profile.role)) { showToast('Permission denied', 'error'); break; }
             try {
@@ -9269,7 +9446,8 @@ function renderVaccineDueAlerts(vaccines) {
           case 'save-new-goal': {
             const goalText = document.querySelector('[data-field="goal-text"]')?.value.trim();
             if (!goalText) { showToast('Please enter a goal', 'error'); break; }
-            const setByOwner = document.querySelector('[data-field="goal-set-by-owner"]')?.checked || false;
+            const setByOwnerEl = document.querySelector('[data-field="goal-set-by-owner"]');
+            const setByOwner = setByOwnerEl?.type === 'checkbox' ? setByOwnerEl.checked : (setByOwnerEl?.value === 'true');
             try {
               const lp = state.carePlan.living_plan || emptyLivingCarePlan();
               lp.active_care_goals.push({ goal_text: goalText, set_by_owner: setByOwner, created_at: new Date().toISOString(), reviewed_at: null, status: 'active', dvm_reviewed: false });
@@ -9674,6 +9852,24 @@ function renderVaccineDueAlerts(vaccines) {
             }
             break;
           }
+          case 'refresh-care-plan-from-activity': {
+            if (!state.caseId) break;
+            if (!['vet_buddy', 'admin'].includes(state.profile.role)) {
+              showToast('Only staff can refresh the care plan from activity.', 'error');
+              break;
+            }
+            if (state.aiExtractionInProgress) break;
+            state.aiExtractionInProgress = true;
+            render();
+            try {
+              await refreshCarePlanFromActivity(state.caseId);
+            } catch (err) {
+              showToast('Care plan refresh failed: ' + (err.message || 'Error'), 'error');
+              state.aiExtractionInProgress = false;
+              render();
+            }
+            break;
+          }
 
           // ── Toggle case tabs (load docs when switching to files) ──
 
@@ -9686,10 +9882,15 @@ function renderVaccineDueAlerts(vaccines) {
             const petId = target.dataset.petId;
             if (!petId) break;
             try {
+              const name = document.querySelector('[data-field="pet-name"]')?.value.trim();
+              const species = document.querySelector('[data-field="pet-species"]')?.value || '';
+              const breed = document.querySelector('[data-field="pet-breed"]')?.value.trim() || null;
               const weight = document.querySelector('[data-field="pet-weight"]')?.value.trim() || null;
               const dob = document.querySelector('[data-field="pet-dob"]')?.value || null;
               const notes = document.querySelector('[data-field="pet-notes"]')?.value.trim() || null;
-              const { error } = await sb.from('pets').update({ weight, dob, notes }).eq('id', petId);
+              if (!name) { showToast('Pet name is required', 'error'); break; }
+              if (!species) { showToast('Please select a species', 'error'); break; }
+              const { error } = await sb.from('pets').update({ name, species, breed, weight, dob, notes }).eq('id', petId);
               if (error) throw error;
               state.showEditPet = false;
               await loadCase(state.caseId);
@@ -9855,11 +10056,15 @@ function renderVaccineDueAlerts(vaccines) {
             const rating = parseInt(target.dataset.rating);
             if (!tpId || !rating) break;
             try {
-              await sb.from('touchpoints').update({ satisfaction_rating: rating }).eq('id', tpId);
+              const { error } = await sb.from('touchpoints').update({ satisfaction_rating: rating }).eq('id', tpId);
+              if (error) throw error;
               await loadTouchpoints(state.caseId);
               showToast(`Thanks for your feedback! ${'⭐'.repeat(rating)}`, 'success');
               render();
-            } catch(err) { showToast('Failed to save rating', 'error'); }
+            } catch(err) {
+              console.error('rate-touchpoint error:', err);
+              showToast(err.message || 'Failed to save rating', 'error');
+            }
             break;
           }
 
