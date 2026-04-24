@@ -579,6 +579,21 @@
         state.aiCheckedItems = checked;
         state.showAiReviewModal = true;
         render();
+
+        // The edge function has already auto-populated care_plans direct columns,
+        // inserted pet_vaccines + care_plan_diagnoses rows, recomputed completeness,
+        // and (if applicable) posted an owner-facing kb_messages follow-up.
+        // Reload the surfaces the user might be looking at so the UI reflects it.
+        try {
+          const petId = state.currentCase?.pets?.id;
+          await Promise.all([
+            loadCarePlan(caseId),
+            petId ? loadPetVaccines(petId) : Promise.resolve(),
+          ]);
+          render();
+        } catch (reloadErr) {
+          console.warn('post-extraction reload error:', reloadErr);
+        }
       } else {
         state.aiExtractionInProgress = false;
         render();
@@ -927,6 +942,32 @@
       document.addEventListener('keydown', e => {
         if (e.key === 'Escape') closeModal();
       });
+    }
+
+    function showAiSummaryModal(doc) {
+      const summaryHtml = esc(doc.ai_summary)
+        .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+        .split('\n')
+        .map(line => {
+          const t = line.trim();
+          if (!t) return '';
+          if (/^[-*]\s+/.test(t)) return `<div style="margin-left:14px;">• ${t.replace(/^[-*]\s+/, '')}</div>`;
+          return `<p style="margin:8px 0;">${t}</p>`;
+        })
+        .join('');
+      const analyzedAt = doc.ai_analyzed_at ? formatDate(doc.ai_analyzed_at) : '';
+      const body = `
+        <div style="max-height:60vh;overflow-y:auto;">
+          <div style="background:#FFF8E1;border-left:3px solid #F0B100;padding:10px 12px;border-radius:6px;font-size:13px;color:#7A5A00;margin-bottom:14px;">
+            <strong>Heads up:</strong> This summary is for informational purposes only. It does not replace veterinary advice. Bring any questions to your Buddy or supervising DVM.
+          </div>
+          <div style="font-size:14px;line-height:1.55;">${summaryHtml}</div>
+          ${analyzedAt ? `<div style="font-size:12px;color:var(--text-secondary);margin-top:12px;">Analyzed ${analyzedAt}</div>` : ''}
+        </div>`;
+      const actions = `
+        <button class="btn btn-secondary" data-action="reanalyze-doc" data-doc-id="${doc.id}">↻ Re-analyze</button>
+        <button class="btn btn-primary" onclick="document.querySelector('.modal-backdrop')?.remove()">Close</button>`;
+      showModal('🤖 Plain-language summary', body, actions);
     }
 
     function closeModal() {
@@ -4061,7 +4102,26 @@ async function calculateBuddyScorecard(buddyId) {
       const isAdmin = state.profile.role === 'admin';
       const tier = state.currentCase?.subscription_tier || 'Buddy';
       const lp = state.carePlan?.living_plan || emptyLivingCarePlan();
+      const petName = state.currentCase?.pets?.name || 'your pet';
+      const completenessScore = Math.max(0, Math.min(100, Number(state.carePlan?.completeness_score) || 0));
       let html = `<div class="tab-content ${isVisible ? 'active' : ''}">`;
+
+      // Profile completeness progress bar (owner-facing, shown to all roles)
+      {
+        const barColor = completenessScore >= 80 ? 'var(--green)'
+          : completenessScore >= 50 ? 'var(--primary)'
+          : 'var(--amber)';
+        html += `<div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:14px 16px;margin-bottom:14px;">
+          <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:6px;">
+            <div style="font-size:13px;font-weight:600;color:var(--text);">Profile completeness</div>
+            <div style="font-size:13px;color:var(--text-secondary);">${completenessScore} / 100</div>
+          </div>
+          <div style="background:var(--bg);border-radius:6px;height:8px;overflow:hidden;">
+            <div style="width:${completenessScore}%;height:100%;background:${barColor};transition:width .3s ease;"></div>
+          </div>
+          ${completenessScore < 50 ? `<div style="margin-top:8px;font-size:12px;color:var(--text-secondary);">Upload more records or answer a few questions to complete ${esc(petName)}'s profile.</div>` : ''}
+        </div>`;
+      }
 
       // Export/Share toolbar
       html += `<div style="display:flex;justify-content:flex-end;gap:8px;margin-bottom:12px;flex-wrap:wrap;">
@@ -4653,13 +4713,34 @@ async function calculateBuddyScorecard(buddyId) {
     function renderDocumentsTab() {
       const isVisible = state.caseTab === 'files';
       const canUpload = ['client', 'vet_buddy', 'admin'].includes(state.profile.role);
+      const isClient = state.profile.role === 'client';
       const docs = state.documents || [];
       const docIcons = { 'application/pdf': '📄', 'image/jpeg': '🖼️', 'image/png': '🖼️', 'image/gif': '🖼️', 'application/msword': '📝', 'text/csv': '📊' };
+      const SUMMARY_MIME = ['application/pdf', 'image/jpeg', 'image/png'];
+      const FILE_TYPE_LABELS = {
+        lab_result: 'Lab Result',
+        discharge_summary: 'Discharge Summary',
+        specialist_report: 'Specialist Report',
+        imaging: 'Imaging',
+        vaccine_record: 'Vaccine Record',
+        other: 'Other',
+      };
 
       let html = `<div class="tab-content ${isVisible ? 'active' : ''}">`;
-      html += `<div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:16px;">
+      html += `<div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:16px; flex-wrap:wrap; gap:8px;">
         <div style="font-weight:600;">Documents & Files</div>
-        ${canUpload ? `<div><button class="btn btn-primary btn-small" data-action="trigger-doc-upload">⬆️ Upload File</button></div>` : ''}
+        ${canUpload ? `<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+          ${isClient ? `<select id="doc-type-select" style="padding:6px 10px;border:1px solid var(--border);border-radius:6px;background:white;font-size:13px;">
+            <option value="">— Document type —</option>
+            <option value="lab_result">Lab Result</option>
+            <option value="discharge_summary">Discharge Summary</option>
+            <option value="specialist_report">Specialist Report</option>
+            <option value="imaging">Imaging</option>
+            <option value="vaccine_record">Vaccine Record</option>
+            <option value="other">Other</option>
+          </select>` : ''}
+          <button class="btn btn-primary btn-small" data-action="trigger-doc-upload">⬆️ Upload File</button>
+        </div>` : ''}
       </div>`;
 
       // AI extraction in-progress banner
@@ -4685,12 +4766,22 @@ async function calculateBuddyScorecard(buddyId) {
             : doc.ai_extraction_status === 'processing'
             ? '<span style="background:var(--amber);color:white;font-size:10px;font-weight:600;padding:2px 6px;border-radius:4px;margin-left:6px;">Analyzing...</span>'
             : '';
+          const typeLabel = doc.file_type && FILE_TYPE_LABELS[doc.file_type] ? FILE_TYPE_LABELS[doc.file_type] : '';
+          const typeBadge = typeLabel ? `<span style="background:#EEEDFE;color:#534AB7;font-size:11px;padding:2px 8px;border-radius:10px;font-weight:500;margin-left:6px;">${typeLabel}</span>` : '';
+          const canSummarize = isClient && !!doc.storage_path && SUMMARY_MIME.includes(doc.mime_type);
+          const summaryButton = !canSummarize ? '' : (doc.ai_summary
+            ? `<button class="btn btn-secondary btn-small" data-action="view-doc-analysis" data-doc-id="${doc.id}" title="Plain-language AI summary">📋 View Summary</button>`
+            : `<button class="btn btn-secondary btn-small" data-action="analyze-doc" data-doc-id="${doc.id}">✨ Plain-language summary</button>`);
+          const summaryChip = (isClient && doc.ai_summary) ? `<div style="font-size:12px;color:#534AB7;margin-top:4px;">🤖 Plain-language summary available</div>` : '';
           html += `<div class="doc-item">
             <span class="doc-icon">${icon}</span>
             <div style="flex:1;min-width:0;">
-              <div class="doc-name">${esc(doc.name)}${aiStatusBadge}</div>
+              <div class="doc-name">${esc(doc.name)}${typeBadge}${aiStatusBadge}</div>
               <div class="doc-meta">${size ? size + ' · ' : ''}Uploaded by ${esc(doc.uploaded_by_user?.name) || 'Unknown'} · ${formatDate(doc.created_at)}</div>
+              ${summaryChip}
             </div>
+            ${doc.storage_path && SUMMARY_MIME.includes(doc.mime_type) ? `<button class="btn btn-secondary btn-small" data-action="view-doc" data-doc-id="${doc.id}">👁️ View</button>` : ''}
+            ${summaryButton}
             ${isAiSupported && !doc.ai_extraction_status ? `<button class="btn btn-secondary btn-small" data-action="ai-analyze-doc" data-doc-id="${doc.id}" style="font-size:11px;">🤖 Analyze</button>` : ''}
             <a href="${esc(doc.url)}" target="_blank" rel="noopener" class="btn btn-secondary btn-small" onclick="event.stopPropagation();">⬇️</a>
             ${['admin','vet_buddy'].includes(state.profile.role) ? `
@@ -9815,6 +9906,61 @@ function renderVaccineDueAlerts(vaccines) {
             } catch(err) { showToast('Delete failed', 'error'); }
             break;
           }
+          case 'view-doc': {
+            const docId = target.dataset.docId;
+            const doc = (state.documents || []).find(d => d.id === docId);
+            if (!doc) break;
+            let viewUrl = doc.url || '';
+            if (doc.storage_path) {
+              try {
+                const { data, error } = await sb.storage.from('case-files').createSignedUrl(doc.storage_path, 60);
+                if (!error && data?.signedUrl) viewUrl = data.signedUrl;
+              } catch (_) { /* fall through to existing url */ }
+            }
+            const safeName = esc(doc.name || 'Document');
+            let body = '';
+            if (doc.mime_type === 'application/pdf') {
+              body = `<iframe src="${viewUrl}" style="width:100%;height:70vh;border:1px solid var(--border);border-radius:8px;"></iframe>`;
+            } else if (doc.mime_type && doc.mime_type.startsWith('image/')) {
+              body = `<img src="${viewUrl}" alt="${safeName}" style="max-width:100%;max-height:70vh;display:block;margin:0 auto;border-radius:8px;">`;
+            } else {
+              body = `<p>This file type can't be previewed inline. <a href="${viewUrl}" target="_blank" rel="noopener">Open in a new tab</a> instead.</p>`;
+            }
+            const actions = `<button class="btn btn-secondary" onclick="document.querySelector('.modal-backdrop')?.remove()">Close</button>`;
+            showModal(safeName, body, actions);
+            break;
+          }
+          case 'analyze-doc':
+          case 'reanalyze-doc': {
+            const docId = target.dataset.docId;
+            const doc = (state.documents || []).find(d => d.id === docId);
+            if (!doc) break;
+            target.disabled = true;
+            const originalLabel = target.innerHTML;
+            target.innerHTML = '⏳ Analyzing…';
+            try {
+              const result = await callEdgeFunction('analyze-document', { document_id: docId });
+              if (!result?.success) throw new Error(result?.error || 'Analysis failed');
+              doc.ai_summary = result.summary;
+              doc.ai_analyzed_at = result.ai_analyzed_at;
+              document.querySelector('.modal-backdrop')?.remove();
+              showAiSummaryModal(doc);
+              render();
+            } catch (err) {
+              showToast(err.message || 'AI analysis failed', 'error');
+            } finally {
+              target.disabled = false;
+              target.innerHTML = originalLabel;
+            }
+            break;
+          }
+          case 'view-doc-analysis': {
+            const docId = target.dataset.docId;
+            const doc = (state.documents || []).find(d => d.id === docId);
+            if (!doc?.ai_summary) break;
+            showAiSummaryModal(doc);
+            break;
+          }
 
           // ── AI Medical Record Extraction ──
           case 'apply-ai-extraction': {
@@ -10692,6 +10838,8 @@ function renderVaccineDueAlerts(vaccines) {
           if (!state.caseId) { showToast('No active case', 'error'); e.target.value = ''; return; }
           const maxSize = 25 * 1024 * 1024; // 25 MB
           if (file.size > maxSize) { showToast('File too large — max 25 MB', 'error'); e.target.value = ''; return; }
+          const fileTypeSelect = document.getElementById('doc-type-select');
+          const fileType = fileTypeSelect?.value || null;
           try {
             showToast('Uploading...', 'success');
             const ext = file.name.split('.').pop();
@@ -10703,10 +10851,13 @@ function renderVaccineDueAlerts(vaccines) {
               case_id: state.caseId,
               name: file.name,
               url: urlData.signedUrl,
+              storage_path: path,
               size_bytes: file.size,
               mime_type: file.type,
+              file_type: fileType,
               uploaded_by: state.profile.id,
             });
+            if (fileTypeSelect) fileTypeSelect.value = '';
             await loadDocuments(state.caseId);
 
             // If uploaded from dashboard, navigate to the case files tab to show progress
@@ -10735,7 +10886,8 @@ function renderVaccineDueAlerts(vaccines) {
                 }
               } catch (aiErr) {
                 console.warn('AI extraction failed:', aiErr);
-                showToast('Upload succeeded but AI analysis failed — you can review the file manually.', 'info');
+                const detail = (aiErr && aiErr.message) ? String(aiErr.message) : String(aiErr);
+                showToast('AI analysis failed: ' + detail.slice(0, 240), 'error');
                 state.aiExtractionInProgress = false;
                 render();
               }
