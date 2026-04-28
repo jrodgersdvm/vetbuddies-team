@@ -1,5 +1,5 @@
 // Service Worker for Vet Buddies
-const CACHE_NAME = 'vetbuddies-v3';
+const CACHE_NAME = 'vetbuddies-v4';
 const STATIC_ASSETS = [
   '/',
   '/index.html',
@@ -9,6 +9,7 @@ const STATIC_ASSETS = [
   '/resource-documents.js',
   '/app.js',
   '/manifest.json',
+  '/favicon.ico',
 ];
 
 // Install: pre-cache static shell

@@ -30,7 +30,7 @@
     // 'unsafe-inline'. Once all SWs are unregistered and caches cleared, the fresh
     // sw.js (v3, network-first) will be registered by app.js on the next load.
     (function() {
-      var SW_VERSION = 3; // bump this to force another cache bust
+      var SW_VERSION = 4; // bump this to force another cache bust
       var key = 'vetbuddies_sw_version';
       try {
         var stored = parseInt(localStorage.getItem(key) || '0', 10);
