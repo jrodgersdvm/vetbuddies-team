@@ -3,7 +3,7 @@
       --dark: #336026;
       --bg: #EDE8E0;
       --border: #C8BFAF;
-      --text-secondary: #A5947E;
+      --text-secondary: #5A4F3F;
       --green: #689562;
       --amber: #A5947E;
       --red: #4F152F;
@@ -42,6 +42,7 @@
       background: var(--bg);
       color: #336026;
       line-height: 1.6;
+      font-size: 16px;
     }
 
     /* TOPBAR */
@@ -267,6 +268,7 @@
       transition: all 0.2s;
       display: inline-block;
       text-decoration: none;
+      min-height: 44px;
     }
 
     .btn-primary {
@@ -298,8 +300,9 @@
     }
 
     .btn-small {
-      padding: 6px 12px;
-      font-size: 12px;
+      padding: 10px 14px;
+      font-size: 13px;
+      min-height: 40px;
     }
 
     /* FORMS */
@@ -1129,12 +1132,12 @@
       .btn {
         padding: 10px 16px;
         font-size: 14px;
-        min-height: 42px;
+        min-height: 44px;
       }
-      .btn-sm {
-        padding: 6px 12px;
-        font-size: 12px;
-        min-height: 34px;
+      .btn-small {
+        padding: 10px 14px;
+        font-size: 13px;
+        min-height: 40px;
       }
 
       /* --- Timeline: tighter --- */
@@ -1289,9 +1292,9 @@
         line-height: 1.2;
       }
       .bottom-nav-item .bnav-label {
-        font-size: 10px;
+        font-size: 12px;
         font-weight: 500;
-        line-height: 1;
+        line-height: 1.1;
       }
       .bnav-badge {
         position: absolute;
@@ -1349,11 +1352,94 @@
       padding: 16px;
     }
 
+    /* CARE PLAN: print rules — strip nav/forms, keep content */
+    @media print {
+      .tabs,
+      .care-plan-anchor-rail,
+      .case-sidebar,
+      .sidebar-toggle-btn,
+      .section-edit-btn,
+      .section-form,
+      .care-plan-status-strip button,
+      .doc-item .btn,
+      .doc-item a,
+      .mobile-back-btn,
+      [data-action="trigger-doc-upload"],
+      [data-action="refresh-care-plan-from-activity"],
+      [data-action="export-care-plan"] {
+        display: none !important;
+      }
+      .case-detail-layout {
+        display: block !important;
+        grid-template-columns: 1fr !important;
+      }
+      .care-plan-section,
+      .health-record-block {
+        page-break-inside: avoid;
+      }
+      .tab-content {
+        display: block !important;
+      }
+    }
+
+    /* CARE PLAN: status strip chips + sticky anchor rail */
+    .care-plan-body .status-chip {
+      display: inline-flex;
+      align-items: center;
+      font-size: 12px;
+      font-weight: 600;
+      padding: 4px 10px;
+      border-radius: 12px;
+      white-space: nowrap;
+    }
+    .care-plan-anchor-rail {
+      position: sticky;
+      top: 0;
+      z-index: 20;
+      display: flex;
+      gap: 6px;
+      flex-wrap: wrap;
+      padding: 8px 0;
+      margin-bottom: 12px;
+      background: var(--bg, #f6f8f6);
+      border-bottom: 1px solid var(--border);
+    }
+    .care-plan-anchor-rail .anchor-pill {
+      background: white;
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 4px 12px;
+      font-size: 12px;
+      font-weight: 500;
+      color: var(--text-primary);
+      cursor: pointer;
+      transition: all 0.15s;
+    }
+    .care-plan-anchor-rail .anchor-pill:hover {
+      background: var(--primary);
+      color: white;
+      border-color: var(--primary);
+    }
+    @media (max-width: 768px) {
+      .care-plan-anchor-rail {
+        overflow-x: auto;
+        flex-wrap: nowrap;
+        -webkit-overflow-scrolling: touch;
+      }
+      .care-plan-anchor-rail .anchor-pill {
+        flex-shrink: 0;
+      }
+    }
+
     /* CASE DETAIL LAYOUT */
     .case-detail-layout {
       display: grid;
       grid-template-columns: 250px 1fr;
       gap: 20px;
+    }
+
+    .case-detail-layout.sidebar-collapsed {
+      grid-template-columns: 36px 1fr;
     }
 
     .case-sidebar {
@@ -1363,6 +1449,33 @@
       box-shadow: 0 1px 4px rgba(0,0,0,0.08);
       max-height: calc(100vh - 120px);
       overflow-y: auto;
+    }
+
+    .case-detail-layout.sidebar-collapsed .case-sidebar {
+      padding: 8px 4px;
+      overflow: hidden;
+    }
+
+    .case-detail-layout.sidebar-collapsed .case-sidebar > *:not(.sidebar-toggle-btn) {
+      display: none !important;
+    }
+
+    .sidebar-toggle-btn {
+      background: none;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 4px 6px;
+      cursor: pointer;
+      font-size: 12px;
+      color: var(--text-secondary);
+      width: 100%;
+      margin-bottom: 10px;
+      text-align: center;
+    }
+
+    .sidebar-toggle-btn:hover {
+      background: var(--bg);
+      color: var(--text-primary);
     }
 
     .case-list-item {

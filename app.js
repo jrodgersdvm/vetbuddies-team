@@ -39,6 +39,7 @@
       caseId: null,
       caseTab: 'careplan',
       sidebarOpen: false,
+      caseSidebarCollapsed: (() => { try { return localStorage.getItem('vb_case_sidebar_collapsed') === '1'; } catch(e) { return false; } })(),
       unreadCount: 0,
       clientUnreadCount: 0,
       cases: [],
@@ -147,8 +148,36 @@
       }
       state.view = view;
       if (params.caseId) state.caseId = params.caseId;
-      if (params.caseTab) state.caseTab = params.caseTab;
+      if (params.caseTab) {
+        // Back-compat: tabs that were folded into Care Plan sections become section scrolls.
+        const TAB_TO_SECTION = { careplan: null, files: 'documents', medications: 'health-record', vitals: 'health-record', vaccines: 'health-record', timeline: 'engagement', team: 'people', 'co-owners': 'people', notes: 'internal-notes' };
+        if (Object.prototype.hasOwnProperty.call(TAB_TO_SECTION, params.caseTab)) {
+          state.caseTab = null;
+          const section = TAB_TO_SECTION[params.caseTab];
+          if (section) state._scrollToSection = section;
+        } else {
+          state.caseTab = params.caseTab;
+        }
+      }
       render();
+      // After render, honor any pending scroll-to-section
+      if (state._scrollToSection) {
+        const sectionId = state._scrollToSection;
+        state._scrollToSection = null;
+        setTimeout(() => {
+          const el = document.getElementById('section-' + sectionId);
+          if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        }, 50);
+      }
+      // One-time onboarding toast on first case-view open after the redesign
+      if (caseViews.includes(view)) {
+        try {
+          if (!localStorage.getItem('vb_careplan_redesign_seen')) {
+            localStorage.setItem('vb_careplan_redesign_seen', '1');
+            setTimeout(() => showToast('Files, Medications, and more now live inline in your Care Plan — scroll down or use the section pills.', 'info'), 600);
+          }
+        } catch(e) {}
+      }
     }
 
     // ============================================
@@ -549,7 +578,11 @@
     // ── AI Medical Record Extraction ─────────────────────────
     const AI_SUPPORTED_TYPES = ['application/pdf', 'image/jpeg', 'image/png', 'image/gif', 'image/webp', 'text/plain', 'text/csv'];
 
-    async function triggerAiExtraction(doc, caseId) {
+    // Session-level set of doc IDs currently being processed, to dedupe auto-retry races
+    const _aiInFlight = new Set();
+
+    async function triggerAiExtraction(doc, caseId, opts = {}) {
+      const { openReviewModal = true } = opts;
       const petName = state.currentCase?.pets?.name || 'Pet';
       const petSpecies = state.currentCase?.pets?.species || 'unknown';
 
@@ -563,23 +596,22 @@
       });
 
       if (result.success && result.extraction) {
-        state.aiExtractionResult = result.extraction;
-        state.aiExtractionDocId = doc.id;
-        state.aiExtractionDocName = doc.name;
-        state.aiExtractionInProgress = false;
-        // Pre-check all items
-        const checked = {};
-        const ext = result.extraction;
-        (ext.diagnoses || []).forEach((_, i) => { checked['diag_' + i] = true; });
-        (ext.medications || []).forEach((_, i) => { checked['med_' + i] = true; });
-        (ext.vaccines || []).forEach((_, i) => { checked['vax_' + i] = true; });
-        if (ext.vitals?.weight || ext.vitals?.temperature) checked['vitals'] = true;
-        (ext.care_goals || []).forEach((_, i) => { checked['goal_' + i] = true; });
-        if (ext.pet_profile_additions) checked['profile'] = true;
-        state.aiCheckedItems = checked;
-        state.showAiReviewModal = true;
-        render();
-
+        if (openReviewModal) {
+          state.aiExtractionResult = result.extraction;
+          state.aiExtractionDocId = doc.id;
+          state.aiExtractionDocName = doc.name;
+          // Pre-check all items
+          const checked = {};
+          const ext = result.extraction;
+          (ext.diagnoses || []).forEach((_, i) => { checked['diag_' + i] = true; });
+          (ext.medications || []).forEach((_, i) => { checked['med_' + i] = true; });
+          (ext.vaccines || []).forEach((_, i) => { checked['vax_' + i] = true; });
+          if (ext.vitals?.weight || ext.vitals?.temperature) checked['vitals'] = true;
+          (ext.care_goals || []).forEach((_, i) => { checked['goal_' + i] = true; });
+          if (ext.pet_profile_additions) checked['profile'] = true;
+          state.aiCheckedItems = checked;
+          state.showAiReviewModal = true;
+        }
         // The edge function has already auto-populated care_plans direct columns,
         // inserted pet_vaccines + care_plan_diagnoses rows, recomputed completeness,
         // and (if applicable) posted an owner-facing kb_messages follow-up.
@@ -590,14 +622,97 @@
             loadCarePlan(caseId),
             petId ? loadPetVaccines(petId) : Promise.resolve(),
           ]);
-          render();
         } catch (reloadErr) {
           console.warn('post-extraction reload error:', reloadErr);
         }
       } else {
+        throw new Error(result.error || 'AI extraction failed');
+      }
+    }
+
+    // Queue-aware wrapper: tracks ai_extraction_status, never throws to caller.
+    // Returns 'completed' | 'pending' (credits low) | 'failed' (real error)
+    async function runAiExtraction(doc, caseId, opts = {}) {
+      const { openReviewModal = true, showToasts = true, isRetry = false } = opts;
+      if (!doc?.id || !caseId) return 'failed';
+      if (_aiInFlight.has(doc.id)) return 'processing'; // already running, skip dupes
+      _aiInFlight.add(doc.id);
+
+      // Mark as processing in DB + local cache
+      try {
+        await sb.from('case_documents').update({ ai_extraction_status: 'processing' }).eq('id', doc.id);
+      } catch (markErr) { console.warn('mark processing failed:', markErr); }
+      const localDoc = (state.documents || []).find(d => d.id === doc.id);
+      if (localDoc) localDoc.ai_extraction_status = 'processing';
+      if (showToasts) {
+        state.aiExtractionInProgress = true;
+        render();
+      }
+
+      try {
+        await triggerAiExtraction(doc, caseId, { openReviewModal });
+        // Success
+        await sb.from('case_documents').update({
+          ai_extraction_status: 'completed',
+          ai_extraction_error: null,
+          ai_analyzed_at: new Date().toISOString(),
+        }).eq('id', doc.id);
+        if (localDoc) {
+          localDoc.ai_extraction_status = 'completed';
+          localDoc.ai_extraction_error = null;
+          localDoc.ai_analyzed_at = new Date().toISOString();
+        }
+        if (showToasts) {
+          showToast(isRetry ? 'AI analysis succeeded ✓' : 'AI analysis complete ✓', 'success');
+        }
         state.aiExtractionInProgress = false;
         render();
-        throw new Error(result.error || 'AI extraction failed');
+        return 'completed';
+      } catch (err) {
+        const msg = err?.message ? String(err.message) : String(err);
+        const isCreditError = /credit balance is too low/i.test(msg);
+        if (isCreditError) {
+          // Keep queued; will retry on next case-open or manual click
+          await sb.from('case_documents').update({
+            ai_extraction_status: 'pending',
+            ai_extraction_error: 'Anthropic credits unavailable — queued for retry',
+          }).eq('id', doc.id).then(() => {}, e => console.warn('mark pending failed:', e));
+          if (localDoc) {
+            localDoc.ai_extraction_status = 'pending';
+            localDoc.ai_extraction_error = 'Anthropic credits unavailable — queued for retry';
+          }
+          console.info('[AI queue] kept pending (credits low):', doc.name);
+          state.aiExtractionInProgress = false;
+          render();
+          return 'pending';
+        }
+        // Non-retryable failure
+        await sb.from('case_documents').update({
+          ai_extraction_status: 'failed',
+          ai_extraction_error: msg.slice(0, 500),
+        }).eq('id', doc.id).then(() => {}, e => console.warn('mark failed failed:', e));
+        if (localDoc) {
+          localDoc.ai_extraction_status = 'failed';
+          localDoc.ai_extraction_error = msg.slice(0, 500);
+        }
+        if (showToasts) {
+          showToast('AI analysis failed: ' + msg.slice(0, 200), 'error');
+        }
+        state.aiExtractionInProgress = false;
+        render();
+        return 'failed';
+      } finally {
+        _aiInFlight.delete(doc.id);
+      }
+    }
+
+    // Process all pending docs in the current case sequentially in the background.
+    // Silent (no toasts, no modal). Bails on the first credit-low result to avoid hammering.
+    async function retryPendingExtractions(caseId) {
+      const pending = (state.documents || []).filter(d => d.ai_extraction_status === 'pending' && AI_SUPPORTED_TYPES.includes(d.mime_type));
+      for (const doc of pending) {
+        const status = await runAiExtraction(doc, caseId, { openReviewModal: false, showToasts: false, isRetry: true });
+        if (status === 'pending') break; // credits still low — stop early to avoid burning attempts
       }
     }
 
@@ -1190,14 +1305,18 @@
             state.onboardingStep = 2;
             navigate('onboarding');
           } else {
-            // Pre-load care plan + appointments for first case so dashboard has data immediately
+            // Pre-load care plan + appointments + messages for first case so the
+            // dashboard's inline conversation panel renders with real data on first paint.
             const firstCase = state.cases[state.activePetIndex || 0] || state.cases[0];
             if (firstCase) {
+              state.caseId = firstCase.id;
+              state.currentCase = firstCase;
               await Promise.all([
                 loadCarePlan(firstCase.id),
                 loadAppointments(firstCase.id),
                 loadPetCareProfile(firstCase.pets?.id),
                 loadTimeline(firstCase.id),
+                loadMessages(firstCase.id),
               ]);
             }
             navigate('client-dashboard');
@@ -2724,6 +2843,11 @@ async function calculateBuddyScorecard(buddyId) {
       // Multi-pet: use activePetIndex to pick which case to show
       const idx = Math.min(state.activePetIndex || 0, state.cases.length - 1);
       const petCase = state.cases[idx];
+      // Keep state.caseId / state.currentCase in sync with the active pet so the
+      // inline conversation card's Send button writes to the right case (the
+      // send-message handler reads state.caseId, not the button's data-case-id).
+      state.caseId = petCase.id;
+      state.currentCase = petCase;
       const pet = petCase.pets;
       const buddy = petCase.assigned_buddy;
       const emoji = SPECIES_EMOJI[pet?.species?.toLowerCase()] || '🐾';
@@ -2781,9 +2905,9 @@ async function calculateBuddyScorecard(buddyId) {
         <div class="card" style="border:2px solid var(--primary);background:linear-gradient(135deg,#f0faf9 0%,#fff 100%);margin-bottom:16px;text-align:center;">
           <div style="font-size:36px;margin-bottom:8px;">🎉</div>
           <div style="font-size:20px;font-weight:700;color:#336026;margin-bottom:8px;">Welcome to Vet Buddies, ${esc(state.profile.name)}!</div>
-          <div style="color:var(--text-secondary);margin-bottom:16px;">Your Buddy ${buddy ? '(' + esc(buddy.name) + ') ' : ''}will reach out within 48 hours to start building your Living Care Plan together. In the meantime, feel free to explore!</div>
+          <div style="color:var(--text-secondary);margin-bottom:16px;">Your Buddy ${buddy ? '(' + esc(buddy.name) + ') ' : ''}will reach out within 48 hours to start building your Living Care Plan together. You can leave them a note any time using the conversation card below — no rush.</div>
           <div style="display:flex;gap:12px;justify-content:center;flex-wrap:wrap;">
-            <button class="btn btn-primary" data-action="nav-client-case" data-case-id="${petCase.id}" data-tab="messages">Send a Message</button>
+            <button class="btn btn-primary" onclick="const el=document.querySelector('[data-field=message-input]');if(el){el.scrollIntoView({behavior:'smooth',block:'center'});setTimeout(()=>el.focus(),300);}">Message your Buddy</button>
             <button class="btn btn-secondary" data-action="nav-knowledge-base">Ask a Question</button>
           </div>
           <div style="margin-top:12px;">
@@ -2867,9 +2991,8 @@ async function calculateBuddyScorecard(buddyId) {
                 ${_petCareLevel.streak_days > 1 ? `<span class="pet-streak-indicator" style="margin:0;font-size:12px;">🔥 ${_petCareLevel.streak_days}-day streak</span>` : ''}
               </div>
             </div>
-            <div style="display:flex;gap:8px;flex-wrap:wrap;align-self:flex-start;">
-              <button class="btn btn-primary btn-small" data-action="nav-client-case" data-case-id="${petCase.id}" data-tab="messages" style="font-size:13px;">💬 Messages${state.unreadCount ? ' (' + state.unreadCount + ')' : ''}</button>
-            </div>
+            <!-- Messages CTA removed: the conversation is now inline below as part of the Living Care Plan. -->
+            <div></div>
           </div>
         </div>
 
@@ -2887,31 +3010,89 @@ async function calculateBuddyScorecard(buddyId) {
           </div>
         </div>` : ''}
 
+        <!-- When the care plan is empty, surface the Upload card first — it's the highest-value action a new owner can take to populate their plan. -->
+        ${!hasCarePlan ? `
+        <div class="card" style="border-left:4px solid var(--primary);margin-bottom:16px;cursor:pointer;" data-action="dashboard-upload-records" data-case-id="${petCase.id}">
+          <div style="display:flex;align-items:center;gap:14px;">
+            <div style="font-size:28px;">📋</div>
+            <div style="flex:1;">
+              <div style="font-weight:600;font-size:16px;color:#336026;">Upload your pet's records</div>
+              <div style="font-size:14px;color:var(--text-secondary);margin-top:2px;">Share vet records, lab results, or vaccination docs. We'll pull the key details into ${esc(pet.name)}'s plan automatically.</div>
+            </div>
+            <div style="font-size:14px;color:var(--primary);font-weight:600;">Upload</div>
+          </div>
+        </div>` : ''}
+
         <!-- ═══ LIVING CARE PLAN — Primary Content ═══ -->
         <div style="margin-bottom:8px;display:flex;justify-content:space-between;align-items:center;">
           <div>
             <h2 style="font-family:'Fraunces',serif;font-size:22px;font-weight:700;color:#336026;margin:0;">${esc(pet.name)}'s Living Care Plan</h2>
-            <div style="font-size:13px;color:var(--text-secondary);margin-top:2px;">Updated collaboratively by you and your Vet Buddy</div>
-          </div>
-          <div style="display:flex;gap:8px;">
-            <button class="btn btn-secondary btn-small" data-action="nav-client-case" data-case-id="${petCase.id}" data-tab="careplan" style="font-size:12px;">View Full Details</button>
+            <div style="font-size:14px;color:var(--text-secondary);margin-top:2px;">${hasCarePlan ? 'Updated collaboratively by you and your Vet Buddy' : "Your Buddy will start filling this in after your first check-in. You don't need to do anything yet."}</div>
           </div>
         </div>
 
-        <!-- Section 1: Pet Profile -->
+        <!-- Section 0: Conversation with Buddy — primary, always-on, inline so messages are part of the plan, not a separate destination. -->
+        ${(() => {
+          const visibleMsgs = (state.messages || []).filter(m => (m.thread_type || 'client') === 'client');
+          const buddyName = buddy?.name || 'your Vet Buddy';
+          const canWrite = hasWriteAccess(state.profile);
+          return `
+        <div class="card" style="border-left:4px solid var(--primary);margin-bottom:12px;">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;flex-wrap:wrap;gap:8px;">
+            <div class="card-title" style="margin:0;">💬 Talk to your Buddy</div>
+          </div>
+          <div style="background:#f0faf8;border:1px solid var(--border);border-radius:8px;padding:8px 12px;margin-bottom:10px;font-size:13px;color:var(--text-secondary);line-height:1.5;">📨 Goes to: <strong>${esc(buddyName)}</strong>${buddy ? ' (your Vet Buddy)' : ''} + <strong>Dr. Rodgers</strong></div>
+          <div id="dashboard-messages-list" style="display:flex;flex-direction:column;gap:8px;margin-bottom:12px;max-height:50vh;overflow-y:auto;">
+            ${visibleMsgs.length === 0
+              ? `<div style="padding:24px 12px;text-align:center;color:var(--text-secondary);font-size:14px;line-height:1.5;">This is where your conversation with your Buddy will live.<br>${buddy ? esc(buddy.name) : 'Your Buddy'} will reach out within 48 hours.</div>`
+              : visibleMsgs.map(msg => {
+                  const isOwn = msg.sender_id === state.profile.id;
+                  const isImage = msg.attachment_name && /\.(jpg|jpeg|png|gif|webp)$/i.test(msg.attachment_name);
+                  const isVoice = msg.attachment_name && /\.(webm|ogg|mp3|wav)$/i.test(msg.attachment_name);
+                  return `<div class="chat-bubble ${isOwn ? 'own' : ''}">
+                    <div class="chat-content">
+                      <div class="chat-sender">${esc(msg.sender?.name) || 'Unknown'}</div>
+                      ${msg.content ? `<div class="chat-text">${esc(msg.content)}</div>` : ''}
+                      ${msg.attachment_url ? `<div class="chat-attachment">
+                        ${isVoice
+                          ? `<audio controls class="voice-preview" src="${esc(msg.attachment_url)}"></audio>`
+                          : isImage
+                            ? `<img src="${esc(msg.attachment_url)}" alt="${esc(msg.attachment_name)}">`
+                            : `<a href="${esc(msg.attachment_url)}" target="_blank" rel="noopener">📎 ${esc(msg.attachment_name) || 'Attachment'}</a>`}
+                      </div>` : ''}
+                      <div class="chat-time">${formatDateTime(msg.created_at)}</div>
+                    </div>
+                  </div>`;
+                }).join('')}
+          </div>
+          ${canWrite ? `
+          <div class="chat-input-area" style="flex-wrap:wrap;margin-top:0;padding-top:12px;">
+            <textarea data-field="message-input" placeholder="Type a message to your Buddy..." maxlength="2000" style="flex:1;min-width:120px;"></textarea>
+            <div style="display:flex;gap:6px;align-items:center;">
+              <button class="btn btn-secondary" data-action="attach-file" title="Attach file" style="padding:10px 12px;">📎</button>
+              <button class="btn btn-primary" data-action="send-message" data-case-id="${petCase.id}">Send</button>
+            </div>
+          </div>
+          ${window._pendingAttachment ? `<div style="font-size:13px;color:var(--primary);padding:6px 0;">📎 Ready to send: ${esc(window._pendingAttachment.name)} <button class="btn btn-secondary btn-small" data-action="clear-attachment">✕</button></div>` : ''}
+          ` : `<div style="font-size:13px;color:var(--text-secondary);padding:8px 12px;background:var(--bg);border-radius:8px;">Subscribe to a plan to send messages to your Buddy. You can still view past messages here.</div>`}
+        </div>`;
+        })()}
+
+        <!-- Section 1: Pet Profile (hidden when empty — section reappears once Buddy fills it in) -->
+        ${(lp.pet_profile || summaryFields.length > 0) ? `
         <div class="card" style="border-left:4px solid var(--primary);margin-bottom:12px;">
           <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
             <div class="card-title" style="margin:0;">🐾 Pet Profile</div>
           </div>
-          ${lp.pet_profile ? `<div style="font-size:13px;line-height:1.6;color:var(--text);padding:10px 12px;background:var(--bg);border-radius:8px;">${esc(lp.pet_profile)}</div>` : `<div style="font-size:13px;color:var(--text-secondary);font-style:italic;">No pet profile details yet — your Buddy will help fill this in after your first check-in.</div>`}
+          ${lp.pet_profile ? `<div style="font-size:14px;line-height:1.6;color:var(--text);padding:10px 12px;background:var(--bg);border-radius:8px;">${esc(lp.pet_profile)}</div>` : ''}
           ${summaryFields.length > 0 ? `<div style="display:grid;gap:0;margin-top:10px;">
             ${summaryFields.map(([label, val]) => `
-              <div style="display:flex;gap:12px;padding:8px 0;border-bottom:1px solid var(--border);font-size:13px;">
+              <div style="display:flex;gap:12px;padding:8px 0;border-bottom:1px solid var(--border);font-size:14px;">
                 <div style="min-width:110px;color:var(--text-secondary);font-weight:600;">${label}</div>
                 <div style="color:var(--text);line-height:1.5;">${esc(val)}</div>
               </div>`).join('')}
           </div>` : ''}
-        </div>
+        </div>` : ''}
 
         <!-- Section 2: Care Team (providers from living plan + app care team) -->
         <div class="card" style="border-left:4px solid var(--blue);margin-bottom:12px;">
@@ -2952,10 +3133,10 @@ async function calculateBuddyScorecard(buddyId) {
           </div>` : ''}
           ${_pendingCareTeamInvites.length > 0 ? `
           <div style="margin-top:8px;">
-            ${_pendingCareTeamInvites.map(inv => `<div style="display:flex; align-items:center; gap:8px; padding:6px 0; font-size:13px; color:var(--text-secondary);">
+            ${_pendingCareTeamInvites.map(inv => `<div style="display:flex; align-items:center; gap:8px; padding:6px 0; font-size:14px; color:var(--text-secondary);">
               <span style="flex:1;">${esc(inv.first_name || inv.email)}${inv.last_name ? ' ' + esc(inv.last_name) : ''}</span>
-              <span class="badge" style="background:#f5f5f5; color:#999; font-size:10px;">Pending</span>
-              <a href="#" style="font-size:11px; color:var(--primary);" data-action="resend-care-team-invite" data-invite-id="${inv.id}" data-email="${esc(inv.email)}">Resend</a>
+              <span class="badge" style="background:#f5f5f5; color:var(--text-secondary); font-size:11px;">Pending</span>
+              <button class="btn btn-secondary btn-small" data-action="resend-care-team-invite" data-invite-id="${inv.id}" data-email="${esc(inv.email)}">Resend</button>
             </div>`).join('')}
           </div>` : ''}
         </div>
@@ -2985,38 +3166,40 @@ async function calculateBuddyScorecard(buddyId) {
               <div style="font-size:11px;color:var(--text-secondary);margin-top:4px;">
                 ${g.set_by_owner ? '✍️ Set by you' : '📋 Set by Buddy'}${g.reviewed_at ? ' · Last reviewed ' + formatDate(g.reviewed_at) : ''}
               </div>
-              ${g.dvm_reviewed ? '<span style="display:inline-block;margin-top:4px;background:#e8f5e9;color:#2e7d32;font-size:11px;font-weight:600;padding:2px 8px;border-radius:12px;">✅ DVM-Reviewed</span>' : ''}
-              ${needsQuarterlyReview ? '<div style="margin-top:6px;background:#fff3cd;color:#856404;font-size:12px;padding:4px 8px;border-radius:6px;">⏰ Quarterly Goal Review due</div>' : ''}
+              ${g.dvm_reviewed ? '<span style="display:inline-block;margin-top:4px;background:#e8f5e9;color:#2e7d32;font-size:12px;font-weight:600;padding:2px 8px;border-radius:12px;">✅ Reviewed by Dr. Rodgers</span>' : ''}
+              ${needsQuarterlyReview ? '<div style="margin-top:6px;background:#fff3cd;color:#856404;font-size:13px;padding:4px 8px;border-radius:6px;">⏰ Time to check in on this goal</div>' : ''}
             </div>`;
-          }).join('') : (!state.showAddGoal ? '<div style="font-size:13px;color:var(--text-secondary);font-style:italic;">No care goals set yet — tap "+ Add Goal" to share one, or your Buddy will help set some on your first check-in.</div>' : '')}
+          }).join('') : ''}
         </div>
 
-        <!-- Section 4: Engagement Log -->
+        <!-- Section 4: Check-in Log (hidden when empty) -->
+        ${fullLog.length > 0 ? `
         <div class="card" style="border-left:4px solid var(--purple);margin-bottom:12px;">
           <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
-            <div class="card-title" style="margin:0;">📝 Check-in Log</div>
+            <div class="card-title" style="margin:0;">📝 Notes from your Buddy</div>
           </div>
-          ${fullLog.length > 0 ? `<div style="max-height:300px;overflow-y:auto;">
+          <div style="max-height:300px;overflow-y:auto;">
             ${fullLog.map(entry => `
               <div style="padding:8px 0;border-bottom:1px solid var(--border);">
-                <div style="font-size:13px;line-height:1.5;">${esc(entry.entry_text)}</div>
-                <div style="font-size:11px;color:var(--text-secondary);margin-top:4px;">— ${esc(entry.created_by) || 'Buddy'} · ${entry.created_at ? formatDate(entry.created_at) : ''}</div>
+                <div style="font-size:14px;line-height:1.5;">${esc(entry.entry_text)}</div>
+                <div style="font-size:12px;color:var(--text-secondary);margin-top:4px;">— ${esc(entry.created_by) || 'Buddy'} · ${entry.created_at ? formatDate(entry.created_at) : ''}</div>
               </div>`).join('')}
-          </div>` : '<div style="font-size:13px;color:var(--text-secondary);font-style:italic;">No check-ins logged yet. Your first wellness check-in will appear here.</div>'}
-        </div>
+          </div>
+        </div>` : ''}
 
-        <!-- Section 5: Milestones & Wins -->
+        <!-- Section 5: Milestones & Wins (hidden when empty) -->
+        ${allMilestones.length > 0 ? `
         <div class="card" style="border-left:4px solid var(--amber);margin-bottom:12px;background:linear-gradient(135deg,#fffde7 0%,#fff8e1 100%);">
           <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
-            <div class="card-title" style="margin:0;">🏆 Milestones & Wins</div>
+            <div class="card-title" style="margin:0;">🏆 Good things lately</div>
           </div>
-          ${allMilestones.length > 0 ? allMilestones.map(m => `
+          ${allMilestones.map(m => `
             <div style="background:white;border-radius:8px;padding:10px 12px;margin-bottom:6px;border:1px solid #ffe082;">
-              <div style="font-weight:600;color:#f57f17;font-size:13px;">🌟 ${esc(m.title)}</div>
-              ${m.description ? `<div style="font-size:12px;margin-top:2px;color:var(--text-secondary);">${esc(m.description)}</div>` : ''}
-              <div style="font-size:11px;color:var(--text-secondary);margin-top:4px;">— ${esc(m.created_by) || 'Team'} · ${m.created_at ? formatDate(m.created_at) : ''}</div>
-            </div>`).join('') : '<div style="font-size:13px;color:var(--text-secondary);font-style:italic;">No milestones yet — every little win counts! 🎉</div>'}
-        </div>
+              <div style="font-weight:600;color:#f57f17;font-size:14px;">🌟 ${esc(m.title)}</div>
+              ${m.description ? `<div style="font-size:13px;margin-top:2px;color:var(--text-secondary);">${esc(m.description)}</div>` : ''}
+              <div style="font-size:12px;color:var(--text-secondary);margin-top:4px;">— ${esc(m.created_by) || 'Team'} · ${m.created_at ? formatDate(m.created_at) : ''}</div>
+            </div>`).join('')}
+        </div>` : ''}
 
         <!-- Section 6: Genetic Insights (if any) -->
         ${_patientInsights.length > 0 ? `
@@ -3046,28 +3229,29 @@ async function calculateBuddyScorecard(buddyId) {
         </div>` : ''}
 
         <!-- ═══ Quick Actions ═══ -->
+        ${hasCarePlan ? `
         <div class="card" style="border-left:4px solid var(--primary);margin-bottom:12px;cursor:pointer;" data-action="dashboard-upload-records" data-case-id="${petCase.id}">
           <div style="display:flex;align-items:center;gap:14px;">
             <div style="font-size:28px;">📋</div>
             <div style="flex:1;">
-              <div style="font-weight:600;font-size:15px;color:#336026;">Upload Medical Records</div>
-              <div style="font-size:13px;color:var(--text-secondary);margin-top:2px;">Share vet records, lab results, or vaccination docs. Our AI will automatically extract key details.</div>
+              <div style="font-weight:600;font-size:16px;color:#336026;">Upload medical records</div>
+              <div style="font-size:14px;color:var(--text-secondary);margin-top:2px;">Share vet records, lab results, or vaccination docs. We'll pull the key details into ${esc(pet.name)}'s plan automatically.</div>
             </div>
             <div style="font-size:14px;color:var(--primary);font-weight:600;">Upload</div>
           </div>
-        </div>
+        </div>` : ''}
 
         <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(100px, 1fr));gap:10px;margin-bottom:16px;">
           <div class="card" style="padding:14px;text-align:center;cursor:pointer;" data-action="nav-client-case" data-case-id="${petCase.id}" data-tab="appointments">
             <div style="font-size:20px;margin-bottom:4px;">🗓️</div><div style="font-weight:500;font-size:12px;color:#336026;">Appointments</div>
           </div>
-          <div class="card" style="padding:14px;text-align:center;cursor:pointer;" data-action="nav-client-case" data-case-id="${petCase.id}" data-tab="files">
+          <div class="card" style="padding:14px;text-align:center;cursor:pointer;" data-action="nav-client-case" data-case-id="${petCase.id}" data-section="documents">
             <div style="font-size:20px;margin-bottom:4px;">📁</div><div style="font-weight:500;font-size:12px;color:#336026;">Files</div>
           </div>
-          <div class="card" style="padding:14px;text-align:center;cursor:pointer;" data-action="nav-client-case" data-case-id="${petCase.id}" data-tab="medications">
+          <div class="card" style="padding:14px;text-align:center;cursor:pointer;" data-action="nav-client-case" data-case-id="${petCase.id}" data-section="health-record">
             <div style="font-size:20px;margin-bottom:4px;">💊</div><div style="font-weight:500;font-size:12px;color:#336026;">Medications</div>
           </div>
-          <div class="card" style="padding:14px;text-align:center;cursor:pointer;" data-action="nav-client-case" data-case-id="${petCase.id}" data-tab="vaccines">
+          <div class="card" style="padding:14px;text-align:center;cursor:pointer;" data-action="nav-client-case" data-case-id="${petCase.id}" data-section="health-record">
             <div style="font-size:20px;margin-bottom:4px;">💉</div><div style="font-weight:500;font-size:12px;color:#336026;">Vaccines</div>
           </div>
           <div class="card" style="padding:14px;text-align:center;cursor:pointer;" data-action="nav-add-pet">
@@ -3845,8 +4029,8 @@ async function calculateBuddyScorecard(buddyId) {
         return renderLayout(`
           <div class="empty-state">
             <div class="empty-state-icon">🐕</div>
-            <div class="empty-state-title">No cases yet</div>
-            <div class="empty-state-text">Your Living Care Plan is getting started — your Buddy will be in touch soon.</div>
+            <div class="empty-state-title">No cases assigned yet</div>
+            <div class="empty-state-text">Once admin assigns you a client, their case will appear here.</div>
           </div>
         `);
       }
@@ -3918,32 +4102,43 @@ async function calculateBuddyScorecard(buddyId) {
         </div>`;
       }
 
-      html += '<div class="card"><div class="card-title">My Cases</div>';
-      for (const petCase of state.cases) {
-        const pet = petCase.pets;
-        const emoji = SPECIES_EMOJI[pet?.species?.toLowerCase()] || '🐾';
-        const tier = TIER_DISPLAY[petCase.subscription_tier] || petCase.subscription_tier;
+      // Cases list collapses on mobile by default so the agenda + earnings + reminders
+      // stay visible without scrolling. Toggle persists in state for the session.
+      const buddyCasesCollapsed = state.buddyCasesCollapsed === undefined
+        ? (typeof window !== 'undefined' && window.innerWidth < 768)
+        : state.buddyCasesCollapsed;
+      html += `<div class="card">
+        <button data-action="toggle-buddy-cases-collapse" aria-expanded="${!buddyCasesCollapsed}" style="width:100%;display:flex;justify-content:space-between;align-items:center;background:none;border:none;padding:0;cursor:pointer;text-align:left;min-height:44px;color:inherit;font-family:inherit;">
+          <span class="card-title" style="margin:0;">My Cases (${state.cases.length})</span>
+          <span style="font-size:20px;color:var(--text-secondary);line-height:1;" aria-hidden="true">${buddyCasesCollapsed ? '▸' : '▾'}</span>
+        </button>`;
+      if (!buddyCasesCollapsed) {
+        for (const petCase of state.cases) {
+          const pet = petCase.pets;
+          const emoji = SPECIES_EMOJI[pet?.species?.toLowerCase()] || '🐾';
+          const tier = TIER_DISPLAY[petCase.subscription_tier] || petCase.subscription_tier;
 
-        // Count touchpoints for progress
-        const buddyCount = state.touchpoints.filter(t => t.type === 'buddy').length;
-        const maxTouchpoints = ['buddy', 'Buddy'].includes(petCase.subscription_tier) ? 1 : 4;
+          // Count touchpoints for progress
+          const buddyCount = state.touchpoints.filter(t => t.type === 'buddy').length;
+          const maxTouchpoints = ['buddy', 'Buddy'].includes(petCase.subscription_tier) ? 1 : 4;
 
-        html += `
-          <div class="buddy-case-card">
-            ${renderPetPhoto(pet, 'card')}
-            <div class="buddy-case-content">
-              <div class="buddy-case-pet">${esc(pet?.name) || 'Unknown'}</div>
-              <div class="buddy-case-owner">Owner: ${esc(state.cases.find(c => c.id === petCase.id)?.pets?.owner?.name) || 'Unknown'}</div>
-              <div class="buddy-case-tier">${tier}</div>
-              <div class="buddy-case-progress">Check-ins: ${buddyCount}/${maxTouchpoints}</div>
-              ${renderProgressBar(buddyCount, maxTouchpoints)}
-              <div class="buddy-case-actions">
-                <button class="btn btn-primary btn-small" data-action="nav-buddy-case" data-case-id="${petCase.id}">View Case</button>
-                <button class="btn btn-secondary btn-small" data-action="log-checkin" data-case-id="${petCase.id}">Log Check-In</button>
+          html += `
+            <div class="buddy-case-card">
+              ${renderPetPhoto(pet, 'card')}
+              <div class="buddy-case-content">
+                <div class="buddy-case-pet">${esc(pet?.name) || 'Unknown'}</div>
+                <div class="buddy-case-owner">Owner: ${esc(state.cases.find(c => c.id === petCase.id)?.pets?.owner?.name) || 'Unknown'}</div>
+                <div class="buddy-case-tier">${tier}</div>
+                <div class="buddy-case-progress">Check-ins: ${buddyCount}/${maxTouchpoints}</div>
+                ${renderProgressBar(buddyCount, maxTouchpoints)}
+                <div class="buddy-case-actions">
+                  <button class="btn btn-primary btn-small" data-action="nav-buddy-case" data-case-id="${petCase.id}">View Case</button>
+                  <button class="btn btn-secondary btn-small" data-action="log-checkin" data-case-id="${petCase.id}">Log Check-In</button>
+                </div>
               </div>
             </div>
-          </div>
-        `;
+          `;
+        }
       }
       html += '</div>';
 
@@ -3956,28 +4151,44 @@ async function calculateBuddyScorecard(buddyId) {
       const pet = state.currentCase.pets;
       const emoji = SPECIES_EMOJI[pet?.species?.toLowerCase()] || '🐾';
 
-      let html = `<div class="case-detail-layout has-active-case">
-        <div class="case-sidebar">
-          <div style="font-weight: 600; margin-bottom: 12px;">My Cases</div>`;
-      for (const c of state.cases) {
-        const isActive = c.id === state.currentCase.id;
-        const sidebarEmoji = SPECIES_EMOJI[c.pets?.species?.toLowerCase()] || '🐾';
-        html += `
-          <div class="case-list-item ${isActive ? 'active' : ''}" data-action="select-case" data-case-id="${c.id}" style="display:flex; align-items:center; gap:10px;">
-            ${c.pets?.photo_url
-              ? `<img src="${esc(c.pets.photo_url)}" class="pet-photo-thumb" alt="${esc(c.pets?.name)}" style="flex-shrink:0;">`
-              : `<div class="pet-photo-thumb-placeholder" style="flex-shrink:0;">${sidebarEmoji}</div>`}
-            <div style="min-width:0;">
-              <div class="case-list-pet-name" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(c.pets?.name) || 'Unknown'}</div>
-              <div class="case-list-owner" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(c.pets?.owner?.name) || 'Unknown Owner'}</div>
-            </div>
-          </div>
-        `;
-      }
-      html += `</div><div>`;
+      // Staff (vet_buddy, admin) get a focused single-case view: no sidebar listing
+      // other cases, no grid layout, just the selected case full-width with a clear
+      // "back to all cases" button at the top. Clients and external vets keep the
+      // existing layout because they may have multiple pets / a list to scan.
+      const isStaffCaseView = ['vet_buddy', 'admin'].includes(state.profile.role);
+      const collapsed = !!state.caseSidebarCollapsed;
+      let html = '';
 
-      // Mobile back button
-      html += `<button class="mobile-back-btn" data-action="back-to-case-list" style="display:none;margin-bottom:12px;background:none;border:1px solid var(--border);border-radius:8px;padding:8px 16px;font-size:14px;color:var(--dark);cursor:pointer;">← Back to Cases</button>`;
+      if (isStaffCaseView) {
+        const backRoute = state.profile.role === 'vet_buddy' ? 'nav-buddy-dashboard' : 'nav-admin-cases';
+        const backLabel = state.profile.role === 'vet_buddy' ? '← Back to dashboard' : '← All cases';
+        html += `<button class="btn btn-secondary btn-small" data-action="${backRoute}" style="margin-bottom:14px;">${backLabel}</button>`;
+      } else {
+        html += `<div class="case-detail-layout has-active-case${collapsed ? ' sidebar-collapsed' : ''}">
+          <div class="case-sidebar">
+            <button class="sidebar-toggle-btn" data-action="toggle-case-sidebar" title="${collapsed ? 'Show case list' : 'Hide case list'}">${collapsed ? '▶' : '◀ Hide cases'}</button>
+            <div style="font-weight: 600; margin-bottom: 12px;">My Cases</div>`;
+        for (const c of state.cases) {
+          const isActive = c.id === state.currentCase.id;
+          const sidebarEmoji = SPECIES_EMOJI[c.pets?.species?.toLowerCase()] || '🐾';
+          html += `
+            <div class="case-list-item ${isActive ? 'active' : ''}" data-action="select-case" data-case-id="${c.id}" style="display:flex; align-items:center; gap:10px;">
+              ${c.pets?.photo_url
+                ? `<img src="${esc(c.pets.photo_url)}" class="pet-photo-thumb" alt="${esc(c.pets?.name)}" style="flex-shrink:0;">`
+                : `<div class="pet-photo-thumb-placeholder" style="flex-shrink:0;">${sidebarEmoji}</div>`}
+              <div style="min-width:0;">
+                <div class="case-list-pet-name" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(c.pets?.name) || 'Unknown'}</div>
+                <div class="case-list-owner" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(c.pets?.owner?.name) || 'Unknown Owner'}</div>
+              </div>
+            </div>
+          `;
+        }
+        html += `</div><div>`;
+
+        // Mobile back button — only relevant when the sidebar layout is in play.
+        // Staff see a desktop "Back to dashboard / All cases" button above instead.
+        html += `<button class="mobile-back-btn" data-action="back-to-case-list" style="display:none;margin-bottom:12px;background:none;border:1px solid var(--border);border-radius:8px;padding:8px 16px;font-size:14px;color:var(--dark);cursor:pointer;">← Back to Cases</button>`;
+      }
 
       const canChangePhoto = ['client', 'vet_buddy', 'admin'].includes(state.profile.role);
       html += `<div class="case-header-wrap">
@@ -4035,18 +4246,13 @@ async function calculateBuddyScorecard(buddyId) {
       const isClient = state.profile.role === 'client';
       let tabs;
       if (isClient) {
-        // Core tabs always visible
-        tabs = ['messages', 'careplan', 'appointments'];
-        // Conditional tabs — only show when data exists
-        if (state.petMedications && state.petMedications.length > 0) tabs.push('medications');
-        if (state.petVaccines && state.petVaccines.length > 0) tabs.push('vaccines');
-        tabs.push('files');
-        tabs.push('co-owners');
+        // Care Plan body holds Documents/Health Record/People/etc. inline
+        tabs = ['messages', 'appointments'];
       } else {
-        tabs = ['careplan', 'messages', 'medications', 'vitals', 'vaccines', 'timeline', 'touchpoints', 'notes', 'appointments', 'files', 'co-owners', 'team'];
+        tabs = ['messages', 'touchpoints', 'appointments'];
       }
       html += '<div class="tabs">';
-      const labels = { careplan: 'Care Plan', messages: 'Messages', timeline: 'Timeline', touchpoints: 'Check-ins', appointments: 'Appointments', files: 'Files', medications: 'Meds', vitals: 'Vitals', vaccines: 'Vaccines', notes: 'Notes', 'co-owners': '👥 Owners', team: '🤝 Team' };
+      const labels = { messages: 'Messages', touchpoints: 'Check-ins', appointments: 'Appointments' };
       for (const tab of tabs) {
         html += `<button class="tab-button ${state.caseTab === tab ? 'active' : ''}" data-action="switch-case-tab" data-tab="${tab}">${labels[tab]}</button>`;
       }
@@ -4076,26 +4282,20 @@ async function calculateBuddyScorecard(buddyId) {
         </div>`;
       }
 
-      // Tab contents
-      html += renderCarePlanTab();
-      html += renderMessagesTab();
-      html += renderMedicationsTab();
-      html += renderVitalsTab();
-      html += renderVaccinesTab();
-      html += renderTimelineTab();
-      html += renderTouchpointsTab();
-      html += renderCaseNotesTab();
-      html += renderAppointmentsTab();
-      html += renderDocumentsTab();
-      html += renderCoOwnersTab();
-      html += renderTeamTab();
+      // Care Plan body — always visible primary surface
+      html += renderCarePlanBody();
 
-      html += '</div></div>';
+      // Tab contents (secondary surfaces — only one shows at a time based on state.caseTab)
+      html += renderMessagesTab();
+      html += renderTouchpointsTab();
+      html += renderAppointmentsTab();
+
+      // Close the grid layout wrappers only when the sidebar layout was opened.
+      if (!isStaffCaseView) html += '</div></div>';
       return renderLayout(html);
     }
 
-    function renderCarePlanTab() {
-      const isVisible = state.caseTab === 'careplan';
+    function renderCarePlanBody() {
       const canEdit = ['vet_buddy', 'admin'].includes(state.profile.role);
       const isClient = state.profile.role === 'client';
       const isBuddy = state.profile.role === 'vet_buddy';
@@ -4104,7 +4304,7 @@ async function calculateBuddyScorecard(buddyId) {
       const lp = state.carePlan?.living_plan || emptyLivingCarePlan();
       const petName = state.currentCase?.pets?.name || 'your pet';
       const completenessScore = Math.max(0, Math.min(100, Number(state.carePlan?.completeness_score) || 0));
-      let html = `<div class="tab-content ${isVisible ? 'active' : ''}">`;
+      let html = `<div class="care-plan-body">`;
 
       // Profile completeness progress bar (owner-facing, shown to all roles)
       {
@@ -4130,6 +4330,50 @@ async function calculateBuddyScorecard(buddyId) {
         <button class="btn btn-secondary btn-small" data-action="export-care-plan" title="Export PDF 📄 Living Care Plan as text">📤 Share</button>
       </div>`;
 
+      // ── Status strip: at-a-glance chips (next appt, check-in quota for staff, escalations for staff) ──
+      {
+        const chips = [];
+        const now = new Date();
+        const nextAppt = (state.appointments || [])
+          .filter(a => a.status !== 'cancelled' && new Date(a.scheduled_at) >= now)
+          .sort((a, b) => new Date(a.scheduled_at) - new Date(b.scheduled_at))[0];
+        if (nextAppt) {
+          chips.push(`<span class="status-chip" style="background:#e3f2fd;color:#1565c0;">📅 Next: ${esc(nextAppt.title || 'Appointment')} · ${formatDate(nextAppt.scheduled_at)}</span>`);
+        }
+        if (canEdit) {
+          const targets = { 'Buddy': { buddy: 1, dvm: 0 }, 'Buddy+': { buddy: 4, dvm: 1 }, 'Buddy VIP': { buddy: 4, dvm: 1 }, buddy: { buddy: 1, dvm: 0 }, buddy_plus: { buddy: 4, dvm: 1 }, buddy_vip: { buddy: 4, dvm: 1 } };
+          const tgt = targets[tier] || { buddy: 0, dvm: 0 };
+          const buddyCount = (state.touchpoints || []).filter(t => t.type === 'buddy').length;
+          if (tgt.buddy > 0) {
+            chips.push(`<span class="status-chip" style="background:#f3e5f5;color:#6a1b9a;">✓ Check-ins: ${buddyCount}/${tgt.buddy} this month</span>`);
+          }
+          const openEsc = (state.escalations || []).filter(e => e.case_id === state.caseId && e.status !== 'resolved').length;
+          if (openEsc > 0) {
+            chips.push(`<span class="status-chip" style="background:#ffebee;color:#c62828;">⚠️ ${openEsc} open escalation${openEsc === 1 ? '' : 's'}</span>`);
+          }
+        }
+        if (chips.length > 0) {
+          html += `<div class="care-plan-status-strip" style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px;">${chips.join('')}</div>`;
+        }
+      }
+
+      // ── Sticky anchor rail (staff only — clients have a shorter page) ──
+      if (canEdit) {
+        const anchors = [
+          { id: 'pet-profile', label: 'Profile' },
+          { id: 'people', label: 'People' },
+          { id: 'providers', label: 'Providers' },
+          { id: 'goals', label: 'Goals' },
+          { id: 'health-record', label: 'Health' },
+          { id: 'engagement', label: 'Engagement' },
+          { id: 'documents', label: 'Documents' },
+          { id: 'wins', label: 'Wins' },
+          { id: 'internal-notes', label: 'Internal' },
+        ];
+        if ((state.geneticInsights || []).some(g => g.case_id === state.caseId)) anchors.push({ id: 'genetic', label: 'Genetic' });
+        html += `<div class="care-plan-anchor-rail">${anchors.map(a => `<button class="anchor-pill" data-action="scroll-to-section" data-section="${a.id}">${a.label}</button>`).join('')}</div>`;
+      }
+
       // AI refresh in-progress banner (same treatment as the files tab)
       if (canEdit && state.aiExtractionInProgress) {
         html += `<div style="background:linear-gradient(135deg,rgba(51,96,38,0.08),rgba(104,149,98,0.08));border:1px solid rgba(51,96,38,0.2);border-radius:10px;padding:14px;margin-bottom:16px;display:flex;align-items:center;gap:12px;">
@@ -4142,13 +4386,13 @@ async function calculateBuddyScorecard(buddyId) {
       }
 
       // ── Section 1: Pet Profile ──
-      html += `<div class="care-plan-section view-mode" style="border-left:4px solid var(--primary);margin-bottom:16px;">
+      html += `<div id="section-pet-profile" class="care-plan-section view-mode" style="border-left:4px solid var(--primary);margin-bottom:16px;">
         <div class="section-title" style="display:flex;justify-content:space-between;align-items:center;">
           <span>🐾 Pet Profile</span>
           ${(canEdit || isClient) ? `<button class="section-edit-btn" data-action="edit-careplan-section" data-section="pet_profile">Edit</button>` : ''}
         </div>
         <div class="section-content">
-          ${esc(lp.pet_profile) || '<em style="color: var(--text-secondary);">No pet profile details yet — your Buddy will help fill this in.</em>'}
+          ${esc(lp.pet_profile) || `<div style="font-size:14px;color:var(--text-secondary);">${isClient ? "Your Buddy will help fill this in after your first check-in. You don't need to do anything yet." : 'Not yet captured — tap Edit to start the profile.'}</div>`}
         </div>
         <div class="section-form">
           <textarea data-field="section-pet_profile" placeholder="Name, species, breed, age, conditions, medications, sensitivities, dietary needs...">${esc(lp.pet_profile)}</textarea>
@@ -4159,15 +4403,81 @@ async function calculateBuddyScorecard(buddyId) {
         </div>
       </div>`;
 
-      // ── Section 2: Care Team ──
-      html += `<div class="care-plan-section" style="border-left:4px solid var(--blue);margin-bottom:16px;">
+      // ── Section: People (Owner + Buddy + Co-owners + Helpers) ──
+      {
+        const pet = state.currentCase?.pets;
+        const buddy = state.currentCase?.assigned_buddy;
+        const owner = pet?.owner;
+        const teamMembers = state._careTeamMembers || [];
+        const coOwners = state.petCoOwners || [];
+        const isOwner = pet && pet.owner_id === state.profile.id;
+        const isAcceptedCoOwner = coOwners.some(co => co.user_id === state.profile.id && co.status === 'accepted');
+        const canManagePeople = isOwner || isAcceptedCoOwner || state.profile.role === 'admin';
+        html += `<div id="section-people" class="care-plan-section" style="border-left:4px solid #9b59b6;margin-bottom:16px;">
+          <div class="section-title">
+            <span>👥 People</span>
+          </div>
+          <div class="section-content">
+            <div class="care-team-list">
+              ${owner ? `<div class="care-team-member">
+                ${renderAvatar(owner.avatar_initials || owner.name?.charAt(0), owner.avatar_color || '#888')}
+                <div class="care-team-member-info">
+                  <div class="care-team-member-name">${esc(owner.name || 'Owner')}</div>
+                  <div class="care-team-role-chip role-owner">Primary Owner</div>
+                </div>
+              </div>` : ''}
+              ${buddy ? `<div class="care-team-member">
+                ${renderAvatar(buddy.avatar_initials, buddy.avatar_color || '#9b59b6')}
+                <div class="care-team-member-info">
+                  <div class="care-team-member-name">${esc(buddy.name)}</div>
+                  <div class="care-team-role-chip role-buddy">Buddy</div>
+                </div>
+              </div>` : ''}
+              ${coOwners.map(co => {
+                const coName = co.user?.name || co.invited_email || 'Co-owner';
+                const initials = (coName || 'U').split(' ').map(w => w[0]).join('').toUpperCase().slice(0, 2);
+                const statusChip = co.status === 'accepted'
+                  ? '<div class="care-team-role-chip role-owner">Co-owner</div>'
+                  : '<div class="care-team-role-chip" style="background:#fff8e1;color:#f57f17;">Pending invite</div>';
+                const removeBtn = canManagePeople ? `<button class="btn btn-secondary btn-small" data-action="remove-co-owner" data-co-owner-id="${co.id}" style="font-size:11px;color:var(--red);border-color:var(--red);">Remove</button>` : '';
+                return `<div class="care-team-member" style="justify-content:space-between;">
+                  <div style="display:flex;align-items:center;gap:10px;">
+                    <div class="avatar-circle" style="background:#888;width:28px;height:28px;font-size:11px;">${initials}</div>
+                    <div class="care-team-member-info">
+                      <div class="care-team-member-name">${esc(coName)}</div>
+                      ${statusChip}
+                      ${co.accepted_at ? `<div style="font-size:10px;color:var(--text-secondary);">Joined ${formatDate(co.accepted_at)}</div>` : ''}
+                    </div>
+                  </div>
+                  ${removeBtn}
+                </div>`;
+              }).join('')}
+              ${teamMembers.map(m => `<div class="care-team-member">
+                <div class="avatar-circle" style="background:#e67e22;width:28px;height:28px;font-size:11px;">${(m.display_name || '?').charAt(0).toUpperCase()}</div>
+                <div class="care-team-member-info">
+                  <div class="care-team-member-name">${esc(m.display_name || 'Helper')}</div>
+                  <div class="care-team-role-chip role-helper">Helper</div>
+                  ${m.created_at ? `<div style="font-size:10px;color:var(--text-secondary);">Joined ${formatDate(m.created_at)}</div>` : ''}
+                </div>
+              </div>`).join('')}
+            </div>
+            ${canManagePeople ? `<div class="co-owner-invite-form" style="margin-top:12px;">
+              <input type="email" id="co-owner-email-input" placeholder="Invite a co-owner by email..." value="${esc(state.coOwnerInviteEmail) || ''}">
+              <button class="btn-primary" data-action="send-co-owner-invite" data-pet-id="${pet?.id}" style="padding:8px 16px;font-size:13px;">Invite</button>
+            </div>` : ''}
+          </div>
+        </div>`;
+      }
+
+      // ── Section: External Providers (vet clinics, specialists — stored in lp.care_team) ──
+      html += `<div id="section-providers" class="care-plan-section" style="border-left:4px solid var(--blue);margin-bottom:16px;">
         <div class="section-title" style="display:flex;justify-content:space-between;align-items:center;">
-          <span>👩‍⚕️ Care Team</span>
+          <span>👩‍⚕️ External Providers</span>
           ${(canEdit || isClient) ? `<button class="section-edit-btn" data-action="toggle-add-care-team">+ Add Provider</button>` : ''}
         </div>
         <div class="section-content">`;
       if (lp.care_team.length === 0) {
-        html += '<em style="color: var(--text-secondary);">No care team members added yet.</em>';
+        html += '<em style="color: var(--text-secondary);">No external providers added yet — list your pet\'s primary vet, specialists, and clinics here.</em>';
       } else {
         for (let i = 0; i < lp.care_team.length; i++) {
           const ct = lp.care_team[i];
@@ -4197,15 +4507,39 @@ async function calculateBuddyScorecard(buddyId) {
         </div>` : ''}
       </div>`;
 
+      // ── Section: Health Record (Medications + Vitals + Vaccines) ──
+      {
+        // Hide entire Health Record from clients when no data exists yet (avoids empty placeholders cluttering the page)
+        const hasHealthData = (state.petMedications && state.petMedications.length > 0)
+          || (state.petVitals && state.petVitals.length > 0)
+          || (state.petVaccines && state.petVaccines.length > 0);
+        if (!isClient || hasHealthData) {
+          html += `<div id="section-health-record" class="care-plan-section" style="border-left:4px solid #e67e22;margin-bottom:16px;">
+            <div class="section-title"><span>🩺 Health Record</span></div>
+            <div class="section-content">
+              <div class="health-record-block" style="margin-bottom:18px;padding-bottom:18px;border-bottom:1px solid var(--border);">
+                ${renderMedicationsBody()}
+              </div>
+              ${(!isClient || (state.petVitals && state.petVitals.length > 0)) ? `<div class="health-record-block" style="margin-bottom:18px;padding-bottom:18px;border-bottom:1px solid var(--border);">
+                ${renderVitalsBody()}
+              </div>` : ''}
+              <div class="health-record-block">
+                ${renderVaccinesBody()}
+              </div>
+            </div>
+          </div>`;
+        }
+      }
+
       // ── Section 3: Active Care Goals (tier-differentiated) ──
-      html += `<div class="care-plan-section" style="border-left:4px solid var(--green);margin-bottom:16px;">
+      html += `<div id="section-goals" class="care-plan-section" style="border-left:4px solid var(--green);margin-bottom:16px;">
         <div class="section-title" style="display:flex;justify-content:space-between;align-items:center;">
           <span>🎯 Active Care Goals</span>
           ${canEdit ? `<button class="section-edit-btn" data-action="toggle-add-goal">+ Add Goal</button>` : ''}
         </div>
         <div class="section-content">`;
       if (lp.active_care_goals.length === 0) {
-        html += '<em style="color: var(--text-secondary);">No care goals set yet — your Buddy will work with you to set meaningful goals for your pet.</em>';
+        html += `<div style="font-size:14px;color:var(--text-secondary);">${isClient ? 'No goals yet — tap "+ Add Goal" to share one, or your Buddy will help set some on your first check-in.' : 'No goals yet — work with the owner to set 1–2 meaningful goals on the next check-in.'}</div>`;
       } else {
         for (let i = 0; i < lp.active_care_goals.length; i++) {
           const g = lp.active_care_goals[i];
@@ -4216,12 +4550,12 @@ async function calculateBuddyScorecard(buddyId) {
             <div style="display:flex;justify-content:space-between;align-items:flex-start;">
               <div style="flex:1;">
                 <div style="font-weight:500;">${esc(g.goal_text)}</div>
-                <div style="font-size:12px;color:var(--text-secondary);margin-top:4px;">
-                  ${g.set_by_owner ? '✍️ Set by owner' : '📋 Set by Buddy'} · ${g.created_at ? formatDate(g.created_at) : ''}
+                <div style="font-size:13px;color:var(--text-secondary);margin-top:4px;">
+                  ${g.set_by_owner ? (isClient ? '✍️ Set by you' : '✍️ Set by owner') : '📋 Set by Buddy'} · ${g.created_at ? formatDate(g.created_at) : ''}
                   ${g.reviewed_at ? ' · Last reviewed: ' + formatDate(g.reviewed_at) : ''}
                 </div>
-                ${tier === 'Buddy VIP' && isDvmReviewed ? '<span style="display:inline-block;margin-top:4px;background:#e8f5e9;color:#2e7d32;font-size:11px;font-weight:600;padding:2px 8px;border-radius:12px;">✅ DVM-Reviewed</span>' : ''}
-                ${needsQuarterlyReview ? '<div style="margin-top:6px;background:#fff3cd;color:#856404;font-size:12px;padding:4px 8px;border-radius:6px;">⏰ Quarterly Goal Review due — this goal hasn\'t been reviewed in 85+ days</div>' : ''}
+                ${tier === 'Buddy VIP' && isDvmReviewed ? '<span style="display:inline-block;margin-top:4px;background:#e8f5e9;color:#2e7d32;font-size:12px;font-weight:600;padding:2px 8px;border-radius:12px;">✅ Reviewed by Dr. Rodgers</span>' : ''}
+                ${needsQuarterlyReview ? `<div style="margin-top:6px;background:#fff3cd;color:#856404;font-size:13px;padding:4px 8px;border-radius:6px;">⏰ ${isClient ? 'Time to check in on this goal' : 'Quarterly goal review due — 85+ days since last review'}</div>` : ''}
               </div>
               <div style="display:flex;gap:4px;align-items:center;">
                 <span style="font-size:11px;padding:2px 8px;border-radius:12px;background:${g.status === 'completed' ? '#e8f5e9' : '#fff8e1'};color:${g.status === 'completed' ? '#2e7d32' : '#f57f17'};font-weight:600;">${g.status || 'active'}</span>
@@ -4240,40 +4574,104 @@ async function calculateBuddyScorecard(buddyId) {
         </div>` : ''}
       </div>`;
 
-      // ── Section 4: Engagement Log ──
-      html += `<div class="care-plan-section" style="border-left:4px solid var(--purple);margin-bottom:16px;">
-        <div class="section-title" style="display:flex;justify-content:space-between;align-items:center;">
-          <span>📝 Engagement Log</span>
-          ${canEdit ? `<button class="section-edit-btn" data-action="toggle-add-log-entry">+ Add Entry</button>` : ''}
-        </div>
-        <div class="section-content" style="max-height:300px;overflow-y:auto;">`;
-      if (lp.engagement_log.length === 0) {
-        html += '<em style="color: var(--text-secondary);">No check-ins logged yet. Your first wellness check-in will appear here.</em>';
-      } else {
-        const sortedLog = [...lp.engagement_log].sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
-        for (const entry of sortedLog) {
-          html += `<div style="padding:10px 0;border-bottom:1px solid var(--border);">
-            <div style="font-size:14px;line-height:1.5;">${esc(entry.entry_text)}</div>
-            <div style="font-size:11px;color:var(--text-secondary);margin-top:4px;">— ${esc(entry.created_by) || 'Buddy'} · ${entry.created_at ? formatDate(entry.created_at) : ''}</div>
+      // ── Section: Engagement (merges lp.engagement_log JSON entries with timeline_entries rows) ──
+      {
+        const typeIcons = { update: '✏️', note: '📋', escalation: '🚨', appointment: '📅', milestone: '⭐', message: '💬', engagement: '📝' };
+        const filter = state.engagementFilter || 'all';
+        // Normalize both sources into a single shape: {type, content, author, date, source}
+        const fromLog = (lp.engagement_log || []).map(e => ({
+          type: 'engagement',
+          content: e.entry_text || '',
+          author: e.created_by || 'Buddy',
+          date: e.created_at || null,
+          source: 'engagement_log',
+        }));
+        const fromTimeline = (state.timelineEntries || []).map(e => ({
+          type: e.type || 'note',
+          content: e.content || '',
+          author: e.author?.name || 'Unknown',
+          date: e.created_at || null,
+          source: 'timeline',
+        }));
+        const merged = [...fromLog, ...fromTimeline].sort((a, b) => new Date(b.date) - new Date(a.date));
+        const filtered = filter === 'all' ? merged : merged.filter(e => {
+          if (filter === 'notes') return e.type === 'engagement' || e.type === 'note';
+          if (filter === 'updates') return e.type === 'update';
+          if (filter === 'milestones') return e.type === 'milestone';
+          if (filter === 'system') return e.type === 'escalation' || e.type === 'appointment' || e.type === 'message';
+          return true;
+        });
+
+        html += `<div id="section-engagement" class="care-plan-section" style="border-left:4px solid var(--purple);margin-bottom:16px;">
+          <div class="section-title" style="display:flex;justify-content:space-between;align-items:center;">
+            <span>📝 ${isClient ? 'Notes from your Buddy' : 'Engagement'}</span>
+            ${canEdit ? `<div style="display:flex;gap:6px;">
+              <button class="section-edit-btn" data-action="toggle-add-log-entry">+ Add Entry</button>
+              <button class="section-edit-btn" data-action="toggle-add-timeline" style="background:transparent;">More…</button>
+            </div>` : ''}
+          </div>`;
+        if (canEdit) {
+          const pill = (key, label) => `<button class="btn btn-secondary btn-small" data-action="set-engagement-filter" data-filter="${key}" style="font-size:11px;padding:3px 10px;${filter === key ? 'background:var(--primary);color:white;border-color:var(--primary);' : ''}">${label}</button>`;
+          html += `<div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px;">
+            ${pill('all', 'All')}${pill('notes', 'Notes')}${pill('updates', 'Updates')}${pill('milestones', 'Milestones')}${pill('system', 'System')}
           </div>`;
         }
+        html += `<div class="section-content" style="max-height:360px;overflow-y:auto;">`;
+        if (filtered.length === 0) {
+          html += `<div style="font-size:14px;color:var(--text-secondary);">${isClient ? 'Notes from your Buddy will appear here after your first check-in.' : 'No entries yet — add one once you connect with the owner.'}</div>`;
+        } else {
+          for (const entry of filtered) {
+            html += `<div style="padding:10px 0;border-bottom:1px solid var(--border);">
+              <div style="font-size:14px;line-height:1.5;"><span style="margin-right:6px;">${typeIcons[entry.type] || '📌'}</span>${esc(entry.content)}</div>
+              <div style="font-size:11px;color:var(--text-secondary);margin-top:4px;">— ${esc(entry.author)} · ${entry.date ? formatDate(entry.date) : ''}</div>
+            </div>`;
+          }
+        }
+        html += `</div>`;
+        if (state.showAddLogEntry && canEdit) {
+          html += `<div style="background:#f5f0fa;border-radius:8px;padding:14px;margin-top:8px;">
+            <div class="form-group"><label>Engagement entry</label><textarea data-field="log-entry-text" placeholder="e.g. Asked about Percy's appetite after the new medication — owner reported improvement and followed through on the recheck..." style="width:100%;height:60px;"></textarea></div>
+            <button class="btn btn-primary btn-small" data-action="save-log-entry">Save Entry</button>
+          </div>`;
+        }
+        if (state.showAddTimeline && canEdit) {
+          html += `<div style="background:#f0faf8;border-radius:8px;padding:14px;margin-top:8px;border:1px solid var(--primary);">
+            <div style="font-weight:600;margin-bottom:8px;font-size:13px;">Timeline entry (typed + client-visibility flag)</div>
+            <div class="form-group"><label>Type</label>
+              <select data-field="timeline-type" style="width:100%;">
+                <option value="note">📋 Note</option>
+                <option value="update">✏️ Update</option>
+                <option value="milestone">⭐ Milestone</option>
+                <option value="appointment">📅 Appointment</option>
+              </select>
+            </div>
+            <div class="form-group"><label>Content</label><textarea data-field="timeline-content" placeholder="Describe what happened or was discussed..." style="width:100%;height:80px;"></textarea></div>
+            <div class="form-group" style="display:flex;align-items:center;gap:8px;">
+              <input type="checkbox" data-field="timeline-client-visible" id="tl-visible" checked>
+              <label for="tl-visible" style="margin:0;font-size:13px;">Visible to client</label>
+            </div>
+            <button class="btn btn-primary btn-small" data-action="save-timeline-entry">Save Entry</button>
+          </div>`;
+        }
+        html += `</div>`;
       }
-      html += `</div>
-        ${state.showAddLogEntry ? `<div style="background:#f5f0fa;border-radius:8px;padding:14px;margin-top:8px;">
-          <div class="form-group"><label>Log Entry</label><textarea data-field="log-entry-text" placeholder="e.g. Asked about Percy's appetite after the new medication — owner reported improvement and followed through on the recheck..." style="width:100%;height:60px;"></textarea></div>
-          <button class="btn btn-primary btn-small" data-action="save-log-entry">Save Entry</button>
-        </div>` : ''}
+
+      // ── Section: Documents (uploaded files; was the Files tab) ──
+      html += `<div id="section-documents" class="care-plan-section" style="border-left:4px solid var(--blue);margin-bottom:16px;">
+        <div class="section-content">
+          ${renderDocumentsBody()}
+        </div>
       </div>`;
 
       // ── Section 5: Milestones & Wins ──
-      html += `<div class="care-plan-section" style="border-left:4px solid var(--amber);margin-bottom:16px;background:linear-gradient(135deg,#fffde7 0%,#fff8e1 100%);border-radius:8px;padding:16px;">
+      html += `<div id="section-wins" class="care-plan-section" style="border-left:4px solid var(--amber);margin-bottom:16px;background:linear-gradient(135deg,#fffde7 0%,#fff8e1 100%);border-radius:8px;padding:16px;">
         <div class="section-title" style="display:flex;justify-content:space-between;align-items:center;">
-          <span>🏆 Milestones & Wins</span>
+          <span>🏆 ${isClient ? 'Good things lately' : 'Milestones & Wins'}</span>
           ${(canEdit || isClient) ? `<button class="section-edit-btn" data-action="toggle-add-milestone">+ Celebrate a Win</button>` : ''}
         </div>
         <div class="section-content">`;
       if (lp.milestones_and_wins.length === 0) {
-        html += '<em style="color: var(--text-secondary);">No milestones yet — every little win counts! Your first celebration will appear here. 🎉</em>';
+        html += `<div style="font-size:14px;color:var(--text-secondary);">Every little win counts. ${isClient ? "Your first celebration will appear here once you and your Buddy share one." : 'Add one whenever the owner has a small (or big) reason to celebrate.'} 🎉</div>`;
       } else {
         for (const m of lp.milestones_and_wins) {
           html += `<div style="background:white;border-radius:8px;padding:12px;margin-bottom:8px;border:1px solid #ffe082;">
@@ -4291,17 +4689,42 @@ async function calculateBuddyScorecard(buddyId) {
         </div>` : ''}
       </div>`;
 
-      // ── Internal Notes (staff only, preserved from legacy) ──
-      if (['vet_buddy', 'admin'].includes(state.profile.role)) {
-        const internalNotes = state.carePlan.internal_notes || '';
+      // ── Internal Notes (staff only — pinned summary + dated case_notes feed) ──
+      if (['vet_buddy', 'admin', 'practice_manager', 'external_vet'].includes(state.profile.role)) {
+        const internalNotes = state.carePlan?.internal_notes || '';
+        const caseNotes = state.caseNotes || [];
         html += `
-          <div class="care-plan-section view-mode" style="margin-bottom:16px;">
-            <div class="section-title">
-              🔒 Internal Notes (Staff Only)
-              <button class="section-edit-btn" data-action="edit-careplan-section" data-section="internal_notes">Edit</button>
+          <div id="section-internal-notes" class="care-plan-section view-mode" style="margin-bottom:16px;">
+            <div class="section-title" style="display:flex;justify-content:space-between;align-items:center;">
+              <span>🔒 Internal Notes (Staff Only)</span>
+              <button class="btn btn-primary btn-small" data-action="toggle-add-note">${state.showAddNote ? '✕ Cancel' : '+ Add Note'}</button>
+            </div>
+            <div style="font-size:11px;color:var(--text-secondary);margin-bottom:10px;">
+              Pinned summary is the running TL;DR. Notes below are dated entries.
             </div>
             <div class="section-content">
-              ${internalNotes ? esc(internalNotes) : '<em style="color: var(--text-secondary);">No internal notes</em>'}
+              <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.5px;color:var(--text-secondary);margin-bottom:6px;">Pinned summary</div>
+              <div style="background:var(--bg);border-radius:8px;padding:10px 12px;margin-bottom:14px;display:flex;justify-content:space-between;align-items:flex-start;gap:10px;">
+                <div style="flex:1;white-space:pre-wrap;font-size:13px;">${internalNotes ? esc(internalNotes) : '<em style="color: var(--text-secondary);">No pinned summary yet</em>'}</div>
+                <button class="section-edit-btn" data-action="edit-careplan-section" data-section="internal_notes">Edit</button>
+              </div>
+              <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.5px;color:var(--text-secondary);margin-bottom:6px;">Notes</div>
+              ${state.showAddNote ? `<div class="card" style="margin-bottom:10px;background:#f0faf8;border:1px solid var(--primary);">
+                <textarea data-field="note-content" placeholder="Add an internal note..." style="width:100%;height:90px;margin-bottom:10px;"></textarea>
+                <div style="display:flex;gap:8px;">
+                  <button class="btn btn-primary btn-small" data-action="save-case-note" data-case-id="${state.caseId}">Save Note</button>
+                  <button class="btn btn-secondary btn-small" data-action="toggle-add-note">Cancel</button>
+                </div>
+              </div>` : ''}
+              ${caseNotes.length === 0 ? '<em style="color:var(--text-secondary);font-size:13px;">No dated notes yet.</em>' : caseNotes.map(note => `
+                <div style="padding:10px 12px;background:var(--bg);border-radius:8px;margin-bottom:8px;">
+                  <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:4px;">
+                    <div style="font-size:12px;font-weight:600;">${esc(note.author?.name || 'Staff')}</div>
+                    <div style="font-size:11px;color:var(--text-secondary);">${formatDateTime(note.created_at)}</div>
+                  </div>
+                  <div style="font-size:13px;white-space:pre-wrap;">${esc(note.content)}</div>
+                </div>
+              `).join('')}
             </div>
             <div class="section-form">
               <textarea data-field="section-internal_notes">${esc(internalNotes)}</textarea>
@@ -4317,7 +4740,7 @@ async function calculateBuddyScorecard(buddyId) {
       // ── Genetic Insights (visible to client, buddy, admin, and geneticist) ──
       const patientInsights = (state.geneticInsights || []).filter(g => g.case_id === state.caseId);
       if (patientInsights.length > 0) {
-        html += '<div class="care-plan-section view-mode" style="margin-bottom:16px;">';
+        html += '<div id="section-genetic" class="care-plan-section view-mode" style="margin-bottom:16px;">';
         html += '<div style="display:flex;align-items:center;gap:8px;margin-bottom:12px;">';
         html += '<span style="font-size:18px;">&#x1F9EC;</span>';
         html += '<div style="font-weight:700;font-size:15px;color:#534AB7;">Genetic Insights</div>';
@@ -4446,7 +4869,7 @@ async function calculateBuddyScorecard(buddyId) {
             <div class="chat-input-area" style="flex-wrap:wrap;">
               <textarea data-field="message-input" placeholder="${placeholder}" maxlength="2000" style="flex:1; min-width:120px;" oninput="if(this.value.startsWith('/')){document.querySelector('[data-action=toggle-canned-responses]')?.click()}"></textarea>
               <div style="display:flex; gap:6px; align-items:center;">
-                <button class="btn btn-secondary btn-small" data-action="toggle-urgency" title="Toggle urgency" style="padding:6px 10px;font-size:12px;border-color:${state.urgencyToggle ? 'var(--amber)' : 'var(--border)'};color:${state.urgencyToggle ? 'var(--amber)' : 'var(--text-secondary)'};background:${state.urgencyToggle ? '#fff8e1' : 'white'};">${state.urgencyToggle ? '🔶 Urgent' : 'Routine'}</button>
+                ${!isClient ? `<button class="btn btn-secondary btn-small" data-action="toggle-urgency" title="Toggle urgency" style="border-color:${state.urgencyToggle ? 'var(--amber)' : 'var(--border)'};color:${state.urgencyToggle ? 'var(--amber)' : 'var(--text-secondary)'};background:${state.urgencyToggle ? '#fff8e1' : 'white'};">${state.urgencyToggle ? '🔶 Urgent' : 'Routine'}</button>` : ''}
                 ${isStaff ? `<button class="btn btn-secondary" data-action="toggle-canned-responses" title="Canned responses" style="padding:10px 12px;">💬</button>` : ''}
                 <button class="voice-btn" id="voice-record-btn" data-action="toggle-voice-record" title="Voice message">🎙️</button>
                 <button class="btn btn-secondary" data-action="attach-file" title="Attach file" style="padding:10px 12px;">📎</button>
@@ -4459,69 +4882,6 @@ async function calculateBuddyScorecard(buddyId) {
           ${isBuddy ? `<div style="font-size:12px;color:#999;padding:6px 0;line-height:1.4;">Reminder: provide guidance and support only. Do not diagnose, prescribe, or recommend specific medications. Escalate to Dr. Rodgers for any clinical decisions.</div>
           <div id="scope-warning" style="display:none;font-size:12px;color:var(--amber);background:#fff8e1;padding:6px 10px;border-radius:6px;margin-top:4px;">Heads up — does this message stay within your guidance scope? Escalate to Dr. Rodgers if a clinical decision is needed.</div>` : ''}
         `;
-      }
-
-      // Q&A quick question form for clients
-      if (state.profile.role === 'client') {
-        html += `<div style="margin-top:12px;padding-top:12px;border-top:1px solid var(--border);">
-          <button class="btn btn-secondary btn-small" data-action="send-quick-question" style="font-size:12px;">❓ Send a Quick Question</button>
-          <div style="font-size:11px;color:var(--text-secondary);margin-top:4px;">Short questions get faster responses than case messages.</div>
-        </div>`;
-      }
-
-      html += '</div>';
-      return html;
-    }
-
-    function renderTimelineTab() {
-      const isVisible = state.caseTab === 'timeline';
-      const canEdit = ['vet_buddy', 'admin'].includes(state.profile.role);
-      let html = `<div class="tab-content ${isVisible ? 'active' : ''}">`;
-
-      if (canEdit) {
-        html += `<div style="display:flex; justify-content:flex-end; margin-bottom:12px;">
-          <button class="btn btn-primary btn-small" data-action="toggle-add-timeline">${state.showAddTimeline ? '✕ Cancel' : '+ Add Entry'}</button>
-        </div>`;
-      }
-
-      if (state.showAddTimeline && canEdit) {
-        html += `
-          <div class="card" style="margin-bottom:16px; background:#f0faf8; border:1px solid var(--primary);">
-            <div class="card-title" style="margin-bottom:12px;">New Timeline Entry</div>
-            <div class="form-group"><label>Type</label>
-              <select data-field="timeline-type" style="width:100%;">
-                <option value="note">📋 Note</option>
-                <option value="update">✏️ Update</option>
-                <option value="milestone">⭐ Milestone</option>
-                <option value="appointment">📅 Appointment</option>
-              </select>
-            </div>
-            <div class="form-group"><label>Content</label><textarea data-field="timeline-content" placeholder="Describe what happened or was discussed..." style="width:100%;height:80px;"></textarea></div>
-            <div class="form-group" style="display:flex;align-items:center;gap:8px;">
-              <input type="checkbox" data-field="timeline-client-visible" id="tl-visible" checked>
-              <label for="tl-visible" style="margin:0;font-size:13px;">Visible to client</label>
-            </div>
-            <button class="btn btn-primary" data-action="save-timeline-entry">Save Entry</button>
-          </div>`;
-      }
-
-      if (state.timelineEntries.length === 0) {
-        html += '<div class="empty-state"><div class="empty-state-text">📅 No timeline entries yet — your care journey starts here.</div></div>';
-      } else {
-        html += '<div class="timeline">';
-        const icons = { update: '✏️', note: '📋', escalation: '🚨', appointment: '📅', milestone: '⭐', message: '💬' };
-        for (const entry of state.timelineEntries) {
-          html += `
-            <div class="timeline-entry">
-              <div class="timeline-dot"></div>
-              <div class="timeline-content">
-                <div><span class="timeline-icon">${icons[entry.type] || '📌'}</span> ${esc(entry.content)}</div>
-                <div class="timeline-author">By ${esc(entry.author?.name) || 'Unknown'} on ${formatDate(entry.created_at)}</div>
-              </div>
-            </div>
-          `;
-        }
-        html += '</div>';
       }
 
       html += '</div>';
@@ -4569,7 +4929,7 @@ async function calculateBuddyScorecard(buddyId) {
 
       // Recent touchpoints list with satisfaction rating
       if (state.touchpoints.length === 0) {
-        html += '<div style="text-align:center;color:var(--text-secondary);padding:20px 0;font-size:13px;">No check-ins yet. Check-in history will appear here.</div>';
+        html += '<div style="text-align:center;color:var(--text-secondary);padding:20px 0;font-size:14px;">No check-ins yet. Your check-in history will appear here.</div>';
       } else if (state.touchpoints.length > 0) {
         html += `<div class="card" style="margin-top:16px;"><div class="card-title" style="margin-bottom:12px;">Recent Check-Ins</div>`;
         for (const tp of state.touchpoints) {
@@ -4710,8 +5070,7 @@ async function calculateBuddyScorecard(buddyId) {
       return html;
     }
 
-    function renderDocumentsTab() {
-      const isVisible = state.caseTab === 'files';
+    function renderDocumentsBody() {
       const canUpload = ['client', 'vet_buddy', 'admin'].includes(state.profile.role);
       const isClient = state.profile.role === 'client';
       const docs = state.documents || [];
@@ -4726,9 +5085,9 @@ async function calculateBuddyScorecard(buddyId) {
         other: 'Other',
       };
 
-      let html = `<div class="tab-content ${isVisible ? 'active' : ''}">`;
+      let html = '';
       html += `<div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:16px; flex-wrap:wrap; gap:8px;">
-        <div style="font-weight:600;">Documents & Files</div>
+        <div style="font-weight:600;">📁 Documents & Files</div>
         ${canUpload ? `<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
           ${isClient ? `<select id="doc-type-select" style="padding:6px 10px;border:1px solid var(--border);border-radius:6px;background:white;font-size:13px;">
             <option value="">— Document type —</option>
@@ -4761,11 +5120,21 @@ async function calculateBuddyScorecard(buddyId) {
           const icon = docIcons[doc.mime_type] || '📎';
           const size = doc.size_bytes ? (doc.size_bytes > 1024*1024 ? (doc.size_bytes/1024/1024).toFixed(1)+'MB' : (doc.size_bytes/1024).toFixed(0)+'KB') : '';
           const isAiSupported = AI_SUPPORTED_TYPES.includes(doc.mime_type);
-          const aiStatusBadge = doc.ai_extraction_status === 'completed'
-            ? '<span style="background:#336026;color:white;font-size:10px;font-weight:600;padding:2px 6px;border-radius:4px;margin-left:6px;">AI Extracted</span>'
-            : doc.ai_extraction_status === 'processing'
-            ? '<span style="background:var(--amber);color:white;font-size:10px;font-weight:600;padding:2px 6px;border-radius:4px;margin-left:6px;">Analyzing...</span>'
+          const aiStatus = doc.ai_extraction_status;
+          // Clients only see active progress ("Analyzing…"). Operational states
+          // (queued / failed / completed) are staff-only — failures retry silently.
+          const aiStatusBadge = aiStatus === 'processing'
+            ? '<span style="background:var(--amber);color:white;font-size:10px;font-weight:600;padding:2px 6px;border-radius:4px;margin-left:6px;">Analyzing…</span>'
+            : isClient
+            ? ''
+            : aiStatus === 'completed'
+            ? '<span title="AI extraction completed" style="background:#336026;color:white;font-size:10px;font-weight:600;padding:2px 6px;border-radius:4px;margin-left:6px;">AI Extracted</span>'
+            : aiStatus === 'pending'
+            ? '<span title="' + esc(doc.ai_extraction_error || 'Queued for AI analysis') + '" style="background:#888;color:white;font-size:10px;font-weight:600;padding:2px 6px;border-radius:4px;margin-left:6px;">AI Queued</span>'
+            : aiStatus === 'failed'
+            ? '<span title="' + esc(doc.ai_extraction_error || 'AI analysis failed') + '" style="background:var(--red);color:white;font-size:10px;font-weight:600;padding:2px 6px;border-radius:4px;margin-left:6px;">AI Failed</span>'
             : '';
+          const showRetryAi = !isClient && isAiSupported && (aiStatus === 'pending' || aiStatus === 'failed');
           const typeLabel = doc.file_type && FILE_TYPE_LABELS[doc.file_type] ? FILE_TYPE_LABELS[doc.file_type] : '';
           const typeBadge = typeLabel ? `<span style="background:#EEEDFE;color:#534AB7;font-size:11px;padding:2px 8px;border-radius:10px;font-weight:500;margin-left:6px;">${typeLabel}</span>` : '';
           const canSummarize = isClient && !!doc.storage_path && SUMMARY_MIME.includes(doc.mime_type);
@@ -4782,7 +5151,8 @@ async function calculateBuddyScorecard(buddyId) {
             </div>
             ${doc.storage_path && SUMMARY_MIME.includes(doc.mime_type) ? `<button class="btn btn-secondary btn-small" data-action="view-doc" data-doc-id="${doc.id}">👁️ View</button>` : ''}
             ${summaryButton}
-            ${isAiSupported && !doc.ai_extraction_status ? `<button class="btn btn-secondary btn-small" data-action="ai-analyze-doc" data-doc-id="${doc.id}" style="font-size:11px;">🤖 Analyze</button>` : ''}
+            ${!isClient && isAiSupported && !aiStatus ? `<button class="btn btn-secondary btn-small" data-action="retry-ai-extraction" data-doc-id="${doc.id}">🤖 Analyze</button>` : ''}
+            ${showRetryAi ? `<button class="btn btn-secondary btn-small" data-action="retry-ai-extraction" data-doc-id="${doc.id}">↻ Retry AI</button>` : ''}
             <a href="${esc(doc.url)}" target="_blank" rel="noopener" class="btn btn-secondary btn-small" onclick="event.stopPropagation();">⬇️</a>
             ${['admin','vet_buddy'].includes(state.profile.role) ? `
               <button class="btn btn-secondary btn-small" data-action="toggle-genetic-flag" data-doc-id="${doc.id}" data-is-genetic="${doc.is_genetic ? '1' : '0'}" style="${doc.is_genetic ? 'background:#EEEDFE;border-color:#534AB7;color:#534AB7;' : ''}">&#x1F9EC; ${doc.is_genetic ? 'Genetic' : 'Mark Genetic'}</button>
@@ -4792,7 +5162,6 @@ async function calculateBuddyScorecard(buddyId) {
         }
       }
 
-      html += '</div>';
       return html;
     }
 
@@ -4919,35 +5288,48 @@ async function calculateBuddyScorecard(buddyId) {
             + rows
             + '</div>';
         })()}
-        <div class="card">
-          <div class="card-title">Recent Cases</div>
-          <div style="overflow-x:auto;">
-          <table class="cases-table" style="margin-top: 16px;">
-            <thead>
-              <tr>
-                <th>Pet</th>
-                <th>Owner</th>
-                <th>Buddy</th>
-                <th>Tier</th>
-                <th>Status</th>
-                <th></th>
-              </tr>
-            </thead>
-            <tbody>
-              ${state.cases.slice(0, 5).map(c => `
-                <tr>
-                  <td><div style="display:flex;align-items:center;gap:8px;">${c.pets?.photo_url ? `<img src="${esc(c.pets.photo_url)}" style="width:28px;height:28px;border-radius:50%;object-fit:cover;border:2px solid var(--border);" alt="${esc(c.pets?.name)}">` : `<div style="width:28px;height:28px;border-radius:50%;background:linear-gradient(135deg,var(--primary),#336026);display:flex;align-items:center;justify-content:center;font-size:14px;">${SPECIES_EMOJI[c.pets?.species?.toLowerCase()] || '🐾'}</div>`}<span class="case-table-pet">${esc(c.pets?.name || 'Unknown')}</span></div></td>
-                  <td><span class="case-table-owner">${esc(c.pets?.owner?.name || 'Unknown')}</span></td>
-                  <td>${esc(c.assigned_buddy?.name || 'Unassigned')}</td>
-                  <td>${TIER_DISPLAY[c.subscription_tier] || c.subscription_tier}</td>
-                  <td>${renderStatusDot(c.status)} ${c.status}</td>
-                  <td><a class="case-table-link" data-action="nav-admin-case" data-case-id="${c.id}">View</a></td>
-                </tr>
-              `).join('')}
-            </tbody>
-          </table>
-          </div>
-        </div>
+        ${(() => {
+          // Recent Cases collapses on mobile by default so the MRR + stats + surveys
+          // stay visible without scrolling. Toggle persists in state for the session.
+          const adminCasesCollapsed = state.adminRecentCasesCollapsed === undefined
+            ? (typeof window !== 'undefined' && window.innerWidth < 768)
+            : state.adminRecentCasesCollapsed;
+          const totalShown = Math.min(state.cases.length, 5);
+          const tableRows = state.cases.slice(0, 5).map(c => `
+            <tr>
+              <td><div style="display:flex;align-items:center;gap:8px;">${c.pets?.photo_url ? `<img src="${esc(c.pets.photo_url)}" style="width:28px;height:28px;border-radius:50%;object-fit:cover;border:2px solid var(--border);" alt="${esc(c.pets?.name)}">` : `<div style="width:28px;height:28px;border-radius:50%;background:linear-gradient(135deg,var(--primary),#336026);display:flex;align-items:center;justify-content:center;font-size:14px;">${SPECIES_EMOJI[c.pets?.species?.toLowerCase()] || '🐾'}</div>`}<span class="case-table-pet">${esc(c.pets?.name || 'Unknown')}</span></div></td>
+              <td><span class="case-table-owner">${esc(c.pets?.owner?.name || 'Unknown')}</span></td>
+              <td>${esc(c.assigned_buddy?.name || 'Unassigned')}</td>
+              <td>${TIER_DISPLAY[c.subscription_tier] || c.subscription_tier}</td>
+              <td>${renderStatusDot(c.status)} ${c.status}</td>
+              <td><a class="case-table-link" data-action="nav-admin-case" data-case-id="${c.id}">View</a></td>
+            </tr>
+          `).join('');
+          return `<div class="card">
+            <button data-action="toggle-admin-recent-cases-collapse" aria-expanded="${!adminCasesCollapsed}" style="width:100%;display:flex;justify-content:space-between;align-items:center;background:none;border:none;padding:0;cursor:pointer;text-align:left;min-height:44px;color:inherit;font-family:inherit;">
+              <span class="card-title" style="margin:0;">Recent Cases (${totalShown}${state.cases.length > 5 ? ' of ' + state.cases.length : ''})</span>
+              <span style="font-size:20px;color:var(--text-secondary);line-height:1;" aria-hidden="true">${adminCasesCollapsed ? '▸' : '▾'}</span>
+            </button>
+            ${!adminCasesCollapsed ? `
+            <div style="overflow-x:auto;margin-top:12px;">
+              <table class="cases-table">
+                <thead>
+                  <tr>
+                    <th>Pet</th>
+                    <th>Owner</th>
+                    <th>Buddy</th>
+                    <th>Tier</th>
+                    <th>Status</th>
+                    <th></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  ${tableRows}
+                </tbody>
+              </table>
+            </div>` : ''}
+          </div>`;
+        })()}
       `);
     }
 
@@ -4955,15 +5337,13 @@ async function calculateBuddyScorecard(buddyId) {
     // NEW CASE TABS
     // ══════════════════════════════════════════════════════════
 
-    function renderMedicationsTab() {
-      const isVisible = state.caseTab === 'medications';
+    function renderMedicationsBody() {
       const canEdit = ['vet_buddy', 'admin'].includes(state.profile.role);
-      let html = `<div class="tab-content ${isVisible ? 'active' : ''}">`;
-      if (!isVisible) return html + '</div>';
+      let html = '';
 
       const pet = state.currentCase?.pets;
-      const activeMeds = state.petMedications.filter(m => m.is_active);
-      const pastMeds = state.petMedications.filter(m => !m.is_active);
+      const activeMeds = (state.petMedications || []).filter(m => m.is_active);
+      const pastMeds = (state.petMedications || []).filter(m => !m.is_active);
 
       html += `<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;">
         <div style="font-weight:600;">💊 Medications</div>
@@ -5014,18 +5394,15 @@ async function calculateBuddyScorecard(buddyId) {
           }
         }
       }
-      html += '</div>';
       return html;
     }
 
-    function renderVitalsTab() {
-      const isVisible = state.caseTab === 'vitals';
+    function renderVitalsBody() {
       const canEdit = ['vet_buddy', 'admin'].includes(state.profile.role);
-      let html = `<div class="tab-content ${isVisible ? 'active' : ''}">`;
-      if (!isVisible) return html + '</div>';
+      let html = '';
 
       if (!hasFeatureAccess('vitals_tracking')) {
-        return html + renderUpgradePrompt('vitals_tracking', state.currentCase?.subscription_tier) + '</div>';
+        return renderUpgradePrompt('vitals_tracking', state.currentCase?.subscription_tier);
       }
 
       const pet = state.currentCase?.pets;
@@ -5049,7 +5426,7 @@ async function calculateBuddyScorecard(buddyId) {
         </div>`;
       }
 
-      const weightData = state.petVitals.filter(v => v.weight).slice(0, 10).reverse();
+      const weightData = (state.petVitals || []).filter(v => v.weight).slice(0, 10).reverse();
       if (weightData.length >= 2) {
         html += `<div class="card" style="margin-bottom:14px;">
           <div style="font-weight:600;margin-bottom:10px;">Weight Trend</div>
@@ -5057,7 +5434,7 @@ async function calculateBuddyScorecard(buddyId) {
         </div>`;
       }
 
-      if (state.petVitals.length === 0) {
+      if ((state.petVitals || []).length === 0) {
         html += '<div class="empty-state" style="padding:30px 0;"><div class="empty-state-text">No vitals recorded yet — weight and health metrics will appear here.</div></div>';
       } else {
         html += '<div class="card"><div style="font-weight:600;margin-bottom:10px;">History</div>';
@@ -5073,15 +5450,12 @@ async function calculateBuddyScorecard(buddyId) {
         }
         html += '</div>';
       }
-      html += '</div>';
       return html;
     }
 
-    function renderVaccinesTab() {
-      const isVisible = state.caseTab === 'vaccines';
+    function renderVaccinesBody() {
       const canEdit = ['vet_buddy', 'admin', 'client'].includes(state.profile.role);
-      let html = `<div class="tab-content ${isVisible ? 'active' : ''}">`;
-      if (!isVisible) return html + '</div>';
+      let html = '';
 
       const pet = state.currentCase?.pets;
       const today = new Date();
@@ -5108,7 +5482,7 @@ async function calculateBuddyScorecard(buddyId) {
         </div>`;
       }
 
-      if (state.petVaccines.length === 0) {
+      if ((state.petVaccines || []).length === 0) {
         html += '<div class="empty-state" style="padding:30px 0;"><div class="empty-state-text">No vaccines on record yet — vaccination history will be tracked here.</div></div>';
       } else {
         for (const v of state.petVaccines) {
@@ -5131,103 +5505,6 @@ async function calculateBuddyScorecard(buddyId) {
           </div>`;
         }
       }
-      html += '</div>';
-      return html;
-    }
-
-    function renderCaseNotesTab() {
-      const isVisible = state.caseTab === 'notes';
-      const isStaff = ['vet_buddy', 'admin', 'external_vet', 'practice_manager'].includes(state.profile.role);
-      if (!isStaff) return '';
-      let html = `<div class="tab-content ${isVisible ? 'active' : ''}">`;
-      if (!isVisible) return html + '</div>';
-
-      html += `<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;">
-        <div><div style="font-weight:600;">🔒 Internal Notes</div><div style="font-size:11px;color:var(--text-secondary);">Visible to staff only — never shown to clients</div></div>
-        <button class="btn btn-primary btn-small" data-action="toggle-add-note">+ Add Note</button>
-      </div>`;
-
-      if (state.showAddNote) {
-        html += `<div class="card" style="margin-bottom:14px;background:#f0faf8;border:1px solid var(--primary);">
-          <textarea data-field="note-content" placeholder="Add an internal note..." style="width:100%;height:100px;margin-bottom:10px;"></textarea>
-          <div style="display:flex;gap:8px;">
-            <button class="btn btn-primary btn-small" data-action="save-case-note" data-case-id="${state.caseId}">Save Note</button>
-            <button class="btn btn-secondary btn-small" data-action="toggle-add-note">Cancel</button>
-          </div>
-        </div>`;
-      }
-
-      if (state.caseNotes.length === 0) {
-        html += '<div class="empty-state" style="padding:30px 0;"><div class="empty-state-text">No internal notes yet — staff notes about this case will appear here.</div></div>';
-      } else {
-        for (const note of state.caseNotes) {
-          html += `<div class="card" style="margin-bottom:10px;">
-            <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:6px;">
-              <div style="font-size:12px;font-weight:600;">${renderAvatar(note.author?.avatar_initials, note.author?.avatar_color, 'xs')} ${esc(note.author?.name || 'Staff')}</div>
-              <div style="font-size:11px;color:var(--text-secondary);">${formatDateTime(note.created_at)}</div>
-            </div>
-            <div style="font-size:13px;white-space:pre-wrap;">${esc(note.content)}</div>
-          </div>`;
-        }
-      }
-      html += '</div>';
-      return html;
-    }
-
-    function renderCoOwnersTab() {
-      const isVisible = state.caseTab === 'co-owners';
-      let html = `<div class="tab-content ${isVisible ? 'active' : ''}">`;
-      if (!isVisible) return html + '</div>';
-      html += renderCoOwnerSection(state.currentCase?.pet_id);
-      html += '</div>';
-      return html;
-    }
-
-    function renderTeamTab() {
-      const isVisible = state.caseTab === 'team';
-      let html = `<div class="tab-content ${isVisible ? 'active' : ''}">`;
-      if (!isVisible) return html + '</div>';
-      const pet = state.currentCase?.pets;
-      const buddy = state.currentCase?.assigned_buddy;
-      const owner = state.currentCase?.pets?.owner;
-      const teamMembers = state._careTeamMembers || [];
-      const coOwners = state.petCoOwners || [];
-      html += `<div class="card" style="margin-bottom:16px;">
-        <div class="card-title" style="margin-bottom:12px;">🤝 ${esc(pet?.name || 'Pet')}'s Care Team</div>
-        <div class="care-team-list">
-          ${owner ? `<div class="care-team-member">
-            ${renderAvatar(owner.avatar_initials || owner.name?.charAt(0), owner.avatar_color || '#888')}
-            <div class="care-team-member-info">
-              <div class="care-team-member-name">${esc(owner.name || 'Owner')}</div>
-              <div class="care-team-role-chip role-owner">Owner</div>
-            </div>
-          </div>` : ''}
-          ${buddy ? `<div class="care-team-member">
-            ${renderAvatar(buddy.avatar_initials, buddy.avatar_color || '#9b59b6')}
-            <div class="care-team-member-info">
-              <div class="care-team-member-name">${esc(buddy.name)}</div>
-              <div class="care-team-role-chip role-buddy">Buddy</div>
-            </div>
-          </div>` : ''}
-          ${coOwners.map(co => `<div class="care-team-member">
-            <div class="avatar-circle" style="background:#888;width:28px;height:28px;font-size:11px;">${(co.user?.name || '?').charAt(0).toUpperCase()}</div>
-            <div class="care-team-member-info">
-              <div class="care-team-member-name">${esc(co.user?.name || co.invited_email || 'Co-owner')}</div>
-              <div class="care-team-role-chip role-owner">Co-owner</div>
-              ${co.accepted_at ? `<div style="font-size:10px;color:var(--text-secondary);">Joined ${formatDate(co.accepted_at)}</div>` : ''}
-            </div>
-          </div>`).join('')}
-          ${teamMembers.map(m => `<div class="care-team-member">
-            <div class="avatar-circle" style="background:#e67e22;width:28px;height:28px;font-size:11px;">${(m.display_name || '?').charAt(0).toUpperCase()}</div>
-            <div class="care-team-member-info">
-              <div class="care-team-member-name">${esc(m.display_name || 'Helper')}</div>
-              <div class="care-team-role-chip role-helper">Helper</div>
-              ${m.created_at ? `<div style="font-size:10px;color:var(--text-secondary);">Joined ${formatDate(m.created_at)}</div>` : ''}
-            </div>
-          </div>`).join('')}
-        </div>
-      </div>`;
-      html += '</div>';
       return html;
     }
 
@@ -5287,28 +5564,40 @@ async function calculateBuddyScorecard(buddyId) {
 
     function renderAdminCases() {
       const hasActive = !!state.currentCase;
-      let html = `<div class="case-detail-layout${hasActive ? ' has-active-case' : ''}"><div class="case-sidebar">`;
-      html += '<button class="btn btn-primary btn-small" data-action="nav-admin-create-case" style="width:100%;margin-bottom:12px;">+ Create Case</button>';
-      html += '<input type="text" placeholder="Search cases..." data-field="case-search" style="margin-bottom: 12px;" aria-label="Search cases">';
-      const casesPaged = paginate(state.cases, pagination.cases);
-      for (const c of casesPaged.items) {
-        const isActive = state.currentCase?.id === c.id;
-        const adminSidebarEmoji = SPECIES_EMOJI[c.pets?.species?.toLowerCase()] || '🐾';
-        html += `
-          <div class="case-list-item ${isActive ? 'active' : ''}" data-action="select-case" data-case-id="${c.id}" style="display:flex; align-items:center; gap:10px;">
-            ${c.pets?.photo_url
-              ? `<img src="${esc(c.pets.photo_url)}" class="pet-photo-thumb" alt="${esc(c.pets?.name)}" style="flex-shrink:0;">`
-              : `<div class="pet-photo-thumb-placeholder" style="flex-shrink:0;">${adminSidebarEmoji}</div>`}
-            <div style="min-width:0; flex:1;">
-              <div class="case-list-pet-name" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(c.pets?.name || 'Unknown')}</div>
-              <div class="case-list-owner" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(c.pets?.owner?.name || 'Unknown Owner')}</div>
-              ${c.subscription_tier ? `<div style="font-size: 10px; color: var(--text-secondary); margin-top: 2px;">${c.subscription_tier}</div>` : ''}
+      let html = '';
+
+      // When a case is selected, show ONLY that case (no sidebar list of other cases).
+      // When no case is selected, show the cases list as full-width content.
+      if (!hasActive) {
+        html += `<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;flex-wrap:wrap;gap:8px;">
+          <div style="font-family:'Fraunces',serif;font-size:22px;font-weight:600;">All Cases${state.cases.length ? ` (${state.cases.length})` : ''}</div>
+          <button class="btn btn-primary btn-small" data-action="nav-admin-create-case">+ Create Case</button>
+        </div>`;
+        html += '<input type="text" placeholder="Search cases..." data-field="case-search" style="margin-bottom:14px;width:100%;" aria-label="Search cases">';
+        const casesPaged = paginate(state.cases, pagination.cases);
+        html += '<div class="card">';
+        for (const c of casesPaged.items) {
+          const adminSidebarEmoji = SPECIES_EMOJI[c.pets?.species?.toLowerCase()] || '🐾';
+          html += `
+            <div class="case-list-item" data-action="select-case" data-case-id="${c.id}" style="display:flex; align-items:center; gap:10px;">
+              ${c.pets?.photo_url
+                ? `<img src="${esc(c.pets.photo_url)}" class="pet-photo-thumb" alt="${esc(c.pets?.name)}" style="flex-shrink:0;">`
+                : `<div class="pet-photo-thumb-placeholder" style="flex-shrink:0;">${adminSidebarEmoji}</div>`}
+              <div style="min-width:0; flex:1;">
+                <div class="case-list-pet-name" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(c.pets?.name || 'Unknown')}</div>
+                <div class="case-list-owner" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(c.pets?.owner?.name || 'Unknown Owner')}</div>
+                ${c.subscription_tier ? `<div style="font-size: 11px; color: var(--text-secondary); margin-top: 2px;">${c.subscription_tier}</div>` : ''}
+              </div>
+              ${renderStatusDot(c.status)}<span style="font-size:12px;color:var(--text-secondary);">${esc(c.status || '')}</span>
             </div>
-          </div>
-        `;
+          `;
+        }
+        html += '</div>';
+        html += renderPagination('cases', casesPaged.page, casesPaged.totalPages, casesPaged.total);
+      } else {
+        // Single-case focus: back-to-list button, then the selected case full-width.
+        html += `<button class="btn btn-secondary btn-small" data-action="back-to-case-list" style="margin-bottom:14px;">← All cases</button>`;
       }
-      html += renderPagination('cases', casesPaged.page, casesPaged.totalPages, casesPaged.total);
-      html += '</div><div>';
 
       if (state.currentCase) {
         const pet = state.currentCase.pets;
@@ -5316,8 +5605,8 @@ async function calculateBuddyScorecard(buddyId) {
         const ownerName = pet?.owner?.name || 'Unknown Owner';
         const buddies = state.teamMembers.filter(m => m.role === 'vet_buddy');
 
-        // Mobile back button
-        html += `<button class="mobile-back-btn" data-action="back-to-case-list" style="display:none;margin-bottom:12px;background:none;border:1px solid var(--border);border-radius:8px;padding:8px 16px;font-size:14px;color:var(--dark);cursor:pointer;">← Back to Cases</button>`;
+        // (Mobile-back button removed — the "← All cases" button at top of the
+        // page already serves the same purpose on every viewport.)
 
         // ── Persistent case header ──
         html += `
@@ -5357,32 +5646,24 @@ async function calculateBuddyScorecard(buddyId) {
           </div>
         `;
 
-        // ── Tabs (all staff tabs including medical records) ──
-        const adminCaseTabs = ['careplan', 'messages', 'medications', 'vitals', 'vaccines', 'timeline', 'touchpoints', 'notes', 'appointments', 'files'];
-        const adminCaseLabels = { careplan: 'Living Care Plan', messages: 'Messages', timeline: 'Timeline', touchpoints: 'Check-ins', appointments: 'Appointments', files: '📁 Files', medications: '💊 Meds', vitals: '📊 Vitals', vaccines: '💉 Vaccines', notes: '🔒 Notes' };
+        // ── Tabs (Care Plan renders as the page body, not as a tab) ──
+        const adminCaseTabs = ['messages', 'touchpoints', 'appointments'];
+        const adminCaseLabels = { messages: 'Messages', touchpoints: 'Check-ins', appointments: 'Appointments' };
         html += '<div class="tabs">';
         for (const tab of adminCaseTabs) {
           html += `<button class="tab-button ${state.caseTab === tab ? 'active' : ''}" data-action="switch-case-tab" data-tab="${tab}">${adminCaseLabels[tab]}</button>`;
         }
         html += '</div>';
 
-        html += renderCarePlanTab();
-        html += renderMessagesTab();
-        html += renderMedicationsTab();
-        html += renderVitalsTab();
-        html += renderVaccinesTab();
-        html += renderTimelineTab();
-        html += renderTouchpointsTab();
-        html += renderCaseNotesTab();
-        html += renderAppointmentsTab();
-        html += renderDocumentsTab();
-        html += renderCoOwnersTab();
-        html += renderTeamTab();
-      } else {
-        html += '<div class="empty-state"><div class="empty-state-text">Select a case to view details</div></div>';
-      }
+        // Care Plan body — always visible primary surface
+        html += renderCarePlanBody();
 
-      html += '</div></div>';
+        // Tab contents (secondary surfaces — only one shows at a time based on state.caseTab)
+        html += renderMessagesTab();
+        html += renderTouchpointsTab();
+        html += renderAppointmentsTab();
+      }
+      // No grid wrappers to close — list mode and focus mode are both single-column.
       return renderLayout(html);
     }
 
@@ -8005,12 +8286,10 @@ function renderVaccineDueAlerts(vaccines) {
       const isBuddyView = state.view.startsWith('buddy-') || state.view === 'touchpoint-templates' || state.view === 'canned-responses' || state.view === 'buddy-availability';
       if (isAdminView && role !== 'admin' && role !== 'practice_manager') {
         navigate(role === 'client' ? 'client-dashboard' : role === 'vet_buddy' ? 'buddy-dashboard' : 'login');
-        app.innerHTML = '';
         return;
       }
       if (isBuddyView && role !== 'vet_buddy' && role !== 'admin') {
         navigate(role === 'client' ? 'client-dashboard' : 'login');
-        app.innerHTML = '';
         return;
       }
 
@@ -8047,12 +8326,14 @@ function renderVaccineDueAlerts(vaccines) {
             html = renderAdminEscalations();
             break;
           case 'admin-schedule':
+          case 'buddy-schedule':
             html = renderAdminSchedule();
             break;
           case 'admin-team':
             html = renderAdminTeam();
             break;
           case 'admin-resources':
+          case 'buddy-resources':
             html = renderAdminResources();
             break;
           case 'external-dashboard':
@@ -8883,10 +9164,19 @@ function renderVaccineDueAlerts(vaccines) {
             }
             break;
           }
-          case 'nav-client-dashboard':
+          case 'nav-client-dashboard': {
             await loadCases();
+            // Refresh the active pet's messages so the inline conversation
+            // panel renders fresh whenever the client enters the dashboard.
+            const activePet = state.cases[state.activePetIndex || 0] || state.cases[0];
+            if (activePet) {
+              state.caseId = activePet.id;
+              state.currentCase = activePet;
+              try { await loadMessages(activePet.id); } catch (e) { console.warn('loadMessages failed:', e); }
+            }
             navigate('client-dashboard');
             break;
+          }
           case 'nav-subscribe':
             state.showPricingModal = true;
             render();
@@ -8903,6 +9193,7 @@ function renderVaccineDueAlerts(vaccines) {
                 state.caseId = state.cases[state.activePetIndex || 0]?.id || state.cases[0].id;
               }
               if (target.dataset.tab) state.caseTab = target.dataset.tab;
+              if (target.dataset.section) state._scrollToSection = target.dataset.section;
               state.showAddAppt = false; state.editingApptId = null; state.showAddTimeline = false; state.showRaiseEscalation = false;
               // Load case first (needed for petId), then everything else in parallel
               await loadCase(state.caseId);
@@ -8914,8 +9205,9 @@ function renderVaccineDueAlerts(vaccines) {
                 loadAppointments(state.caseId),
                 loadDocuments(state.caseId),
                 loadGeneticInsights(state.caseId),
-                (state.caseTab === 'medications' && petId) ? loadPetMedications(petId) : Promise.resolve(),
-                (state.caseTab === 'vaccines' && petId) ? loadPetVaccines(petId) : Promise.resolve(),
+                petId ? loadPetMedications(petId) : Promise.resolve(),
+                petId ? loadPetVitals(petId) : Promise.resolve(),
+                petId ? loadPetVaccines(petId) : Promise.resolve(),
                 petId ? loadPetCoOwners(petId) : Promise.resolve(),
                 petId ? loadPetCareProfile(petId).catch(() => {}) : Promise.resolve(),
               ]);
@@ -9068,10 +9360,19 @@ function renderVaccineDueAlerts(vaccines) {
           case 'switch-active-pet': {
             const newIdx = parseInt(target.dataset.idx || '0');
             state.activePetIndex = Math.max(0, Math.min(newIdx, state.cases.length - 1));
-            // Reload care plan + appointments + care profile for the newly selected pet
+            // Reload everything the dashboard depends on for the newly selected pet,
+            // including messages — the inline conversation panel needs them.
             const switchedCase = state.cases[state.activePetIndex];
             if (switchedCase) {
-              Promise.all([loadCarePlan(switchedCase.id), loadAppointments(switchedCase.id), loadPetCareProfile(switchedCase.pets?.id), loadTimeline(switchedCase.id)]).then(() => render());
+              state.caseId = switchedCase.id;
+              state.currentCase = switchedCase;
+              Promise.all([
+                loadCarePlan(switchedCase.id),
+                loadAppointments(switchedCase.id),
+                loadPetCareProfile(switchedCase.pets?.id),
+                loadTimeline(switchedCase.id),
+                loadMessages(switchedCase.id),
+              ]).then(() => render());
             }
             render();
             break;
@@ -9090,6 +9391,11 @@ function renderVaccineDueAlerts(vaccines) {
             await loadTouchpoints(state.caseId);
             await loadAppointments(state.caseId);
             try { await loadPetCareProfile(state.currentCase?.pets?.id); } catch(_) {}
+            try { if (state.currentCase?.pets?.id) await loadPetMedications(state.currentCase.pets.id); } catch(_) {}
+            try { if (state.currentCase?.pets?.id) await loadPetVitals(state.currentCase.pets.id); } catch(_) {}
+            try { if (state.currentCase?.pets?.id) await loadPetVaccines(state.currentCase.pets.id); } catch(_) {}
+            try { if (state.currentCase?.pet_id) await loadPetCoOwners(state.currentCase.pet_id); } catch(_) {}
+            try { await loadCaseNotes(state.caseId); } catch(_) {}
             subscribeToMessages(state.caseId);
             navigate('buddy-case');
             break;
@@ -9129,6 +9435,11 @@ function renderVaccineDueAlerts(vaccines) {
             await loadTimeline(state.caseId);
             await loadTouchpoints(state.caseId);
             await loadAppointments(state.caseId);
+            try { if (state.currentCase?.pets?.id) await loadPetMedications(state.currentCase.pets.id); } catch(_) {}
+            try { if (state.currentCase?.pets?.id) await loadPetVitals(state.currentCase.pets.id); } catch(_) {}
+            try { if (state.currentCase?.pets?.id) await loadPetVaccines(state.currentCase.pets.id); } catch(_) {}
+            try { if (state.currentCase?.pet_id) await loadPetCoOwners(state.currentCase.pet_id); } catch(_) {}
+            try { await loadCaseNotes(state.caseId); } catch(_) {}
             subscribeToMessages(state.caseId);
             navigate('admin-cases');
             break;
@@ -9158,7 +9469,7 @@ function renderVaccineDueAlerts(vaccines) {
             } else {
               state.appointments = [];
             }
-            navigate('admin-schedule'); // reuses admin schedule view
+            navigate('buddy-schedule');
             break;
           }
           case 'nav-admin-schedule': {
@@ -9173,7 +9484,7 @@ function renderVaccineDueAlerts(vaccines) {
             break;
           case 'nav-admin-resources':
             await loadResources();
-            navigate('admin-resources');
+            navigate(state.profile?.role === 'vet_buddy' ? 'buddy-resources' : 'admin-resources');
             break;
           case 'nav-external-dashboard':
             await loadCases();
@@ -9240,6 +9551,25 @@ function renderVaccineDueAlerts(vaccines) {
             state.caseId = null;
             render();
             break;
+          case 'toggle-case-sidebar':
+            state.caseSidebarCollapsed = !state.caseSidebarCollapsed;
+            try { localStorage.setItem('vb_case_sidebar_collapsed', state.caseSidebarCollapsed ? '1' : '0'); } catch(e) {}
+            render();
+            break;
+          case 'toggle-buddy-cases-collapse': {
+            const isMobile = typeof window !== 'undefined' && window.innerWidth < 768;
+            const cur = state.buddyCasesCollapsed === undefined ? isMobile : state.buddyCasesCollapsed;
+            state.buddyCasesCollapsed = !cur;
+            render();
+            break;
+          }
+          case 'toggle-admin-recent-cases-collapse': {
+            const isMobile = typeof window !== 'undefined' && window.innerWidth < 768;
+            const cur = state.adminRecentCasesCollapsed === undefined ? isMobile : state.adminRecentCasesCollapsed;
+            state.adminRecentCasesCollapsed = !cur;
+            render();
+            break;
+          }
           case 'select-case':
             state.caseId = target.dataset.caseId;
             state.caseTab = 'careplan';
@@ -9257,6 +9587,14 @@ function renderVaccineDueAlerts(vaccines) {
             try { await loadDocuments(state.caseId); } catch(e) { console.error('loadDocuments failed:', e); }
             try { await loadGeneticInsights(state.caseId); } catch(e) { console.error('loadGeneticInsights failed:', e); }
             try { if (state.currentCase?.pet_id) await loadPetCoOwners(state.currentCase.pet_id); } catch(e) { console.error('loadPetCoOwners failed:', e); }
+            // Health Record (always-visible care plan section): load meds, vitals, vaccines eagerly
+            try { if (state.currentCase?.pets?.id) await loadPetMedications(state.currentCase.pets.id); } catch(e) { console.error('loadPetMedications failed:', e); }
+            try { if (state.currentCase?.pets?.id) await loadPetVitals(state.currentCase.pets.id); } catch(e) { console.error('loadPetVitals failed:', e); }
+            try { if (state.currentCase?.pets?.id) await loadPetVaccines(state.currentCase.pets.id); } catch(e) { console.error('loadPetVaccines failed:', e); }
+            // Internal Notes inline (staff only): pull case_notes feed
+            try { if (state.caseId && ['vet_buddy', 'admin', 'practice_manager', 'external_vet'].includes(state.profile?.role)) await loadCaseNotes(state.caseId); } catch(e) { console.error('loadCaseNotes failed:', e); }
+            // Auto-retry any AI extractions that were queued during a credit outage — fire and forget
+            retryPendingExtractions(state.caseId).catch(e => console.warn('retryPendingExtractions failed:', e));
             subscribeToMessages(state.caseId);
             logAudit('view', 'case', state.caseId, { pet: state.currentCase?.pets?.name });
             render();
@@ -9585,6 +9923,18 @@ function renderVaccineDueAlerts(vaccines) {
             state.showAddLogEntry = !state.showAddLogEntry;
             render();
             break;
+          case 'set-engagement-filter':
+            state.engagementFilter = target.dataset.filter || 'all';
+            render();
+            break;
+          case 'scroll-to-section': {
+            const sectionId = target.dataset.section;
+            if (sectionId) {
+              const el = document.getElementById('section-' + sectionId);
+              if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+            }
+            break;
+          }
           case 'save-log-entry': {
             const entryText = document.querySelector('[data-field="log-entry-text"]')?.value.trim();
             if (!entryText) { showToast('Please enter a log entry', 'error'); break; }
@@ -9983,19 +10333,13 @@ function renderVaccineDueAlerts(vaccines) {
             state.aiCheckedItems = {};
             render();
             break;
-          case 'ai-analyze-doc': {
+          case 'ai-analyze-doc':
+          case 'retry-ai-extraction': {
             const docId = target.dataset.docId;
             const doc = (state.documents || []).find(d => d.id === docId);
             if (!doc || !state.caseId) break;
-            state.aiExtractionInProgress = true;
-            render();
-            try {
-              await triggerAiExtraction(doc, state.caseId);
-            } catch (err) {
-              showToast('AI analysis failed: ' + (err.message || 'Error'), 'error');
-              state.aiExtractionInProgress = false;
-              render();
-            }
+            // Queue-aware runner — handles credit-low gracefully and updates the doc's status
+            runAiExtraction(doc, state.caseId, { openReviewModal: true, showToasts: true, isRetry: true });
             break;
           }
           case 'refresh-care-plan-from-activity': {
@@ -10324,14 +10668,9 @@ function renderVaccineDueAlerts(vaccines) {
             break;
           }
 
-          // CASE TAB: lazy-load new tabs
+          // CASE TAB: lazy-load surviving tabs
           case 'switch-case-tab':
             state.caseTab = target.dataset.tab;
-            if (state.caseTab === 'files' && state.caseId) await loadDocuments(state.caseId);
-            if (state.caseTab === 'medications' && state.currentCase?.pets?.id) await loadPetMedications(state.currentCase.pets.id);
-            if (state.caseTab === 'vitals' && state.currentCase?.pets?.id) await loadPetVitals(state.currentCase.pets.id);
-            if (state.caseTab === 'vaccines' && state.currentCase?.pets?.id) await loadPetVaccines(state.currentCase.pets.id);
-            if (state.caseTab === 'notes' && state.caseId) await loadCaseNotes(state.caseId);
             if (state.caseTab === 'touchpoints' && state.caseId) await loadTouchpoints(state.caseId);
             render();
             if (state.caseTab === 'messages') scrollMessagesToBottom();
@@ -10847,6 +11186,7 @@ function renderVaccineDueAlerts(vaccines) {
             const { error: upErr } = await sb.storage.from('case-files').upload(path, file, { upsert: false });
             if (upErr) throw upErr;
             const { data: urlData } = await sb.storage.from('case-files').createSignedUrl(path, 60 * 60 * 24 * 365); // 1-year signed URL for document vault
+            const isAiCandidate = AI_SUPPORTED_TYPES.includes(file.type);
             await sb.from('case_documents').insert({
               case_id: state.caseId,
               name: file.name,
@@ -10856,6 +11196,7 @@ function renderVaccineDueAlerts(vaccines) {
               mime_type: file.type,
               file_type: fileType,
               uploaded_by: state.profile.id,
+              ai_extraction_status: isAiCandidate ? 'pending' : null,
             });
             if (fileTypeSelect) fileTypeSelect.value = '';
             await loadDocuments(state.caseId);
@@ -10870,26 +11211,18 @@ function renderVaccineDueAlerts(vaccines) {
                 petId ? loadPetMedications(petId) : Promise.resolve(),
                 petId ? loadPetVaccines(petId) : Promise.resolve(),
               ]);
-              state.caseTab = 'files';
+              // Documents now lives inline in the Care Plan body — clear any tab and queue a scroll-to
+              state.caseTab = null;
+              state._scrollToSection = 'documents';
               navigate('client-case');
             }
 
-            // Trigger AI extraction for supported file types
-            if (AI_SUPPORTED_TYPES.includes(file.type)) {
-              showToast('File uploaded! Analyzing medical record with AI...', 'success');
-              state.aiExtractionInProgress = true;
-              render();
-              try {
-                const insertedDoc = state.documents.find(d => d.name === file.name);
-                if (insertedDoc) {
-                  await triggerAiExtraction(insertedDoc, state.caseId);
-                }
-              } catch (aiErr) {
-                console.warn('AI extraction failed:', aiErr);
-                const detail = (aiErr && aiErr.message) ? String(aiErr.message) : String(aiErr);
-                showToast('AI analysis failed: ' + detail.slice(0, 240), 'error');
-                state.aiExtractionInProgress = false;
-                render();
+            // Queue AI extraction for supported file types — never blocks UI, never errors out
+            if (isAiCandidate) {
+              showToast('File uploaded! AI analysis queued.', 'success');
+              const insertedDoc = (state.documents || []).find(d => d.name === file.name);
+              if (insertedDoc) {
+                runAiExtraction(insertedDoc, state.caseId, { openReviewModal: true, showToasts: true });
               }
             } else {
               showToast('File uploaded! 📁', 'success');
