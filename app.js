@@ -155,7 +155,7 @@
       if (params.caseId) state.caseId = params.caseId;
       if (params.caseTab) {
         // Back-compat: tabs that were folded into Care Plan sections become section scrolls.
-        const TAB_TO_SECTION = { careplan: null, files: 'documents', medications: 'health-record', vitals: 'health-record', vaccines: 'health-record', timeline: 'engagement', team: 'people', 'co-owners': 'people', notes: 'internal-notes' };
+        const TAB_TO_SECTION = { careplan: null, files: 'documents', medications: 'health-record', vitals: 'health-record', vaccines: 'health-record', timeline: 'engagement', team: 'people', 'co-owners': 'people', notes: 'internal-notes', messages: 'messages' };
         if (Object.prototype.hasOwnProperty.call(TAB_TO_SECTION, params.caseTab)) {
           state.caseTab = null;
           const section = TAB_TO_SECTION[params.caseTab];
@@ -1716,6 +1716,30 @@
       }
     }
 
+    // Attachment URLs are stored as 7-day signed URLs at send time. Anything older
+    // than ~5 days is at risk of being expired by the time the user clicks it (and
+    // anything older than 7 days definitely is). Re-sign at load time by parsing
+    // the path back out of the stored URL — no schema migration needed.
+    function _extractStoragePath(signedUrl, bucket) {
+      if (!signedUrl) return null;
+      // Format: https://<proj>.supabase.co/storage/v1/object/sign/<bucket>/<path>?token=...
+      const m = signedUrl.match(new RegExp('/storage/v1/object/sign/' + bucket + '/([^?]+)'));
+      return m ? decodeURIComponent(m[1]) : null;
+    }
+    async function _refreshMessageAttachments(messages) {
+      const fiveDaysAgoMs = Date.now() - 5 * 24 * 60 * 60 * 1000;
+      const stale = messages.filter(m => m.attachment_url && new Date(m.created_at).getTime() < fiveDaysAgoMs);
+      if (stale.length === 0) return;
+      await Promise.all(stale.map(async (m) => {
+        const path = _extractStoragePath(m.attachment_url, 'case-files');
+        if (!path) return;
+        try {
+          const { data, error } = await sb.storage.from('case-files').createSignedUrl(path, 60 * 60 * 24 * 7);
+          if (!error && data?.signedUrl) m.attachment_url = data.signedUrl;
+        } catch (_) { /* best effort */ }
+      }));
+    }
+
     async function loadMessages(caseId) {
       try {
         const { data, error } = await sb.from('messages').select(`
@@ -1726,6 +1750,7 @@
         `).eq('case_id', caseId).order('created_at', { ascending: true });
         if (error) throw error;
         state.messages = data || [];
+        await _refreshMessageAttachments(state.messages);
 
         // Only auto-mark as read for clients viewing staff messages.
         // Staff messages stay unread until responded to — viewing alone does not mark read.
@@ -2111,6 +2136,25 @@ async function saveSurvey(caseId, buddyId, rating, feedback) {
   }
 }
 
+// Calls public.buddy_get_owner_checkins(p_owner_user_id) — returns ratings only
+// (sleep/eating/movement). The RPC enforces:
+//   - users.share_checkins_with_buddy = true on the owner
+//   - admin OR vet_buddy assigned to a case for one of the owner's pets
+// Limit 8 most recent. Privacy fields (reflection, generated_summary) are NOT returned.
+async function loadSharedOwnerCheckins(ownerUserId) {
+  if (!ownerUserId) { state.sharedOwnerCheckins = []; return []; }
+  try {
+    const { data, error } = await sb.rpc('buddy_get_owner_checkins', { p_owner_user_id: ownerUserId });
+    if (error) throw error;
+    state.sharedOwnerCheckins = data || [];
+    return state.sharedOwnerCheckins;
+  } catch (err) {
+    console.warn('loadSharedOwnerCheckins:', err);
+    state.sharedOwnerCheckins = [];
+    return [];
+  }
+}
+
 async function loadHandoffNotes(caseId) {
   try {
     const { data, error } = await sb
@@ -2124,10 +2168,12 @@ async function loadHandoffNotes(caseId) {
       .order('created_at', { ascending: false });
 
     if (error) throw error;
-    return data || [];
+    state.handoffNotes = data || [];
+    return state.handoffNotes;
   } catch (err) {
     console.error('Error loading handoff notes:', err);
     showToast('Failed to load handoff notes', 'error');
+    state.handoffNotes = [];
     return [];
   }
 }
@@ -4361,7 +4407,14 @@ async function calculateBuddyScorecard(buddyId) {
       }
 
       // Cases list collapses on mobile by default so the agenda + earnings + reminders
-      // stay visible without scrolling. Toggle persists in state for the session.
+      // stay visible without scrolling. Toggle persists in localStorage so reloads keep
+      // the buddy's choice (matches the case-view sidebar collapse pattern).
+      if (state.buddyCasesCollapsed === undefined) {
+        try {
+          const stored = localStorage.getItem('vb_buddy_cases_collapsed');
+          if (stored !== null) state.buddyCasesCollapsed = stored === '1';
+        } catch (e) { /* ignore */ }
+      }
       const buddyCasesCollapsed = state.buddyCasesCollapsed === undefined
         ? (typeof window !== 'undefined' && window.innerWidth < 768)
         : state.buddyCasesCollapsed;
@@ -4500,17 +4553,18 @@ async function calculateBuddyScorecard(buddyId) {
         </div>
       </div>`;
 
-      // Tabs — clients see simplified tabs; staff see all
+      // Tabs — clients see simplified tabs; staff see all.
+      // Messages is no longer a tab — it lives at the top of the Care Plan body.
       const isClient = state.profile.role === 'client';
       let tabs;
       if (isClient) {
-        // Care Plan body holds Documents/Health Record/People/etc. inline
-        tabs = ['messages', 'appointments'];
+        // Care Plan body holds Conversation/Documents/Health Record/People/etc. inline
+        tabs = ['appointments'];
       } else {
-        tabs = ['messages', 'touchpoints', 'appointments'];
+        tabs = ['touchpoints', 'appointments'];
       }
       html += '<div class="tabs">';
-      const labels = { messages: 'Messages', touchpoints: 'Check-ins', appointments: 'Appointments' };
+      const labels = { touchpoints: 'Check-ins', appointments: 'Appointments' };
       for (const tab of tabs) {
         html += `<button class="tab-button ${state.caseTab === tab ? 'active' : ''}" data-action="switch-case-tab" data-tab="${tab}">${labels[tab]}</button>`;
       }
@@ -4540,11 +4594,10 @@ async function calculateBuddyScorecard(buddyId) {
         </div>`;
       }
 
-      // Care Plan body — always visible primary surface
+      // Care Plan body — always visible primary surface (now leads with Conversation)
       html += renderCarePlanBody();
 
       // Tab contents (secondary surfaces — only one shows at a time based on state.caseTab)
-      html += renderMessagesTab();
       html += renderTouchpointsTab();
       html += renderAppointmentsTab();
 
@@ -4563,6 +4616,16 @@ async function calculateBuddyScorecard(buddyId) {
       const petName = state.currentCase?.pets?.name || 'your pet';
       const completenessScore = Math.max(0, Math.min(100, Number(state.carePlan?.completeness_score) || 0));
       let html = `<div class="care-plan-body">`;
+
+      // ── Section: Conversation (front-and-center; folded in from the old Messages tab) ──
+      html += `<div id="section-messages" class="care-plan-section" style="border-left:4px solid var(--primary);margin-bottom:16px;">
+        <div class="section-title" style="display:flex;justify-content:space-between;align-items:center;">
+          <span>💬 Conversation</span>
+        </div>
+        <div class="section-content">
+          ${renderMessagesTab()}
+        </div>
+      </div>`;
 
       // Profile completeness progress bar (owner-facing, shown to all roles)
       {
@@ -4921,6 +4984,48 @@ async function calculateBuddyScorecard(buddyId) {
         </div>
       </div>`;
 
+      // ── Section: Owner Wellness Check-ins (staff-only; opt-in via users.share_checkins_with_buddy) ──
+      if (canEdit) {
+        const checkins = state.sharedOwnerCheckins || [];
+        const ownerName = state.currentCase?.pets?.owner?.name || 'the owner';
+        html += `<div id="section-owner-checkins" class="care-plan-section" style="border-left:4px solid #9b59b6;margin-bottom:16px;">
+          <div class="section-title" style="display:flex;justify-content:space-between;align-items:center;">
+            <span>💜 Owner Wellness (shared)</span>
+            <span style="font-size:11px;color:var(--text-secondary);font-weight:400;">ratings only — reflections stay private</span>
+          </div>
+          <div class="section-content">`;
+        if (checkins.length === 0) {
+          html += `<div style="font-size:13px;color:var(--text-secondary);">${esc(ownerName)} hasn't opted to share their wellness check-ins, or hasn't logged any yet.</div>`;
+        } else {
+          const ratingDots = (n) => {
+            const v = Math.max(0, Math.min(5, parseInt(n, 10) || 0));
+            return '●'.repeat(v) + '○'.repeat(5 - v);
+          };
+          html += `<div style="font-size:12px;color:var(--text-secondary);margin-bottom:8px;">Last ${checkins.length} check-in${checkins.length === 1 ? '' : 's'} from ${esc(ownerName)}.</div>`;
+          for (const c of checkins) {
+            html += `<div style="display:flex;align-items:center;gap:14px;padding:8px 10px;border-bottom:1px solid var(--border);font-size:13px;">
+              <div style="min-width:120px;color:var(--text-secondary);font-size:12px;">${formatDate(c.submitted_at)}</div>
+              <div title="Sleep">😴 <span style="font-family:monospace;letter-spacing:1px;">${ratingDots(c.sleep_rating)}</span></div>
+              <div title="Eating">🍽️ <span style="font-family:monospace;letter-spacing:1px;">${ratingDots(c.eating_rating)}</span></div>
+              <div title="Movement">🚶 <span style="font-family:monospace;letter-spacing:1px;">${ratingDots(c.movement_rating)}</span></div>
+            </div>`;
+          }
+        }
+        html += `</div></div>`;
+      }
+
+      // ── Section: Handoff Notes (staff-only; for buddy-to-buddy transitions) ──
+      if (canEdit) {
+        html += `<div id="section-handoff-notes" class="care-plan-section" style="border-left:4px solid #6a1b9a;margin-bottom:16px;">
+          <div class="section-title" style="display:flex;justify-content:space-between;align-items:center;">
+            <span>🤝 Handoff Notes</span>
+          </div>
+          <div class="section-content">
+            ${renderHandoffNotesTab()}
+          </div>
+        </div>`;
+      }
+
       // ── Section 5: Milestones & Wins ──
       html += `<div id="section-wins" class="care-plan-section" style="border-left:4px solid var(--amber);margin-bottom:16px;background:linear-gradient(135deg,#fffde7 0%,#fff8e1 100%);border-radius:8px;padding:16px;">
         <div class="section-title" style="display:flex;justify-content:space-between;align-items:center;">
@@ -5037,11 +5142,10 @@ async function calculateBuddyScorecard(buddyId) {
     }
 
     function renderMessagesTab() {
-      const isVisible = state.caseTab === 'messages';
       const isStaff = ['vet_buddy', 'admin', 'external_vet', 'practice_manager'].includes(state.profile.role);
       const isBuddy = state.profile.role === 'vet_buddy';
       const canMessage = ['client', 'vet_buddy', 'admin', 'external_vet'].includes(state.profile.role);
-      let html = `<div class="tab-content ${isVisible ? 'active' : ''}">`;
+      let html = `<div>`;
 
       // Thread switcher — staff can toggle between client thread and internal staff thread
       if (isStaff && state.currentCase?.assigned_buddy_id) {
@@ -5921,20 +6025,19 @@ async function calculateBuddyScorecard(buddyId) {
           </div>
         `;
 
-        // ── Tabs (Care Plan renders as the page body, not as a tab) ──
-        const adminCaseTabs = ['messages', 'touchpoints', 'appointments'];
-        const adminCaseLabels = { messages: 'Messages', touchpoints: 'Check-ins', appointments: 'Appointments' };
+        // ── Tabs (Care Plan renders as the page body; Conversation lives at the top of it) ──
+        const adminCaseTabs = ['touchpoints', 'appointments'];
+        const adminCaseLabels = { touchpoints: 'Check-ins', appointments: 'Appointments' };
         html += '<div class="tabs">';
         for (const tab of adminCaseTabs) {
           html += `<button class="tab-button ${state.caseTab === tab ? 'active' : ''}" data-action="switch-case-tab" data-tab="${tab}">${adminCaseLabels[tab]}</button>`;
         }
         html += '</div>';
 
-        // Care Plan body — always visible primary surface
+        // Care Plan body — always visible primary surface (now leads with Conversation)
         html += renderCarePlanBody();
 
         // Tab contents (secondary surfaces — only one shows at a time based on state.caseTab)
-        html += renderMessagesTab();
         html += renderTouchpointsTab();
         html += renderAppointmentsTab();
       }
@@ -6159,7 +6262,7 @@ async function calculateBuddyScorecard(buddyId) {
 
     function renderAdminAnalytics() {
       const d = state.analyticsData;
-      if (!d) return renderLayout('<div class="empty-state"><div class="empty-state-text">Getting your care plan ready…</div></div>');
+      if (!d) return renderLayout('<div class="empty-state"><div class="empty-state-text">Crunching analytics…</div></div>');
 
       // Build signup trend (last 30 signups bucketed by week)
       const weekBuckets = {};
@@ -6435,7 +6538,7 @@ async function calculateBuddyScorecard(buddyId) {
           <div style="font-size:20px;font-weight:700;">Schedule</div>
           <div style="font-size:13px;color:var(--text-secondary);margin-top:2px;">Week of ${monthNames[today.getMonth()]} ${today.getDate()}, ${today.getFullYear()}</div>
         </div>
-        <button class="btn btn-primary btn-small" data-action="new-appointment">+ New Appointment</button>
+        ${state.profile?.role === 'admin' ? '<button class="btn btn-primary btn-small" data-action="new-appointment">+ New Appointment</button>' : ''}
       </div>`;
 
       // Weekly grid
@@ -6581,6 +6684,17 @@ async function calculateBuddyScorecard(buddyId) {
           </div>
         </div>
         ${state.profile.role === 'client' ? `
+        <div class="card" style="max-width: 520px; margin-top: 24px;">
+          <div class="card-title" style="margin-bottom: 8px;">Privacy & Sharing</div>
+          <p style="font-size: 13px; color: var(--text-secondary); margin-bottom: 12px;">Control what your Vet Buddy can see from your wellness check-ins.</p>
+          <label style="display:flex; align-items:flex-start; gap:10px; padding:10px; background:var(--bg); border-radius:8px; cursor:pointer;">
+            <input type="checkbox" data-action="toggle-share-checkins" ${state.profile.share_checkins_with_buddy ? 'checked' : ''} style="margin-top:3px;">
+            <div>
+              <div style="font-weight:600; font-size:14px; color:#336026;">Share check-in ratings with my Buddy</div>
+              <div style="font-size:12px; color:var(--text-secondary); margin-top:2px;">Your Buddy will see your sleep / eating / movement ratings (last 8). Your written reflections and AI summaries always stay private.</div>
+            </div>
+          </label>
+        </div>
         <div class="card" style="max-width: 520px; margin-top: 24px; border: 1px solid var(--red);">
           <div class="card-title" style="color: var(--red); margin-bottom: 12px;">Danger Zone</div>
           <p style="font-size: 13px; color: var(--text-secondary); margin-bottom: 16px;">Permanently delete your account and all associated data. This action cannot be undone. Your pets, care plans, messages, and documents will be removed.</p>
@@ -7036,8 +7150,9 @@ async function calculateBuddyScorecard(buddyId) {
         `);
       }
 
-      const activeCases = state.cases.filter(c => c.status !== 'closed');
-      const closedCases = state.cases.filter(c => c.status === 'closed');
+      // cases.status CHECK constraint: 'Active' | 'Needs Attention' | 'Inactive' (no 'closed').
+      const activeCases = state.cases.filter(c => c.status !== 'Inactive');
+      const closedCases = state.cases.filter(c => c.status === 'Inactive');
       const upcomingAppts = state.appointments?.filter(a => a.status !== 'cancelled' && new Date(a.scheduled_at) > new Date()).sort((a, b) => new Date(a.scheduled_at) - new Date(b.scheduled_at)).slice(0, 5) || [];
 
       let html = '<div style="padding:24px;">';
@@ -7081,7 +7196,7 @@ async function calculateBuddyScorecard(buddyId) {
       for (const c of state.cases) {
         const pet = c.pets || {};
         const emoji = SPECIES_EMOJI[pet.species?.toLowerCase()] || '🐾';
-        const statusColor = c.status === 'active' ? 'var(--green)' : c.status === 'closed' ? '#999' : 'var(--amber)';
+        const statusColor = c.status === 'Active' ? 'var(--green)' : c.status === 'Inactive' ? '#999' : 'var(--amber)';
         html += `
           <div class="card" style="cursor:pointer;padding:16px;" data-action="nav-external-case" data-case-id="${c.id}">
             <div style="display:flex;gap:12px;margin-bottom:12px;">
@@ -7572,11 +7687,15 @@ function renderClientSurveyView() {
 }
 
 function renderHandoffNotesTab() {
-  const handoffs = state.currentCase?.handoffs || [];
+  // Reads state.handoffNotes (set by loadHandoffNotes). The save-handoff handler
+  // expects [data-field=...] selectors and infers from_buddy_id from state.profile.id,
+  // so the form here only asks for the receiving Buddy.
+  const handoffs = state.handoffNotes || [];
   const showForm = state.showHandoffForm || false;
+  const otherBuddies = (state.teamMembers || []).filter(m => m.role === 'vet_buddy' && m.id !== state.profile?.id);
 
   const handoffCardsHtml = handoffs.length > 0 ? handoffs.map(handoff => `
-    <div class="card" style="padding: 16px; border-left: 4px solid var(--primary);">
+    <div class="card" style="padding: 16px; border-left: 4px solid var(--primary); margin-bottom: 8px;">
       <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px;">
         <div style="display: flex; align-items: center; gap: 12px; flex: 1;">
           <span style="font-weight: 600; color: #336026;">${esc(handoff.from_buddy?.name || 'Unknown')}</span>
@@ -7601,7 +7720,7 @@ function renderHandoffNotesTab() {
         </div>
         <div style="grid-column: 1 / -1;">
           <div style="font-weight: 600; font-size: 12px; color: var(--text-secondary); margin-bottom: 6px;">Notes</div>
-          <div style="font-size: 13px; color: #336026; line-height: 1.4;">${esc(handoff.notes || 'No additional notes')}</div>
+          <div style="font-size: 13px; color: #336026; line-height: 1.4;">${esc(handoff.additional_notes || 'No additional notes')}</div>
         </div>
       </div>
     </div>
@@ -7609,59 +7728,45 @@ function renderHandoffNotesTab() {
 
   const formHtml = showForm ? `
     <div class="card" style="padding: 16px; border: 2px solid var(--primary); margin-bottom: 16px;">
-      <h3 style="font-weight: 600; margin-bottom: 12px; color: #336026;">Create New Handoff</h3>
-      <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 12px;">
-        <div>
-          <label style="font-weight: 500; font-size: 12px; color: var(--text-secondary); display: block; margin-bottom: 4px;">From Buddy</label>
-          <select id="handoff-from" style="width: 100%; padding: 8px; border: 1px solid var(--border); border-radius: 6px; font-size: 13px;">
-            <option>Select buddy</option>
-            ${(state.teamMembers || []).filter(m => m.role === 'vet_buddy').map(m => `<option value="${m.id}">${esc(m.name)}</option>`).join('')}
-          </select>
-        </div>
-        <div>
-          <label style="font-weight: 500; font-size: 12px; color: var(--text-secondary); display: block; margin-bottom: 4px;">To Buddy</label>
-          <select id="handoff-to" style="width: 100%; padding: 8px; border: 1px solid var(--border); border-radius: 6px; font-size: 13px;">
-            <option>Select buddy</option>
-            ${(state.teamMembers || []).filter(m => m.role === 'vet_buddy').map(m => `<option value="${m.id}">${esc(m.name)}</option>`).join('')}
-          </select>
-        </div>
+      <h3 style="font-weight: 600; margin-bottom: 12px; color: #336026;">Create Handoff (from ${esc(state.profile?.name || 'me')})</h3>
+      <div style="margin-bottom: 12px;">
+        <label style="font-weight: 500; font-size: 12px; color: var(--text-secondary); display: block; margin-bottom: 4px;">Hand off to</label>
+        <select data-field="handoff-to-buddy" style="width: 100%; padding: 8px; border: 1px solid var(--border); border-radius: 6px; font-size: 13px;">
+          <option value="">Select receiving Buddy…</option>
+          ${otherBuddies.map(m => `<option value="${m.id}">${esc(m.name)}</option>`).join('')}
+        </select>
       </div>
       <div style="margin-bottom: 12px;">
         <label style="font-weight: 500; font-size: 12px; color: var(--text-secondary); display: block; margin-bottom: 4px;">Active Issues</label>
-        <textarea id="handoff-issues" placeholder="e.g., Ongoing infection concern, monitor closely" style="width: 100%; padding: 8px; border: 1px solid var(--border); border-radius: 6px; font-size: 13px; min-height: 60px; font-family: 'DM Sans', sans-serif;"></textarea>
+        <textarea data-field="handoff-active-issues" placeholder="e.g., Ongoing infection concern, monitor closely" style="width: 100%; padding: 8px; border: 1px solid var(--border); border-radius: 6px; font-size: 13px; min-height: 60px; font-family: 'DM Sans', sans-serif;"></textarea>
       </div>
       <div style="margin-bottom: 12px;">
         <label style="font-weight: 500; font-size: 12px; color: var(--text-secondary); display: block; margin-bottom: 4px;">Watch Items</label>
-        <textarea id="handoff-watch" placeholder="e.g., Monitor temperature daily for next week" style="width: 100%; padding: 8px; border: 1px solid var(--border); border-radius: 6px; font-size: 13px; min-height: 60px; font-family: 'DM Sans', sans-serif;"></textarea>
+        <textarea data-field="handoff-watch-items" placeholder="e.g., Monitor temperature daily for next week" style="width: 100%; padding: 8px; border: 1px solid var(--border); border-radius: 6px; font-size: 13px; min-height: 60px; font-family: 'DM Sans', sans-serif;"></textarea>
       </div>
       <div style="margin-bottom: 12px;">
         <label style="font-weight: 500; font-size: 12px; color: var(--text-secondary); display: block; margin-bottom: 4px;">Client Preferences</label>
-        <textarea id="handoff-prefs" placeholder="e.g., Prefers email updates, morning call times only" style="width: 100%; padding: 8px; border: 1px solid var(--border); border-radius: 6px; font-size: 13px; min-height: 60px; font-family: 'DM Sans', sans-serif;"></textarea>
+        <textarea data-field="handoff-client-prefs" placeholder="e.g., Prefers email updates, morning call times only" style="width: 100%; padding: 8px; border: 1px solid var(--border); border-radius: 6px; font-size: 13px; min-height: 60px; font-family: 'DM Sans', sans-serif;"></textarea>
       </div>
       <div style="margin-bottom: 12px;">
         <label style="font-weight: 500; font-size: 12px; color: var(--text-secondary); display: block; margin-bottom: 4px;">Additional Notes</label>
-        <textarea id="handoff-notes" placeholder="Any other important information..." style="width: 100%; padding: 8px; border: 1px solid var(--border); border-radius: 6px; font-size: 13px; min-height: 60px; font-family: 'DM Sans', sans-serif;"></textarea>
+        <textarea data-field="handoff-notes" placeholder="Any other important information..." style="width: 100%; padding: 8px; border: 1px solid var(--border); border-radius: 6px; font-size: 13px; min-height: 60px; font-family: 'DM Sans', sans-serif;"></textarea>
       </div>
       <div style="display: flex; gap: 8px;">
-        <button class="btn-primary" data-action="save-handoff">Save Handoff</button>
-        <button data-action="toggle-handoff-form" style="padding: 8px 16px; background: white; color: #336026; border: 1px solid var(--border); border-radius: 6px; cursor: pointer; font-weight: 500;">Cancel</button>
+        <button class="btn btn-primary btn-small" data-action="save-handoff">Save Handoff</button>
+        <button class="btn btn-secondary btn-small" data-action="toggle-handoff-form">Cancel</button>
       </div>
     </div>
   ` : `
-    <button class="btn-primary" data-action="toggle-handoff-form" style="margin-bottom: 16px;">+ Create Handoff</button>
+    <button class="btn btn-secondary btn-small" data-action="toggle-handoff-form" style="margin-bottom: 12px;">+ Create Handoff</button>
   `;
 
   return `
     <div>
-      <h3 style="font-weight: 600; color: #336026; margin-bottom: 16px;">Handoff Notes</h3>
       ${formHtml}
-      ${handoffCardsHtml || `
-        <div class="empty-state" style="padding: 32px;">
-          <div class="empty-state-icon">🤝</div>
-          <div class="empty-state-title">No handoffs yet</div>
-          <div class="empty-state-text">Create a handoff note when transitioning this case to another buddy.</div>
-        </div>
-      `}
+      ${handoffCardsHtml || (showForm ? '' : `
+        <div style="font-size:13px;color:var(--text-secondary);padding:8px 0;">No handoffs yet — create one when transitioning this case to another buddy.</div>
+      `)}
     </div>
   `;
 }
@@ -7740,7 +7845,11 @@ function renderReferralDashboard() {
 }
 
 function renderHealthTimeline() {
-  const pet = state.activePet;
+  // state.activePet isn't reliably set on direct nav; derive from the active case
+  // so the header always reflects the pet whose timeline entries are showing.
+  const pet = state.activePet
+    || (state.cases && state.cases[state.activePetIndex || 0]?.pets)
+    || state.currentCase?.pets;
   const entries = state.healthTimelineEntries || [];
 
   const entryColorMap = {
@@ -8267,17 +8376,19 @@ function render2FASetup() {
 
 function renderPartnerClinicDashboard() {
   const cases = state.cases || [];
-  const activeCases = cases.filter(c => c.status !== 'closed');
+  // cases.status CHECK: 'Active' | 'Needs Attention' | 'Inactive' (no 'closed').
+  const activeCases = cases.filter(c => c.status !== 'Inactive');
+  const needsAttention = cases.filter(c => c.status === 'Needs Attention');
   const stats = {
     sharedCases: cases.length,
     activeCases: activeCases.length,
-    pendingReviews: cases.filter(c => c.pending_review).length,
+    needsAttention: needsAttention.length,
   };
 
   // Case selector options for visit summary form
   const caseOptions = cases.map(c => {
     const pet = c.pets || {};
-    return `<option value="${c.id}">${esc(pet.name || 'Unknown')} — ${esc(c.client?.name || 'Unknown Client')}</option>`;
+    return `<option value="${c.id}">${esc(pet.name || 'Unknown')} — ${esc(pet.owner?.name || 'Unknown Client')}</option>`;
   }).join('');
 
   // Care plan display for currently selected case
@@ -8305,17 +8416,17 @@ function renderPartnerClinicDashboard() {
   const caseCardsHtml = cases.length > 0 ? cases.map(c => {
     const pet = c.pets || {};
     const emoji = SPECIES_EMOJI[pet.species?.toLowerCase()] || '🐾';
-    const statusColor = c.status === 'active' ? 'var(--green)' : c.status === 'closed' ? '#999' : 'var(--amber)';
+    const statusColor = c.status === 'Active' ? 'var(--green)' : c.status === 'Inactive' ? '#999' : 'var(--amber)';
     return `
       <div class="card" style="padding: 16px; cursor: pointer; transition: all 0.2s;" data-action="view-case-detail" data-case-id="${c.id}">
         <div style="display: flex; gap: 12px; margin-bottom: 12px;">
           ${renderPetPhoto(pet, 'thumb')}
           <div style="flex: 1;">
             <div style="font-weight: 600; color: #336026;">${emoji} ${esc(pet.name) || 'Unknown'}</div>
-            <div style="font-size: 12px; color: var(--text-secondary);">${esc(c.client?.name) || 'Unknown Client'}</div>
+            <div style="font-size: 12px; color: var(--text-secondary);">${esc(pet.owner?.name) || 'Unknown Client'}</div>
             <div style="font-size: 11px; color: var(--text-secondary); margin-top: 4px;"><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${statusColor};margin-right:4px;"></span>${esc(c.status) || 'Active'}</div>
           </div>
-          ${c.pending_review ? '<span style="background: var(--amber); color: white; font-size: 10px; font-weight: 700; padding: 4px 8px; border-radius: 4px;">Review Pending</span>' : ''}
+          ${c.status === 'Needs Attention' ? '<span style="background: var(--amber); color: white; font-size: 10px; font-weight: 700; padding: 4px 8px; border-radius: 4px;">Needs Attention</span>' : ''}
         </div>
       </div>
     `;
@@ -8341,8 +8452,8 @@ function renderPartnerClinicDashboard() {
           <div style="font-size: 28px; font-weight: 700; color: var(--green);">${stats.activeCases}</div>
         </div>
         <div class="card" style="padding: 16px; text-align: center;">
-          <div style="font-size: 12px; color: var(--text-secondary); font-weight: 600; margin-bottom: 8px;">Pending Reviews</div>
-          <div style="font-size: 28px; font-weight: 700; color: var(--amber);">${stats.pendingReviews}</div>
+          <div style="font-size: 12px; color: var(--text-secondary); font-weight: 600; margin-bottom: 8px;">Needs Attention</div>
+          <div style="font-size: 28px; font-weight: 700; color: var(--amber);">${stats.needsAttention}</div>
         </div>
       </div>
 
@@ -9487,7 +9598,15 @@ function renderVaccineDueAlerts(vaccines) {
               } else {
                 state.caseId = state.cases[state.activePetIndex || 0]?.id || state.cases[0].id;
               }
-              if (target.dataset.tab) state.caseTab = target.dataset.tab;
+              if (target.dataset.tab) {
+                // Messages folded into the Care Plan body — treat tab=messages as a section scroll.
+                if (target.dataset.tab === 'messages') {
+                  state.caseTab = 'careplan';
+                  state._scrollToSection = 'messages';
+                } else {
+                  state.caseTab = target.dataset.tab;
+                }
+              }
               if (target.dataset.section) state._scrollToSection = target.dataset.section;
               state.showAddAppt = false; state.editingApptId = null; state.showAddTimeline = false; state.showRaiseEscalation = false;
               // Load case first (needed for petId), then everything else in parallel
@@ -9761,6 +9880,9 @@ function renderVaccineDueAlerts(vaccines) {
             try { if (state.currentCase?.pets?.id) await loadPetVaccines(state.currentCase.pets.id); } catch(_) {}
             try { if (state.currentCase?.pet_id) await loadPetCoOwners(state.currentCase.pet_id); } catch(_) {}
             try { await loadCaseNotes(state.caseId); } catch(_) {}
+            try { await loadDocuments(state.caseId); } catch(_) {}
+            try { await loadHandoffNotes(state.caseId); } catch(_) {}
+            try { await loadSharedOwnerCheckins(state.currentCase?.pets?.owner_id); } catch(_) {}
             subscribeToMessages(state.caseId);
             navigate('buddy-case');
             break;
@@ -9925,6 +10047,7 @@ function renderVaccineDueAlerts(vaccines) {
             const isMobile = typeof window !== 'undefined' && window.innerWidth < 768;
             const cur = state.buddyCasesCollapsed === undefined ? isMobile : state.buddyCasesCollapsed;
             state.buddyCasesCollapsed = !cur;
+            try { localStorage.setItem('vb_buddy_cases_collapsed', state.buddyCasesCollapsed ? '1' : '0'); } catch (e) {}
             render();
             break;
           }
@@ -10041,7 +10164,8 @@ function renderVaccineDueAlerts(vaccines) {
             } catch(err) { showToast('Failed to update escalation', 'error'); }
             break;
           case 'escalation-resolve':
-            if (!['admin', 'vet_buddy'].includes(state.profile.role)) { showToast('Permission denied', 'error'); break; }
+            // RLS UPDATE on escalations is admin-only — gate matches that to avoid silent failures.
+            if (state.profile.role !== 'admin') { showToast('Permission denied', 'error'); break; }
             try {
               await sb.from('escalations').update({ status: 'resolved', resolved_by: state.profile.id, resolved_at: new Date().toISOString() }).eq('id', target.dataset.escalationId);
               await loadEscalations();
@@ -10396,6 +10520,21 @@ function renderVaccineDueAlerts(vaccines) {
             state.profile.avatar_color = target.dataset.color;
             render();
             break;
+          case 'toggle-share-checkins': {
+            const newValue = !state.profile.share_checkins_with_buddy;
+            try {
+              const { error } = await sb.from('users').update({ share_checkins_with_buddy: newValue }).eq('id', state.profile.id);
+              if (error) throw error;
+              state.profile.share_checkins_with_buddy = newValue;
+              showToast(newValue ? 'Sharing turned on — your Buddy can see your check-in ratings.' : 'Sharing turned off.', 'success');
+            } catch (err) {
+              console.error('toggle-share-checkins:', err);
+              showToast('Could not update sharing preference', 'error');
+              // revert the checkbox to actual state
+              if (target) target.checked = state.profile.share_checkins_with_buddy;
+            }
+            break;
+          }
           case 'initiate-transition': {
             state.showTransitionPanel = true;
             state.transitionBuddyId = target.dataset.memberId;
@@ -10987,16 +11126,26 @@ function renderVaccineDueAlerts(vaccines) {
           // ── NEW FEATURE HANDLERS ────────────────────────────
 
           // NAV: new pages
-          case 'nav-health-summary':
+          case 'nav-health-summary': {
+            // Derive a case if one isn't already loaded (clients landing here from
+            // a top-nav link won't have state.caseId set yet).
+            if (!state.caseId && state.cases?.length > 0) {
+              const fallbackCase = state.cases[state.activePetIndex || 0] || state.cases[0];
+              state.caseId = fallbackCase.id;
+              state.currentCase = fallbackCase;
+            }
             if (state.caseId) {
+              const pid = state.currentCase?.pets?.id;
               await Promise.all([
-                loadPetMedications(state.currentCase?.pets?.id),
-                loadPetVaccines(state.currentCase?.pets?.id),
+                pid ? loadPetMedications(pid) : Promise.resolve(),
+                pid ? loadPetVaccines(pid) : Promise.resolve(),
                 loadCarePlan(state.caseId),
+                loadAppointments(state.caseId),
               ]);
             }
             navigate('health-summary');
             break;
+          }
           case 'nav-referral':
             await ensureReferralCode();
             navigate('referral');

@@ -302,7 +302,7 @@
     .vbesc-fab-buddy:active { transform: scale(0.97); }
 
     .vbesc-fab-admin {
-      position: fixed; top: 12px; right: 16px; z-index: 9000;
+      position: fixed; bottom: 20px; right: 20px; z-index: 9000;
       background: #fff; border: 1px solid #ddd; border-radius: 999px;
       padding: 8px 14px 8px 10px; cursor: pointer; display: flex;
       align-items: center; gap: 8px; font-family: -apple-system, sans-serif;
