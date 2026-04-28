@@ -2,7 +2,7 @@
     // CONSTANTS & SUPABASE INIT
     // ============================================
     const { createClient } = window.supabase;
-    const sb = createClient(CONFIG.SUPABASE_URL, CONFIG.SUPABASE_KEY);
+    const sb = window.sb = createClient(CONFIG.SUPABASE_URL, CONFIG.SUPABASE_KEY);
 
     const VAPID_PUBLIC_KEY = CONFIG.VAPID_PUBLIC_KEY;
 
@@ -72,6 +72,11 @@
       resources: [],
       documents: [],
       showBroadcast: false,
+      broadcastDraft: { message: '', tier: 'all', schedule: '' },
+      ownerCheckin: null,
+      ownerCheckinForm: { sleep: 0, eating: 0, movement: 0, reflection: '' },
+      showOwnerCheckinForm: false,
+      ownerCheckinSubmitting: false,
       touchpoints: [],
       appointments: [],
       escalations: [],
@@ -1317,6 +1322,7 @@
                 loadPetCareProfile(firstCase.pets?.id),
                 loadTimeline(firstCase.id),
                 loadMessages(firstCase.id),
+                loadOwnerCheckin(),
               ]);
             }
             navigate('client-dashboard');
@@ -1786,6 +1792,23 @@
       } catch (err) {
         console.error(err);
         state.documents = [];
+      }
+    }
+
+    async function loadOwnerCheckin() {
+      if (state.profile?.role !== 'client' || !state.profile?.id) { state.ownerCheckin = null; return; }
+      try {
+        const { data, error } = await sb.from('owner_checkins')
+          .select('id, submitted_at, sleep_rating, eating_rating, movement_rating, reflection, generated_summary')
+          .eq('user_id', state.profile.id)
+          .order('submitted_at', { ascending: false })
+          .limit(1)
+          .maybeSingle();
+        if (error) throw error;
+        state.ownerCheckin = data || null;
+      } catch (err) {
+        console.error('loadOwnerCheckin failed:', err);
+        state.ownerCheckin = null;
       }
     }
 
@@ -2358,6 +2381,172 @@ async function generateCarePlanPDF(carePlan, currentCase) {
   }
 }
 
+async function generateVetVisitPDF(carePlan, currentCase, profile) {
+  const { jsPDF } = window;
+  if (!jsPDF) {
+    showToast('PDF library not loaded', 'error');
+    return null;
+  }
+
+  const doc = new jsPDF();
+  const pageWidth = doc.internal.pageSize.getWidth();
+  const pageHeight = doc.internal.pageSize.getHeight();
+  const margin = 20;
+  const contentWidth = pageWidth - 2 * margin;
+  let y = 20;
+
+  const ensureRoom = (needed) => {
+    if (y + needed > pageHeight - 20) {
+      doc.addPage();
+      y = 20;
+    }
+  };
+
+  const writeBlock = (text, opts = {}) => {
+    const fontSize = opts.size || 10;
+    const color = opts.color || 50;
+    const lineHeight = opts.lineHeight || 5;
+    doc.setFontSize(fontSize);
+    doc.setTextColor(color);
+    const lines = doc.splitTextToSize(text || '', contentWidth);
+    ensureRoom(lines.length * lineHeight + 4);
+    doc.text(lines, margin, y);
+    y += lines.length * lineHeight;
+  };
+
+  const heading = (text) => {
+    ensureRoom(14);
+    doc.setFontSize(13);
+    doc.setTextColor(51, 96, 38);
+    doc.text(text, margin, y);
+    y += 8;
+  };
+
+  const pet = currentCase?.pets || {};
+  const ownerName = profile?.name || pet.owner?.name || '';
+  const petName = pet.name || 'Pet';
+
+  doc.setFontSize(22);
+  doc.setTextColor(51, 96, 38);
+  doc.text('Vet Visit Prep', margin, y);
+  y += 9;
+  doc.setFontSize(10);
+  doc.setTextColor(120);
+  doc.text(`For ${petName} — ${new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' })}`, margin, y);
+  y += 12;
+
+  const petMeta = [
+    ['Pet', petName],
+    ['Species', pet.species || ''],
+    ['Breed', pet.breed || ''],
+    ['Date of birth', pet.dob || ''],
+    ['Weight', pet.weight || ''],
+    ['Owner', ownerName],
+  ].filter(([, v]) => v);
+  doc.setFontSize(10);
+  doc.setTextColor(50);
+  for (const [label, val] of petMeta) {
+    ensureRoom(6);
+    doc.setFont(undefined, 'bold');
+    doc.text(`${label}: `, margin, y);
+    const labelWidth = doc.getTextWidth(`${label}: `);
+    doc.setFont(undefined, 'normal');
+    doc.text(String(val), margin + labelWidth, y);
+    y += 5;
+  }
+  y += 6;
+
+  const lp = carePlan?.living_plan || null;
+  const cpRaw = carePlan || {};
+  const openQuestionsRaw = lp?.open_questions || cpRaw.open_questions || [];
+  const openQuestions = Array.isArray(openQuestionsRaw)
+    ? openQuestionsRaw.map(q => typeof q === 'string' ? q : (q?.question || q?.text || '')).filter(Boolean)
+    : (typeof openQuestionsRaw === 'string' ? [openQuestionsRaw] : []);
+
+  heading('Questions to ask the vet');
+  if (openQuestions.length === 0) {
+    writeBlock('No saved questions yet — write any here before you go.', { color: 130 });
+    for (let i = 0; i < 4; i++) {
+      ensureRoom(8);
+      doc.setDrawColor(180);
+      doc.line(margin, y + 2, pageWidth - margin, y + 2);
+      y += 8;
+    }
+  } else {
+    for (let i = 0; i < openQuestions.length; i++) {
+      writeBlock(`${i + 1}. ${openQuestions[i]}`, { size: 11, color: 30, lineHeight: 6 });
+      y += 2;
+    }
+  }
+  y += 6;
+
+  heading('Current concerns');
+  const concerns = [
+    ['Active diagnoses', lp?.diagnoses || cpRaw.diagnoses],
+    ['Allergies', lp?.allergies || cpRaw.allergies],
+    ['Diet notes', lp?.diet_notes || cpRaw.diet_notes],
+    ['Lifestyle notes', lp?.lifestyle_notes || cpRaw.lifestyle_notes],
+  ].filter(([, v]) => v && String(v).trim());
+  if (concerns.length === 0) {
+    writeBlock('No active concerns recorded.', { color: 130 });
+  } else {
+    for (const [label, val] of concerns) {
+      doc.setFontSize(10);
+      doc.setTextColor(80);
+      doc.setFont(undefined, 'bold');
+      ensureRoom(6);
+      doc.text(label, margin, y);
+      y += 5;
+      doc.setFont(undefined, 'normal');
+      writeBlock(String(val), { color: 50 });
+      y += 3;
+    }
+  }
+  y += 4;
+
+  heading('Current medications');
+  const medsText = lp?.medications
+    || (Array.isArray(cpRaw.medications)
+      ? cpRaw.medications.map(m => typeof m === 'string' ? m : (m?.name || '')).filter(Boolean).join('\n')
+      : cpRaw.medications);
+  if (medsText && String(medsText).trim()) {
+    writeBlock(String(medsText));
+  } else {
+    writeBlock('No medications recorded.', { color: 130 });
+  }
+  y += 4;
+
+  heading('Recent activity');
+  const lastSummary = lp?.last_appointment_summary || cpRaw.last_appointment_summary;
+  const lastAt = lp?.last_appointment_at || cpRaw.last_appointment_at;
+  if (lastSummary) {
+    if (lastAt) {
+      doc.setFontSize(9);
+      doc.setTextColor(120);
+      ensureRoom(6);
+      doc.text(`Last appointment: ${new Date(lastAt).toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' })}`, margin, y);
+      y += 5;
+    }
+    writeBlock(String(lastSummary));
+  } else {
+    writeBlock('No recent appointment summary on file.', { color: 130 });
+  }
+  y += 4;
+
+  const nextSteps = lp?.next_steps || cpRaw.next_steps;
+  if (nextSteps && String(nextSteps).trim()) {
+    heading('Next steps from the care team');
+    writeBlock(String(nextSteps));
+    y += 4;
+  }
+
+  doc.setFontSize(8);
+  doc.setTextColor(160);
+  doc.text(`Generated by Vet Buddies on ${new Date().toLocaleDateString()} — share with your vet during the visit.`, margin, pageHeight - 12);
+
+  return doc.output('blob');
+}
+
 function checkMedicationRefills(medications) {
   const today = new Date();
   const sevenDaysFromNow = new Date(today.getTime() + 7 * 24 * 60 * 60 * 1000);
@@ -2825,6 +3014,70 @@ async function calculateBuddyScorecard(buddyId) {
       `;
     }
 
+    function renderOwnerCheckinCard() {
+      const SCALE_WORDS = {
+        sleep: ['rough', 'patchy', 'okay', 'solid', 'deep'],
+        eating: ['skipping', 'light', 'okay', 'good', 'nourished'],
+        movement: ['still', 'barely', 'some', 'active', 'strong'],
+      };
+      const last = state.ownerCheckin;
+      const summaryFresh = last && last.generated_summary
+        && (Date.now() - new Date(last.submitted_at).getTime() < 6 * 24 * 60 * 60 * 1000);
+      const justSavedNoSummary = last && !last.generated_summary
+        && (Date.now() - new Date(last.submitted_at).getTime() < 5 * 60 * 1000);
+      const submitting = !!state.ownerCheckinSubmitting;
+      const showForm = !submitting && !justSavedNoSummary && (state.showOwnerCheckinForm || !summaryFresh);
+      const form = state.ownerCheckinForm || { sleep: 0, eating: 0, movement: 0, reflection: '' };
+
+      let html = `<div class="card" style="border-left:4px solid #689562;margin-bottom:16px;background:linear-gradient(135deg,#fafbfa 0%,#fff 100%);">
+        <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:6px;">
+          <div style="font-family:'Fraunces',serif;font-size:18px;font-weight:600;color:#336026;">How are you?</div>
+          ${last ? `<div style="font-size:11px;color:var(--text-secondary);">Last note ${formatDate(last.submitted_at)}</div>` : ''}
+        </div>
+        <div style="font-size:13px;color:var(--text-secondary);margin-bottom:14px;line-height:1.5;">A quiet check-in for you, not your pet. Private to you.</div>`;
+
+      if (submitting) {
+        html += `<div style="display:flex;align-items:center;gap:10px;padding:14px 16px;font-size:14px;color:var(--text-secondary);font-style:italic;">
+          <div class="ai-spinner" style="width:16px;height:16px;border:2px solid var(--border);border-top-color:#689562;border-radius:50%;animation:spin 1s linear infinite;flex-shrink:0;"></div>
+          Saved. Reflecting back…
+        </div>`;
+      } else if (justSavedNoSummary) {
+        html += `<div style="padding:14px 16px;font-size:14px;color:var(--text-secondary);">Thanks for checking in.</div>`;
+      } else if (!showForm && summaryFresh) {
+        html += `<div style="background:#f7faf7;border:1px solid var(--border);border-radius:10px;padding:14px 16px;font-size:14px;line-height:1.6;color:var(--text);white-space:pre-wrap;">${esc(last.generated_summary)}</div>
+          <div style="margin-top:10px;text-align:right;">
+            <button class="btn btn-secondary btn-small" data-action="toggle-owner-checkin-form" style="font-size:12px;">I want to add to this</button>
+          </div>`;
+      } else {
+        const ratingRow = (kind, label) => {
+          const words = SCALE_WORDS[kind];
+          const selected = form[kind];
+          let row = `<div style="margin-bottom:12px;">
+            <div style="font-size:13px;color:var(--text-secondary);margin-bottom:6px;">${label}</div>
+            <div style="display:flex;gap:6px;flex-wrap:wrap;">`;
+          for (let i = 1; i <= 5; i++) {
+            const isSelected = selected === i;
+            row += `<button class="btn btn-secondary btn-small" data-action="set-owner-checkin-rating" data-kind="${kind}" data-value="${i}" style="font-size:12px;${isSelected ? 'background:#689562;color:white;border-color:#689562;' : ''}">${words[i-1]}</button>`;
+          }
+          row += `</div></div>`;
+          return row;
+        };
+        html += ratingRow('sleep', 'Sleep this week');
+        html += ratingRow('eating', 'Eating');
+        html += ratingRow('movement', 'Moving around');
+        html += `<div class="form-group" style="margin-top:8px;margin-bottom:8px;">
+          <label style="font-size:13px;color:var(--text-secondary);">What's on your mind? (optional)</label>
+          <textarea data-field="owner-checkin-reflection" placeholder="Anything — a hard week, a steady stretch, something that's been on your mind…" style="width:100%;height:80px;">${esc(form.reflection || '')}</textarea>
+        </div>
+        <div style="display:flex;gap:10px;margin-top:8px;align-items:center;">
+          <button class="btn btn-primary btn-small" data-action="submit-owner-checkin">Send</button>
+          ${summaryFresh ? `<button class="btn btn-secondary btn-small" data-action="cancel-owner-checkin-form">Cancel</button>` : ''}
+        </div>`;
+      }
+      html += `</div>`;
+      return html;
+    }
+
     function renderClientDashboard() {
       if (state.cases.length === 0) {
         const subStatus = state.profile?.subscription_status;
@@ -3228,6 +3481,8 @@ async function calculateBuddyScorecard(buddyId) {
           </div>`).join('')}
         </div>` : ''}
 
+        ${renderOwnerCheckinCard()}
+
         <!-- ═══ Quick Actions ═══ -->
         ${hasCarePlan ? `
         <div class="card" style="border-left:4px solid var(--primary);margin-bottom:12px;cursor:pointer;" data-action="dashboard-upload-records" data-case-id="${petCase.id}">
@@ -3244,6 +3499,9 @@ async function calculateBuddyScorecard(buddyId) {
         <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(100px, 1fr));gap:10px;margin-bottom:16px;">
           <div class="card" style="padding:14px;text-align:center;cursor:pointer;" data-action="nav-client-case" data-case-id="${petCase.id}" data-tab="appointments">
             <div style="font-size:20px;margin-bottom:4px;">🗓️</div><div style="font-weight:500;font-size:12px;color:#336026;">Appointments</div>
+          </div>
+          <div class="card" style="padding:14px;text-align:center;cursor:pointer;" data-action="download-vet-visit-pdf" title="Print a one-page summary to bring to your vet">
+            <div style="font-size:20px;margin-bottom:4px;">🩺</div><div style="font-weight:500;font-size:12px;color:#336026;">Vet visit prep</div>
           </div>
           <div class="card" style="padding:14px;text-align:center;cursor:pointer;" data-action="nav-client-case" data-case-id="${petCase.id}" data-section="documents">
             <div style="font-size:20px;margin-bottom:4px;">📁</div><div style="font-weight:500;font-size:12px;color:#336026;">Files</div>
@@ -5166,25 +5424,42 @@ async function calculateBuddyScorecard(buddyId) {
     }
 
     function renderAdminDashboard() {
-      const broadcastModal = state.showBroadcast ? `
+      const broadcastModal = (() => {
+        if (!state.showBroadcast) return '';
+        const draft = state.broadcastDraft || { message: '', tier: 'all', schedule: '' };
+        const activeCases = state.cases.filter(c => c.status === 'Active');
+        const tierCounts = {
+          all: activeCases.length,
+          Buddy: activeCases.filter(c => c.subscription_tier === 'Buddy').length,
+          Trial: activeCases.filter(c => c.subscription_tier === 'Trial').length,
+        };
+        const tier = (draft.tier in tierCounts) ? draft.tier : 'all';
+        const n0 = tierCounts[tier];
+        const onTier = `var n=({all:${tierCounts.all},Buddy:${tierCounts.Buddy},Trial:${tierCounts.Trial}})[this.value]||0;document.getElementById('broadcast-recipient-count').textContent=n;document.getElementById('broadcast-send-button').textContent='Send to '+n+' client'+(n===1?'':'s')`;
+        const opt = (v, label) => `<option value="${v}"${tier === v ? ' selected' : ''}>${label} (${tierCounts[v]})</option>`;
+        return `
         <div class="broadcast-overlay" data-action="close-broadcast">
           <div class="broadcast-card" onclick="event.stopPropagation()">
             <div style="font-family:'Fraunces',serif; font-size:18px; font-weight:600; margin-bottom:16px;">📢 Broadcast Message</div>
-            <div class="form-group"><label>Message</label><textarea data-field="broadcast-message" placeholder="Write your message to all clients..." style="width:100%;height:100px;"></textarea></div>
-            <div class="form-group"><label>Schedule (optional — leave blank to send now)</label><input type="datetime-local" data-field="broadcast-schedule" style="width:100%;"></div>
+            <div class="form-group"><label>Message</label><textarea data-field="broadcast-message" placeholder="Write your message to all clients..." style="width:100%;height:100px;">${esc(draft.message)}</textarea></div>
+            <div class="form-group"><label>Schedule (optional — leave blank to send now)</label><input type="datetime-local" data-field="broadcast-schedule" value="${esc(draft.schedule)}" style="width:100%;"></div>
             <div class="form-group"><label>Send to</label>
-              <select data-field="broadcast-tier" style="width:100%;">
-                <option value="all">All clients</option>
-                <option value="Buddy">Buddy tier only</option>
-                <option value="Trial">Free Trial only</option>
+              <select data-field="broadcast-tier" onchange="${onTier}" style="width:100%;">
+                ${opt('all', 'All active clients')}
+                ${opt('Buddy', 'Buddy tier only')}
+                ${opt('Trial', 'Free Trial only')}
               </select>
             </div>
+            <div style="font-size:12px;color:var(--text-secondary);margin-bottom:12px;">
+              Will be sent to <strong id="broadcast-recipient-count">${n0}</strong> active client${n0 === 1 ? '' : 's'}. Inactive cases are excluded.
+            </div>
             <div style="display:flex;gap:10px;margin-top:8px;">
-              <button class="btn btn-primary" data-action="send-broadcast" style="flex:1;">Send to All</button>
+              <button class="btn btn-primary" id="broadcast-send-button" data-action="send-broadcast" style="flex:1;">Send to ${n0} client${n0 === 1 ? '' : 's'}</button>
               <button class="btn btn-secondary" data-action="close-broadcast">Cancel</button>
             </div>
           </div>
-        </div>` : '';
+        </div>`;
+      })();
 
       const grantTrialModal = state.showGrantTrial ? `
         <div class="broadcast-overlay" data-action="close-grant-trial">
@@ -8647,13 +8922,32 @@ function renderVaccineDueAlerts(vaccines) {
         if (action === 'save-new-password') { var np=document.querySelector('[data-field="reset-new-password"]')?.value||'';var cp=document.querySelector('[data-field="reset-confirm-password"]')?.value||'';if(np.length<8){showToast('Password must be at least 8 characters','error');return;}if(np!==cp){showToast('Passwords do not match','error');return;}isPasswordPwned(np).then(function(pwned){if(pwned){showToast('This password has appeared in a known data breach. Please choose a different password.','error');return;}sb.auth.updateUser({password:np}).then(function(r){if(r.error)throw r.error;state._showPasswordReset=false;showToast('Password updated successfully!','success');render();}).catch(function(e){showToast(e.message||'Failed to update password','error');});});return; }
         if (action === 'download-ics') { var apt=state.appointments.find(function(a){return a.id===target.dataset.appointmentId;});if(apt){var ics=generateICS(apt,state.currentCase?.pets?.name||'Pet');var b=new Blob([ics],{type:'text/calendar'});var u=URL.createObjectURL(b);var dl=document.createElement('a');dl.href=u;dl.download='vet-buddies-appt.ics';dl.click();URL.revokeObjectURL(u);showToast('Calendar event downloaded!','success');}return; }
         if (action === 'export-care-plan-pdf') { if(state.carePlan&&state.currentCase){showToast('Generating PDF...','info');ensureJsPDF().then(function(){return generateCarePlanPDF(state.carePlan,state.currentCase);}).then(function(bu){var url=URL.createObjectURL(bu);var dl=document.createElement('a');dl.href=url;dl.download='care-plan-'+(state.currentCase.pets?.name||'pet')+'.pdf';dl.click();URL.revokeObjectURL(url);showToast('PDF downloaded!','success');}).catch(function(){showToast('PDF failed','error');});}return; }
+        if (action === 'download-vet-visit-pdf') {
+          if (!state.carePlan || !state.currentCase) { showToast('Care plan not loaded yet — try again in a moment', 'info'); return; }
+          showToast('Building vet visit prep…', 'info');
+          ensureJsPDF()
+            .then(() => generateVetVisitPDF(state.carePlan, state.currentCase, state.profile))
+            .then(blob => {
+              if (!blob) return;
+              const url = URL.createObjectURL(blob);
+              const dl = document.createElement('a');
+              dl.href = url;
+              const petSlug = (state.currentCase.pets?.name || 'pet').replace(/[^a-z0-9]+/gi, '-').toLowerCase();
+              dl.download = `${petSlug}-vet-visit-prep.pdf`;
+              dl.click();
+              URL.revokeObjectURL(url);
+              showToast('Ready — check your downloads', 'success');
+            })
+            .catch(err => { console.error(err); showToast('Could not build the PDF', 'error'); });
+          return;
+        }
         if (action === 'checkout-stripe') { var pid=target.dataset.priceId;if(!pid)return;showToast('Redirecting...','info');var origin=window.location.origin;var checkoutPayload={price_id:pid,success_url:origin+'/?billing=success',cancel_url:origin+'/'};if(isLTOActive()){checkoutPayload.lto_initiated_at=new Date().toISOString();checkoutPayload.lto_locked_rate=true;}callEdgeFunction('stripe-checkout',checkoutPayload).then(function(r){if(r?.url)window.location.href=r.url;}).catch(function(err){showToast(err.message||'Checkout failed','error');});return; }
         if (action === 'show-pricing') { state.showPricingModal=true;render();return; }
         if (action === 'close-pricing') { state.showPricingModal=false;render();return; }
         if (action === 'show-notif-settings') { state.showNotifSettings=true;state.showNotifications=false;render();return; }
         if (action === 'close-notif-settings') { state.showNotifSettings=false;render();return; }
         if (action === 'save-notif-settings') {
-          // Read all checkbox states from the modal
+          const prevPushEnabled = !!state.notificationSettings.push_enabled;
           document.querySelectorAll('.notif-toggle').forEach(function(el) {
             const setting = el.dataset.setting;
             if (setting) state.notificationSettings[setting] = el.checked;
@@ -8673,7 +8967,9 @@ function renderVaccineDueAlerts(vaccines) {
           const qhEnd = document.querySelector('[data-field="quiet-hours-end"]');
           if (qhStart) state.notificationSettings.quiet_hours_start = qhStart.value || '';
           if (qhEnd) state.notificationSettings.quiet_hours_end = qhEnd.value || '';
-          // If push was toggled on and permission not yet granted, request it
+          if (prevPushEnabled && !state.notificationSettings.push_enabled) {
+            await unsubscribeFromPush();
+          }
           if (state.notificationSettings.push_enabled && ('Notification' in window) && Notification.permission !== 'granted') {
             await requestNotificationPermission();
             state.notificationSettings.push_enabled = Notification.permission === 'granted';
@@ -9166,14 +9462,13 @@ function renderVaccineDueAlerts(vaccines) {
           }
           case 'nav-client-dashboard': {
             await loadCases();
-            // Refresh the active pet's messages so the inline conversation
-            // panel renders fresh whenever the client enters the dashboard.
             const activePet = state.cases[state.activePetIndex || 0] || state.cases[0];
             if (activePet) {
               state.caseId = activePet.id;
               state.currentCase = activePet;
               try { await loadMessages(activePet.id); } catch (e) { console.warn('loadMessages failed:', e); }
             }
+            try { await loadOwnerCheckin(); } catch (e) { console.warn('loadOwnerCheckin failed:', e); }
             navigate('client-dashboard');
             break;
           }
@@ -9219,6 +9514,76 @@ function renderVaccineDueAlerts(vaccines) {
             state._showWelcomeBanner = false;
             render();
             break;
+          case 'set-owner-checkin-rating': {
+            const kind = target.dataset.kind;
+            const value = parseInt(target.dataset.value, 10);
+            if (!['sleep', 'eating', 'movement'].includes(kind) || !(value >= 1 && value <= 5)) break;
+            const reflectionEl = document.querySelector('[data-field="owner-checkin-reflection"]');
+            state.ownerCheckinForm = {
+              ...state.ownerCheckinForm,
+              [kind]: state.ownerCheckinForm[kind] === value ? 0 : value,
+              reflection: reflectionEl ? reflectionEl.value : (state.ownerCheckinForm.reflection || ''),
+            };
+            render();
+            break;
+          }
+          case 'toggle-owner-checkin-form':
+            state.showOwnerCheckinForm = true;
+            render();
+            break;
+          case 'cancel-owner-checkin-form':
+            state.showOwnerCheckinForm = false;
+            state.ownerCheckinForm = { sleep: 0, eating: 0, movement: 0, reflection: '' };
+            render();
+            break;
+          case 'submit-owner-checkin': {
+            const reflectionEl = document.querySelector('[data-field="owner-checkin-reflection"]');
+            const reflection = reflectionEl ? reflectionEl.value.trim() : '';
+            const f = state.ownerCheckinForm || {};
+            if (!reflection && !f.sleep && !f.eating && !f.movement) {
+              showToast('Add a rating or a few words first', 'info');
+              break;
+            }
+            target.disabled = true;
+            state.ownerCheckinSubmitting = true;
+            try {
+              const insertRow = {
+                user_id: state.profile.id,
+                sleep_rating: f.sleep || null,
+                eating_rating: f.eating || null,
+                movement_rating: f.movement || null,
+                reflection: reflection || null,
+              };
+              const { data: inserted, error: insertErr } = await sb
+                .from('owner_checkins')
+                .insert(insertRow)
+                .select('id, submitted_at, sleep_rating, eating_rating, movement_rating, reflection, generated_summary')
+                .single();
+              if (insertErr) throw insertErr;
+              state.ownerCheckin = inserted;
+              state.ownerCheckinForm = { sleep: 0, eating: 0, movement: 0, reflection: '' };
+              state.showOwnerCheckinForm = false;
+              render();
+
+              try {
+                const resp = await callEdgeFunction('reflect-on-checkin', { mode: 'weekly', checkin_id: inserted.id });
+                if (resp && resp.summary) {
+                  state.ownerCheckin = { ...inserted, generated_summary: resp.summary };
+                }
+              } catch (aiErr) {
+                console.warn('reflect-on-checkin failed:', aiErr);
+              }
+              state.ownerCheckinSubmitting = false;
+              render();
+            } catch (err) {
+              console.error('submit-owner-checkin failed:', err);
+              state.ownerCheckinSubmitting = false;
+              showToast(err.message || 'Could not save check-in', 'error');
+              target.disabled = false;
+              render();
+            }
+            break;
+          }
           case 'send-co-owner-invite': {
             const emailInput = document.getElementById('co-owner-email-input');
             const inviteEmail = emailInput ? emailInput.value.trim() : '';
@@ -10449,6 +10814,11 @@ function renderVaccineDueAlerts(vaccines) {
             render();
             break;
           case 'close-broadcast':
+            state.broadcastDraft = {
+              message: document.querySelector('[data-field="broadcast-message"]')?.value || '',
+              tier: document.querySelector('[data-field="broadcast-tier"]')?.value || 'all',
+              schedule: document.querySelector('[data-field="broadcast-schedule"]')?.value || '',
+            };
             state.showBroadcast = false;
             render();
             break;
@@ -10507,33 +10877,33 @@ function renderVaccineDueAlerts(vaccines) {
               // Set timer to execute
               setTimeout(async () => {
                 try {
-                  const targetCases = broadcastData.tierFilter === 'all' ? state.cases : state.cases.filter(c => c.subscription_tier === broadcastData.tierFilter);
+                  const targetCases = state.cases.filter(c => c.status === 'Active' && (broadcastData.tierFilter === 'all' || c.subscription_tier === broadcastData.tierFilter));
                   let sent = 0;
                   for (const c of targetCases) {
                     await sb.from('messages').insert({ case_id: c.id, sender_id: broadcastData.senderId, content: `📢 [Broadcast] ${broadcastData.msg}`, sender_role: broadcastData.role, thread_type: 'client', created_at: new Date().toISOString() });
                     sent++;
                   }
                   showToast(`Scheduled broadcast sent to ${sent} cases! 📢`, 'success');
-                  // Remove from scheduled list
                   if (state.scheduledBroadcasts) state.scheduledBroadcasts = state.scheduledBroadcasts.filter(b => b.id !== broadcastEntry.id);
                   render();
                 } catch(err) { showToast('Scheduled broadcast failed: ' + (err.message || 'Error'), 'error'); }
               }, delay);
               state.showBroadcast = false;
+              state.broadcastDraft = { message: '', tier: 'all', schedule: '' };
               showToast(`Broadcast scheduled for ${formatDate(scheduledTime.toISOString())} ⏰`, 'success');
               render();
               break;
             }
 
-            // Send immediately
             try {
-              const targetCases = tierFilter === 'all' ? state.cases : state.cases.filter(c => c.subscription_tier === tierFilter);
+              const targetCases = state.cases.filter(c => c.status === 'Active' && (tierFilter === 'all' || c.subscription_tier === tierFilter));
               let sent = 0;
               for (const c of targetCases) {
                 await sb.from('messages').insert({ case_id: c.id, sender_id: state.profile.id, content: `📢 [Broadcast] ${msg}`, sender_role: state.profile.role, thread_type: 'client', created_at: new Date().toISOString() });
                 sent++;
               }
               state.showBroadcast = false;
+              state.broadcastDraft = { message: '', tier: 'all', schedule: '' };
               showToast(`Broadcast sent to ${sent} cases! 📢`, 'success');
               render();
             } catch(err) { showToast('Broadcast failed: ' + (err.message || 'Error'), 'error'); }
