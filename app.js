@@ -5077,31 +5077,6 @@ async function calculateBuddyScorecard(buddyId) {
       const completenessScore = Math.max(0, Math.min(100, Number(state.carePlan?.completeness_score) || 0));
       let html = `<div class="care-plan-body">`;
 
-      // Profile completeness progress bar (owner-facing, shown to all roles)
-      {
-        const barColor = completenessScore >= 80 ? 'var(--green)'
-          : completenessScore >= 50 ? 'var(--primary)'
-          : 'var(--amber)';
-        html += `<div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:14px 16px;margin-bottom:14px;">
-          <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:6px;">
-            <div style="font-size:13px;font-weight:600;color:var(--text);">Profile completeness</div>
-            <div style="font-size:13px;color:var(--text-secondary);">${completenessScore} / 100</div>
-          </div>
-          <div style="background:var(--bg);border-radius:6px;height:8px;overflow:hidden;">
-            <div style="width:${completenessScore}%;height:100%;background:${barColor};transition:width .3s ease;"></div>
-          </div>
-          ${completenessScore < 50 ? `<div style="margin-top:8px;font-size:12px;color:var(--text-secondary);">Upload more records or answer a few questions to complete ${esc(petName)}'s profile.</div>` : ''}
-        </div>`;
-      }
-
-      // Export/Share toolbar
-      html += `<div style="display:flex;justify-content:flex-end;gap:8px;margin-bottom:12px;flex-wrap:wrap;">
-        ${canEdit ? `<button class="btn btn-secondary btn-small" data-action="refresh-care-plan-from-activity" title="Let AI scan recent messages, notes, appointments, and escalations for this case and suggest updates to the care plan" ${state.aiExtractionInProgress ? 'disabled' : ''}>${state.aiExtractionInProgress ? '⏳ Refreshing…' : '🔄 Refresh from activity'}</button>` : ''}
-        <button class="btn btn-primary btn-small" data-action="prepare-for-visit" title="Generate a focused one-page summary to bring to your vet appointment">📋 Prepare for Visit</button>
-        <button class="btn btn-secondary btn-small" onclick="window.print()" title="Print the full care plan or save as PDF">🖨️ Print Full Plan</button>
-        <button class="btn btn-secondary btn-small" data-action="export-care-plan" title="Export the Living Care Plan as text">📤 Share</button>
-      </div>`;
-
       // ── Status strip: at-a-glance chips (LCP status, next appt, check-in quota for staff, escalations for staff) ──
       {
         const chips = [];
@@ -5154,19 +5129,19 @@ async function calculateBuddyScorecard(buddyId) {
       // ── Sticky anchor rail (staff only — clients have a shorter page) ──
       if (canEdit) {
         const anchors = [
+          { id: 'messages', label: 'Conversation' },
+          { id: 'engagement', label: 'Engagement' },
+          { id: 'appointments', label: 'Appointments' },
+          { id: 'goals', label: 'Goals' },
+          { id: 'wins', label: 'Wins' },
+          { id: 'documents', label: 'Documents' },
           { id: 'pet-profile', label: 'Profile' },
+          { id: 'health-record', label: 'Health' },
+          { id: 'diagnoses', label: 'Conditions' },
+          { id: 'open-questions', label: 'Questions' },
           { id: 'people', label: 'People' },
           { id: 'providers', label: 'Providers' },
           { id: 'owner-context', label: 'Context' },
-          { id: 'diagnoses', label: 'Conditions' },
-          { id: 'open-questions', label: 'Questions' },
-          { id: 'goals', label: 'Goals' },
-          { id: 'health-record', label: 'Health' },
-          { id: 'appointments', label: 'Appointments' },
-          { id: 'messages', label: 'Conversation' },
-          { id: 'engagement', label: 'Engagement' },
-          { id: 'documents', label: 'Documents' },
-          { id: 'wins', label: 'Wins' },
           { id: 'internal-notes', label: 'Internal' },
         ];
         if (state.profile.role === 'admin') {
@@ -5188,6 +5163,195 @@ async function calculateBuddyScorecard(buddyId) {
         </div>`;
       }
 
+      // ── Band A — What's new + primary action ──
+
+      // ── Section: Conversation (folded in from the old Messages tab — sits between care content and the engagement log) ──
+      html += `<div id="section-messages" class="care-plan-section" style="border-left:4px solid var(--primary);margin-bottom:16px;">
+        <div class="section-title" style="display:flex;justify-content:space-between;align-items:center;">
+          <span>💬 Conversation</span>
+        </div>
+        <div class="section-content">
+          ${renderMessagesTab()}
+        </div>
+      </div>`;
+
+      // ── Section: Engagement (merges lp.engagement_log JSON entries with timeline_entries rows) ──
+      {
+        const typeIcons = { update: '✏️', note: '📋', escalation: '🚨', appointment: '📅', milestone: '⭐', message: '💬', engagement: '📝' };
+        const filter = state.engagementFilter || 'all';
+        // Normalize both sources into a single shape: {type, content, author, date, source}
+        const fromLog = (lp.engagement_log || []).map(e => ({
+          type: 'engagement',
+          content: e.entry_text || '',
+          author: e.created_by || 'Buddy',
+          date: e.created_at || null,
+          source: 'engagement_log',
+        }));
+        const fromTimeline = (state.timelineEntries || []).map(e => ({
+          type: e.type || 'note',
+          content: e.content || '',
+          author: e.author?.name || 'Unknown',
+          date: e.created_at || null,
+          source: 'timeline',
+        }));
+        const merged = [...fromLog, ...fromTimeline].sort((a, b) => new Date(b.date) - new Date(a.date));
+        const filtered = filter === 'all' ? merged : merged.filter(e => {
+          if (filter === 'notes') return e.type === 'engagement' || e.type === 'note';
+          if (filter === 'updates') return e.type === 'update';
+          if (filter === 'milestones') return e.type === 'milestone';
+          if (filter === 'system') return e.type === 'escalation' || e.type === 'appointment' || e.type === 'message';
+          return true;
+        });
+
+        html += `<div id="section-engagement" class="care-plan-section" style="border-left:4px solid var(--purple);margin-bottom:16px;">
+          <div class="section-title" style="display:flex;justify-content:space-between;align-items:center;">
+            <span>📝 ${isClient ? 'Notes from your Buddy' : 'Engagement'}</span>
+            ${canEdit ? `<div style="display:flex;gap:6px;">
+              <button class="section-edit-btn" data-action="toggle-add-log-entry">+ Add Entry</button>
+              <button class="section-edit-btn" data-action="toggle-add-timeline" style="background:transparent;">More…</button>
+            </div>` : ''}
+          </div>`;
+        if (canEdit) {
+          const pill = (key, label) => `<button class="btn btn-secondary btn-small" data-action="set-engagement-filter" data-filter="${key}" style="font-size:11px;padding:3px 10px;${filter === key ? 'background:var(--primary);color:white;border-color:var(--primary);' : ''}">${label}</button>`;
+          html += `<div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px;">
+            ${pill('all', 'All')}${pill('notes', 'Notes')}${pill('updates', 'Updates')}${pill('milestones', 'Milestones')}${pill('system', 'System')}
+          </div>`;
+        }
+        html += `<div class="section-content" style="max-height:360px;overflow-y:auto;">`;
+        if (filtered.length === 0) {
+          html += `<div style="font-size:14px;color:var(--text-secondary);">${isClient ? 'Notes from your Buddy will appear here after your first check-in.' : 'No entries yet — add one once you connect with the owner.'}</div>`;
+        } else {
+          for (const entry of filtered) {
+            html += `<div style="padding:10px 0;border-bottom:1px solid var(--border);">
+              <div style="font-size:14px;line-height:1.5;"><span style="margin-right:6px;">${typeIcons[entry.type] || '📌'}</span>${esc(entry.content)}</div>
+              <div style="font-size:11px;color:var(--text-secondary);margin-top:4px;">— ${esc(entry.author)} · ${entry.date ? formatDate(entry.date) : ''}</div>
+            </div>`;
+          }
+        }
+        html += `</div>`;
+        if (state.showAddLogEntry && canEdit) {
+          html += `<div style="background:#f5f0fa;border-radius:8px;padding:14px;margin-top:8px;">
+            <div class="form-group"><label>Engagement entry</label><textarea data-field="log-entry-text" placeholder="e.g. Asked about Percy's appetite after the new medication — owner reported improvement and followed through on the recheck..." style="width:100%;height:60px;"></textarea></div>
+            <button class="btn btn-primary btn-small" data-action="save-log-entry">Save Entry</button>
+          </div>`;
+        }
+        if (state.showAddTimeline && canEdit) {
+          html += `<div style="background:#f0faf8;border-radius:8px;padding:14px;margin-top:8px;border:1px solid var(--primary);">
+            <div style="font-weight:600;margin-bottom:8px;font-size:13px;">Timeline entry (typed + client-visibility flag)</div>
+            <div class="form-group"><label>Type</label>
+              <select data-field="timeline-type" style="width:100%;">
+                <option value="note">📋 Note</option>
+                <option value="update">✏️ Update</option>
+                <option value="milestone">⭐ Milestone</option>
+                <option value="appointment">📅 Appointment</option>
+              </select>
+            </div>
+            <div class="form-group"><label>Content</label><textarea data-field="timeline-content" placeholder="Describe what happened or was discussed..." style="width:100%;height:80px;"></textarea></div>
+            <div class="form-group" style="display:flex;align-items:center;gap:8px;">
+              <input type="checkbox" data-field="timeline-client-visible" id="tl-visible" checked>
+              <label for="tl-visible" style="margin:0;font-size:13px;">Visible to client</label>
+            </div>
+            <button class="btn btn-primary btn-small" data-action="save-timeline-entry">Save Entry</button>
+          </div>`;
+        }
+        html += `</div>`;
+      }
+
+      // ── Section: Appointments (inlined into the care plan; replaces the standalone Appointments tab on the client dashboard) ──
+      html += `<div id="section-appointments" class="care-plan-section" style="border-left:4px solid var(--blue);margin-bottom:16px;">
+        <div class="section-title"><span>📅 Appointments</span></div>
+        <div class="section-content">
+          ${renderAppointmentsTab({ inline: true })}
+        </div>
+      </div>`;
+
+      // ── Band B — Commit + celebrate ──
+
+      // ── Section 3: Active Care Goals (reads from care_plan_goals table; falls back to lp.active_care_goals for legacy plans) ──
+      html += `<div id="section-goals" class="care-plan-section" style="border-left:4px solid var(--green);margin-bottom:16px;">
+        <div class="section-title" style="display:flex;justify-content:space-between;align-items:center;">
+          <span>🎯 Active Care Goals</span>
+          ${canEdit ? `<button class="section-edit-btn" data-action="toggle-add-goal">+ Add Goal</button>` : ''}
+        </div>
+        <div class="section-content">`;
+      {
+        // Done = 'achieved' (new table value) OR 'completed' (legacy blob value).
+        const goalsList = (state.goals && state.goals.length > 0)
+          ? state.goals
+          : (lp.active_care_goals || []).map((g, idx) => ({ ...g, id: null, _legacyIdx: idx }));
+        if (goalsList.length === 0) {
+          html += `<div style="font-size:14px;color:var(--text-secondary);">${isClient ? 'No goals yet — tap "+ Add Goal" to share one, or your Buddy will help set some on your first check-in.' : 'No goals yet — work with the owner to set 1–2 meaningful goals on the next check-in.'}</div>`;
+        } else {
+          for (const g of goalsList) {
+            const daysSinceReview = g.reviewed_at ? Math.floor((Date.now() - new Date(g.reviewed_at).getTime()) / (1000*60*60*24)) : 999;
+            const isDone = g.status === 'achieved' || g.status === 'completed';
+            const needsQuarterlyReview = (tier === 'Buddy+' || tier === 'Buddy VIP') && daysSinceReview > 85 && g.status === 'active';
+            const isDvmReviewed = g.dvm_reviewed;
+            const idAttr = g.id ? `data-goal-id="${g.id}"` : `data-legacy-idx="${g._legacyIdx}"`;
+            html += `<div style="background:var(--bg);border-radius:8px;padding:12px;margin-bottom:8px;border-left:3px solid ${isDone ? 'var(--green)' : 'var(--amber)'};">
+              <div style="display:flex;justify-content:space-between;align-items:flex-start;">
+                <div style="flex:1;">
+                  <div style="font-weight:500;">${esc(g.goal_text)}</div>
+                  <div style="font-size:13px;color:var(--text-secondary);margin-top:4px;">
+                    ${g.set_by_owner ? (isClient ? '✍️ Set by you' : '✍️ Set by owner') : '📋 Set by Buddy'} · ${g.created_at ? formatDate(g.created_at) : ''}
+                    ${g.reviewed_at ? ' · Last reviewed: ' + formatDate(g.reviewed_at) : ''}
+                  </div>
+                  ${tier === 'Buddy VIP' && isDvmReviewed ? '<span style="display:inline-block;margin-top:4px;background:#e8f5e9;color:#2e7d32;font-size:12px;font-weight:600;padding:2px 8px;border-radius:12px;">✅ Reviewed by Dr. Rodgers</span>' : ''}
+                  ${needsQuarterlyReview ? `<div style="margin-top:6px;background:#fff3cd;color:#856404;font-size:13px;padding:4px 8px;border-radius:6px;">⏰ ${isClient ? 'Time to check in on this goal' : 'Quarterly goal review due — 85+ days since last review'}</div>` : ''}
+                </div>
+                <div style="display:flex;gap:4px;align-items:center;">
+                  <span style="font-size:11px;padding:2px 8px;border-radius:12px;background:${isDone ? '#e8f5e9' : '#fff8e1'};color:${isDone ? '#2e7d32' : '#f57f17'};font-weight:600;">${esc(g.status || 'active')}</span>
+                  ${canEdit ? `<button class="btn btn-secondary btn-small" data-action="toggle-goal-status" ${idAttr} style="font-size:10px;padding:2px 6px;">${isDone ? '↩️' : '✓'}</button>` : ''}
+                  ${tier === 'Buddy VIP' && canEdit && !isDvmReviewed ? `<button class="btn btn-secondary btn-small" data-action="request-dvm-review" ${idAttr} style="font-size:10px;padding:2px 6px;border-color:var(--primary);color:var(--primary);">Request DVM Review</button>` : ''}
+                </div>
+              </div>
+            </div>`;
+          }
+        }
+      }
+      html += `</div>
+        ${state.showAddGoal ? `<div style="background:#f0faf8;border-radius:8px;padding:14px;margin-top:8px;">
+          <div class="form-group"><label>Goal (in the owner's own words when possible)</label><textarea data-field="goal-text" placeholder="e.g. Help Percy lose 2 lbs over the next 3 months with portion control..." style="width:100%;height:60px;"></textarea></div>
+          <label style="font-size:13px;display:flex;align-items:center;gap:6px;margin-bottom:8px;"><input type="checkbox" data-field="goal-set-by-owner"> Owner wrote this goal themselves</label>
+          <button class="btn btn-primary btn-small" data-action="save-new-goal">Save Goal</button>
+        </div>` : ''}
+      </div>`;
+
+      // ── Section 5: Milestones & Wins ──
+      html += `<div id="section-wins" class="care-plan-section" style="border-left:4px solid var(--amber);margin-bottom:16px;background:linear-gradient(135deg,#fffde7 0%,#fff8e1 100%);border-radius:8px;padding:16px;">
+        <div class="section-title" style="display:flex;justify-content:space-between;align-items:center;">
+          <span>🏆 ${isClient ? 'Good things lately' : 'Milestones & Wins'}</span>
+          ${(canEdit || isClient) ? `<button class="section-edit-btn" data-action="toggle-add-milestone">+ Celebrate a Win</button>` : ''}
+        </div>
+        <div class="section-content">`;
+      if (lp.milestones_and_wins.length === 0) {
+        html += `<div style="font-size:14px;color:var(--text-secondary);">Every little win counts. ${isClient ? "Your first celebration will appear here once you and your Buddy share one." : 'Add one whenever the owner has a small (or big) reason to celebrate.'} 🎉</div>`;
+      } else {
+        for (const m of lp.milestones_and_wins) {
+          html += `<div style="background:white;border-radius:8px;padding:12px;margin-bottom:8px;border:1px solid #ffe082;">
+            <div style="font-weight:600;color:#f57f17;">🌟 ${esc(m.title)}</div>
+            ${m.description ? `<div style="font-size:13px;margin-top:4px;">${esc(m.description)}</div>` : ''}
+            <div style="font-size:11px;color:var(--text-secondary);margin-top:4px;">— ${esc(m.created_by) || 'Team'} · ${m.created_at ? formatDate(m.created_at) : ''}</div>
+          </div>`;
+        }
+      }
+      html += `</div>
+        ${state.showAddMilestone ? `<div style="background:white;border-radius:8px;padding:14px;margin-top:8px;border:1px solid #ffe082;">
+          <div class="form-group"><label>Win Title</label><input type="text" data-field="milestone-title" placeholder="e.g. Percy hit his target weight!" style="width:100%;"></div>
+          <div class="form-group"><label>Details (optional)</label><textarea data-field="milestone-desc" placeholder="What happened and why it matters..." style="width:100%;height:50px;"></textarea></div>
+          <button class="btn btn-primary btn-small" data-action="save-milestone" style="background:var(--amber);border-color:var(--amber);">🎉 Save Win</button>
+        </div>` : ''}
+      </div>`;
+
+      // ── Section: Documents (uploaded files; was the Files tab) ──
+      html += `<div id="section-documents" class="care-plan-section" style="border-left:4px solid var(--blue);margin-bottom:16px;">
+        <div class="section-content">
+          ${renderDocumentsBody()}
+        </div>
+      </div>`;
+
+      // ── Band C — Identity + reference ──
+
       // ── Section 1: Pet Profile ──
       html += `<div id="section-pet-profile" class="care-plan-section view-mode" style="border-left:4px solid var(--primary);margin-bottom:16px;">
         <div class="section-title" style="display:flex;justify-content:space-between;align-items:center;">
@@ -5205,6 +5369,92 @@ async function calculateBuddyScorecard(buddyId) {
           </div>
         </div>
       </div>`;
+
+      // ── Section: Health Record (Medications + Vitals + Vaccines) ──
+      {
+        html += `<div id="section-health-record" class="care-plan-section" style="border-left:4px solid #e67e22;margin-bottom:16px;">
+          <div class="section-title"><span>🩺 Health Record</span></div>
+          <div class="section-content">
+            <div class="health-record-block" style="margin-bottom:18px;padding-bottom:18px;border-bottom:1px solid var(--border);">
+              ${renderMedicationsBody()}
+            </div>
+            ${(!isClient || (state.petVitals && state.petVitals.length > 0)) ? `<div class="health-record-block" style="margin-bottom:18px;padding-bottom:18px;border-bottom:1px solid var(--border);">
+              ${renderVitalsBody()}
+            </div>` : ''}
+            <div class="health-record-block">
+              ${renderVaccinesBody()}
+            </div>
+          </div>
+        </div>`;
+      }
+
+      // ── Section: Diagnoses (read-only in slice 2; staff edit lands in slice 4) ──
+      {
+        const diagnoses = state.diagnoses || [];
+        const dxLabel = isClient ? '🩺 Conditions your vet has identified' : '🩺 Diagnoses';
+        const dxStatusStyle = (s) => ({
+          active:    'background:#fff8e1;color:#f57f17;',
+          managed:   'background:#e3f2fd;color:#1565c0;',
+          resolved:  'background:#e8f5e9;color:#2e7d32;',
+          ruled_out: 'background:#eceff1;color:#546e7a;',
+        })[s] || 'background:#eceff1;color:#546e7a;';
+        html += `<div id="section-diagnoses" class="care-plan-section" style="border-left:4px solid #e74c3c;margin-bottom:16px;">
+          <div class="section-title"><span>${dxLabel}</span></div>
+          <div class="section-content">`;
+        if (diagnoses.length === 0) {
+          html += `<div style="font-size:14px;color:var(--text-secondary);">${isClient
+            ? "Your Buddy will add to this as your pet's care journey develops — these are conditions your vet has identified, recorded so we can support you around them."
+            : 'No diagnoses recorded yet — log them as they&rsquo;re shared by the owner&rsquo;s vet (write-in coming next slice).'}</div>`;
+        } else {
+          for (const dx of diagnoses) {
+            const meta = dx.diagnosing_vet
+              ? `As recorded from ${esc(dx.diagnosing_vet)}${dx.diagnosed_on ? ' &middot; ' + formatDate(dx.diagnosed_on) : ''}`
+              : (dx.diagnosed_on ? `Recorded ${formatDate(dx.diagnosed_on)}` : '');
+            html += `<div style="background:var(--bg);border-radius:8px;padding:12px;margin-bottom:8px;">
+              <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px;">
+                <div style="flex:1;">
+                  <div style="font-weight:600;font-size:14px;">${esc(dx.condition_name)}</div>
+                  ${meta ? `<div style="font-size:12px;color:var(--text-secondary);margin-top:2px;">${meta}</div>` : ''}
+                  ${dx.notes ? `<div style="font-size:13px;margin-top:6px;white-space:pre-wrap;">${esc(dx.notes)}</div>` : ''}
+                </div>
+                <span style="font-size:11px;padding:2px 8px;border-radius:12px;${dxStatusStyle(dx.status)}font-weight:600;flex-shrink:0;">${esc(dx.status || 'active')}</span>
+              </div>
+            </div>`;
+          }
+        }
+        html += `</div></div>`;
+      }
+
+      // ── Section: Open Questions for Vet (read-only in slice 2; staff edit lands in slice 4) ──
+      {
+        const openQs = state.openQuestions || [];
+        const oqLabel = isClient ? '❓ Questions to ask your vet' : '❓ Open Questions for Vet';
+        const priIcon = (p) => ({ urgent: '🔥', normal: '·', whenever: '🌱' })[p] || '·';
+        html += `<div id="section-open-questions" class="care-plan-section" style="border-left:4px solid #3498db;margin-bottom:16px;">
+          <div class="section-title"><span>${oqLabel}</span></div>
+          <div class="section-content">`;
+        if (openQs.length === 0) {
+          html += `<div style="font-size:14px;color:var(--text-secondary);">${isClient
+            ? 'Your Buddy will list questions here for you to bring to your vet — anything that comes up between visits.'
+            : 'No open questions yet — log them as they come up so you and the owner have a running list for the next vet visit.'}</div>`;
+        } else {
+          for (const q of openQs) {
+            const isResolved = q.status === 'answered' || q.status === 'moot';
+            html += `<div style="background:var(--bg);border-radius:8px;padding:12px;margin-bottom:8px;${isResolved ? 'opacity:0.65;' : ''}">
+              <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px;">
+                <div style="flex:1;">
+                  <div style="font-weight:500;font-size:14px;">${priIcon(q.priority)} ${esc(q.question)}</div>
+                  ${q.context ? `<div style="font-size:13px;color:var(--text-secondary);margin-top:4px;white-space:pre-wrap;">${esc(q.context)}</div>` : ''}
+                  ${q.target_visit_date ? `<div style="font-size:12px;color:var(--text-secondary);margin-top:4px;">For visit on ${formatDate(q.target_visit_date)}</div>` : ''}
+                  ${q.resolution_notes ? `<div style="font-size:13px;background:#f0faf8;border-radius:6px;padding:6px 8px;margin-top:6px;"><strong>Answer:</strong> ${esc(q.resolution_notes)}</div>` : ''}
+                </div>
+                <span style="font-size:11px;padding:2px 8px;border-radius:12px;background:${isResolved ? '#e8f5e9' : '#fff8e1'};color:${isResolved ? '#2e7d32' : '#f57f17'};font-weight:600;flex-shrink:0;">${esc(q.status || 'open')}</span>
+              </div>
+            </div>`;
+          }
+        }
+        html += `</div></div>`;
+      }
 
       // ── Section: People (Owner + Buddy + Co-owners + Helpers) ──
       {
@@ -5315,6 +5565,45 @@ async function calculateBuddyScorecard(buddyId) {
         </div>` : ''}
       </div>`;
 
+      // ── Genetic Insights (visible to client, buddy, admin, and geneticist) ──
+      const patientInsights = (state.geneticInsights || []).filter(g => g.case_id === state.caseId);
+      if (patientInsights.length > 0) {
+        html += '<div id="section-genetic" class="care-plan-section view-mode" style="margin-bottom:16px;">';
+        html += '<div style="display:flex;align-items:center;gap:8px;margin-bottom:12px;">';
+        html += '<span style="font-size:18px;">&#x1F9EC;</span>';
+        html += '<div style="font-weight:700;font-size:15px;color:#534AB7;">Genetic Insights</div>';
+        html += '<span style="font-size:11px;color:#534AB7;background:#EEEDFE;padding:2px 8px;border-radius:10px;">From Dr. El Hamidi Hay</span>';
+        html += '</div>';
+        for (const insight of patientInsights) {
+          html += '<div style="margin-bottom:16px;">';
+          html += '<div style="font-weight:600;font-size:14px;margin-bottom:6px;">' + esc(insight.title) + '</div>';
+          html += '<div style="font-size:13px;line-height:1.7;color:#444;margin-bottom:10px;white-space:pre-wrap;">' + esc(insight.content) + '</div>';
+          if (insight.breed_risk_flags && insight.breed_risk_flags.length > 0) {
+            html += '<div style="margin-bottom:8px;">';
+            html += '<div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.5px;color:#854F0B;margin-bottom:4px;">Risk Flags</div>';
+            html += '<div style="display:flex;flex-wrap:wrap;gap:6px;">';
+            for (const flag of insight.breed_risk_flags) {
+              html += '<span style="font-size:12px;background:#FFF4E0;color:#854F0B;padding:3px 10px;border-radius:10px;">' + esc(flag) + '</span>';
+            }
+            html += '</div></div>';
+          }
+          if (insight.recommendations && insight.recommendations.length > 0) {
+            html += '<div>';
+            html += '<div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.5px;color:#336026;margin-bottom:6px;">Recommendations</div>';
+            html += '<ul style="margin:0;padding-left:18px;">';
+            for (const rec of insight.recommendations) {
+              html += '<li style="font-size:13px;color:#444;line-height:1.7;">' + esc(rec) + '</li>';
+            }
+            html += '</ul></div>';
+          }
+          html += '<div style="font-size:11px;color:var(--text-secondary);margin-top:8px;">Updated ' + formatDate(insight.updated_at) + '</div>';
+          html += '</div>';
+        }
+        html += '</div>';
+      }
+
+      // ── Staff-only block ──
+
       // ── Section: Owner Context (staff-only — Buddy's notes about owner situation, lifestyle, preferences) ──
       if (canEdit) {
         const ownerContext = state.carePlan?.owner_context || '';
@@ -5340,249 +5629,6 @@ async function calculateBuddyScorecard(buddyId) {
           </div>
         </div>`;
       }
-
-      // ── Section: Diagnoses (read-only in slice 2; staff edit lands in slice 4) ──
-      {
-        const diagnoses = state.diagnoses || [];
-        const dxLabel = isClient ? '🩺 Conditions your vet has identified' : '🩺 Diagnoses';
-        const dxStatusStyle = (s) => ({
-          active:    'background:#fff8e1;color:#f57f17;',
-          managed:   'background:#e3f2fd;color:#1565c0;',
-          resolved:  'background:#e8f5e9;color:#2e7d32;',
-          ruled_out: 'background:#eceff1;color:#546e7a;',
-        })[s] || 'background:#eceff1;color:#546e7a;';
-        html += `<div id="section-diagnoses" class="care-plan-section" style="border-left:4px solid #e74c3c;margin-bottom:16px;">
-          <div class="section-title"><span>${dxLabel}</span></div>
-          <div class="section-content">`;
-        if (diagnoses.length === 0) {
-          html += `<div style="font-size:14px;color:var(--text-secondary);">${isClient
-            ? "Your Buddy will add to this as your pet's care journey develops — these are conditions your vet has identified, recorded so we can support you around them."
-            : 'No diagnoses recorded yet — log them as they&rsquo;re shared by the owner&rsquo;s vet (write-in coming next slice).'}</div>`;
-        } else {
-          for (const dx of diagnoses) {
-            const meta = dx.diagnosing_vet
-              ? `As recorded from ${esc(dx.diagnosing_vet)}${dx.diagnosed_on ? ' &middot; ' + formatDate(dx.diagnosed_on) : ''}`
-              : (dx.diagnosed_on ? `Recorded ${formatDate(dx.diagnosed_on)}` : '');
-            html += `<div style="background:var(--bg);border-radius:8px;padding:12px;margin-bottom:8px;">
-              <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px;">
-                <div style="flex:1;">
-                  <div style="font-weight:600;font-size:14px;">${esc(dx.condition_name)}</div>
-                  ${meta ? `<div style="font-size:12px;color:var(--text-secondary);margin-top:2px;">${meta}</div>` : ''}
-                  ${dx.notes ? `<div style="font-size:13px;margin-top:6px;white-space:pre-wrap;">${esc(dx.notes)}</div>` : ''}
-                </div>
-                <span style="font-size:11px;padding:2px 8px;border-radius:12px;${dxStatusStyle(dx.status)}font-weight:600;flex-shrink:0;">${esc(dx.status || 'active')}</span>
-              </div>
-            </div>`;
-          }
-        }
-        html += `</div></div>`;
-      }
-
-      // ── Section: Open Questions for Vet (read-only in slice 2; staff edit lands in slice 4) ──
-      {
-        const openQs = state.openQuestions || [];
-        const oqLabel = isClient ? '❓ Questions to ask your vet' : '❓ Open Questions for Vet';
-        const priIcon = (p) => ({ urgent: '🔥', normal: '·', whenever: '🌱' })[p] || '·';
-        html += `<div id="section-open-questions" class="care-plan-section" style="border-left:4px solid #3498db;margin-bottom:16px;">
-          <div class="section-title"><span>${oqLabel}</span></div>
-          <div class="section-content">`;
-        if (openQs.length === 0) {
-          html += `<div style="font-size:14px;color:var(--text-secondary);">${isClient
-            ? 'Your Buddy will list questions here for you to bring to your vet — anything that comes up between visits.'
-            : 'No open questions yet — log them as they come up so you and the owner have a running list for the next vet visit.'}</div>`;
-        } else {
-          for (const q of openQs) {
-            const isResolved = q.status === 'answered' || q.status === 'moot';
-            html += `<div style="background:var(--bg);border-radius:8px;padding:12px;margin-bottom:8px;${isResolved ? 'opacity:0.65;' : ''}">
-              <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px;">
-                <div style="flex:1;">
-                  <div style="font-weight:500;font-size:14px;">${priIcon(q.priority)} ${esc(q.question)}</div>
-                  ${q.context ? `<div style="font-size:13px;color:var(--text-secondary);margin-top:4px;white-space:pre-wrap;">${esc(q.context)}</div>` : ''}
-                  ${q.target_visit_date ? `<div style="font-size:12px;color:var(--text-secondary);margin-top:4px;">For visit on ${formatDate(q.target_visit_date)}</div>` : ''}
-                  ${q.resolution_notes ? `<div style="font-size:13px;background:#f0faf8;border-radius:6px;padding:6px 8px;margin-top:6px;"><strong>Answer:</strong> ${esc(q.resolution_notes)}</div>` : ''}
-                </div>
-                <span style="font-size:11px;padding:2px 8px;border-radius:12px;background:${isResolved ? '#e8f5e9' : '#fff8e1'};color:${isResolved ? '#2e7d32' : '#f57f17'};font-weight:600;flex-shrink:0;">${esc(q.status || 'open')}</span>
-              </div>
-            </div>`;
-          }
-        }
-        html += `</div></div>`;
-      }
-
-      // ── Section: Health Record (Medications + Vitals + Vaccines) ──
-      {
-        html += `<div id="section-health-record" class="care-plan-section" style="border-left:4px solid #e67e22;margin-bottom:16px;">
-          <div class="section-title"><span>🩺 Health Record</span></div>
-          <div class="section-content">
-            <div class="health-record-block" style="margin-bottom:18px;padding-bottom:18px;border-bottom:1px solid var(--border);">
-              ${renderMedicationsBody()}
-            </div>
-            ${(!isClient || (state.petVitals && state.petVitals.length > 0)) ? `<div class="health-record-block" style="margin-bottom:18px;padding-bottom:18px;border-bottom:1px solid var(--border);">
-              ${renderVitalsBody()}
-            </div>` : ''}
-            <div class="health-record-block">
-              ${renderVaccinesBody()}
-            </div>
-          </div>
-        </div>`;
-      }
-
-      // ── Section: Appointments (inlined into the care plan; replaces the standalone Appointments tab on the client dashboard) ──
-      html += `<div id="section-appointments" class="care-plan-section" style="border-left:4px solid var(--blue);margin-bottom:16px;">
-        <div class="section-title"><span>📅 Appointments</span></div>
-        <div class="section-content">
-          ${renderAppointmentsTab({ inline: true })}
-        </div>
-      </div>`;
-
-      // ── Section 3: Active Care Goals (reads from care_plan_goals table; falls back to lp.active_care_goals for legacy plans) ──
-      html += `<div id="section-goals" class="care-plan-section" style="border-left:4px solid var(--green);margin-bottom:16px;">
-        <div class="section-title" style="display:flex;justify-content:space-between;align-items:center;">
-          <span>🎯 Active Care Goals</span>
-          ${canEdit ? `<button class="section-edit-btn" data-action="toggle-add-goal">+ Add Goal</button>` : ''}
-        </div>
-        <div class="section-content">`;
-      {
-        // Done = 'achieved' (new table value) OR 'completed' (legacy blob value).
-        const goalsList = (state.goals && state.goals.length > 0)
-          ? state.goals
-          : (lp.active_care_goals || []).map((g, idx) => ({ ...g, id: null, _legacyIdx: idx }));
-        if (goalsList.length === 0) {
-          html += `<div style="font-size:14px;color:var(--text-secondary);">${isClient ? 'No goals yet — tap "+ Add Goal" to share one, or your Buddy will help set some on your first check-in.' : 'No goals yet — work with the owner to set 1–2 meaningful goals on the next check-in.'}</div>`;
-        } else {
-          for (const g of goalsList) {
-            const daysSinceReview = g.reviewed_at ? Math.floor((Date.now() - new Date(g.reviewed_at).getTime()) / (1000*60*60*24)) : 999;
-            const isDone = g.status === 'achieved' || g.status === 'completed';
-            const needsQuarterlyReview = (tier === 'Buddy+' || tier === 'Buddy VIP') && daysSinceReview > 85 && g.status === 'active';
-            const isDvmReviewed = g.dvm_reviewed;
-            const idAttr = g.id ? `data-goal-id="${g.id}"` : `data-legacy-idx="${g._legacyIdx}"`;
-            html += `<div style="background:var(--bg);border-radius:8px;padding:12px;margin-bottom:8px;border-left:3px solid ${isDone ? 'var(--green)' : 'var(--amber)'};">
-              <div style="display:flex;justify-content:space-between;align-items:flex-start;">
-                <div style="flex:1;">
-                  <div style="font-weight:500;">${esc(g.goal_text)}</div>
-                  <div style="font-size:13px;color:var(--text-secondary);margin-top:4px;">
-                    ${g.set_by_owner ? (isClient ? '✍️ Set by you' : '✍️ Set by owner') : '📋 Set by Buddy'} · ${g.created_at ? formatDate(g.created_at) : ''}
-                    ${g.reviewed_at ? ' · Last reviewed: ' + formatDate(g.reviewed_at) : ''}
-                  </div>
-                  ${tier === 'Buddy VIP' && isDvmReviewed ? '<span style="display:inline-block;margin-top:4px;background:#e8f5e9;color:#2e7d32;font-size:12px;font-weight:600;padding:2px 8px;border-radius:12px;">✅ Reviewed by Dr. Rodgers</span>' : ''}
-                  ${needsQuarterlyReview ? `<div style="margin-top:6px;background:#fff3cd;color:#856404;font-size:13px;padding:4px 8px;border-radius:6px;">⏰ ${isClient ? 'Time to check in on this goal' : 'Quarterly goal review due — 85+ days since last review'}</div>` : ''}
-                </div>
-                <div style="display:flex;gap:4px;align-items:center;">
-                  <span style="font-size:11px;padding:2px 8px;border-radius:12px;background:${isDone ? '#e8f5e9' : '#fff8e1'};color:${isDone ? '#2e7d32' : '#f57f17'};font-weight:600;">${esc(g.status || 'active')}</span>
-                  ${canEdit ? `<button class="btn btn-secondary btn-small" data-action="toggle-goal-status" ${idAttr} style="font-size:10px;padding:2px 6px;">${isDone ? '↩️' : '✓'}</button>` : ''}
-                  ${tier === 'Buddy VIP' && canEdit && !isDvmReviewed ? `<button class="btn btn-secondary btn-small" data-action="request-dvm-review" ${idAttr} style="font-size:10px;padding:2px 6px;border-color:var(--primary);color:var(--primary);">Request DVM Review</button>` : ''}
-                </div>
-              </div>
-            </div>`;
-          }
-        }
-      }
-      html += `</div>
-        ${state.showAddGoal ? `<div style="background:#f0faf8;border-radius:8px;padding:14px;margin-top:8px;">
-          <div class="form-group"><label>Goal (in the owner's own words when possible)</label><textarea data-field="goal-text" placeholder="e.g. Help Percy lose 2 lbs over the next 3 months with portion control..." style="width:100%;height:60px;"></textarea></div>
-          <label style="font-size:13px;display:flex;align-items:center;gap:6px;margin-bottom:8px;"><input type="checkbox" data-field="goal-set-by-owner"> Owner wrote this goal themselves</label>
-          <button class="btn btn-primary btn-small" data-action="save-new-goal">Save Goal</button>
-        </div>` : ''}
-      </div>`;
-
-      // ── Section: Conversation (folded in from the old Messages tab — sits between care content and the engagement log) ──
-      html += `<div id="section-messages" class="care-plan-section" style="border-left:4px solid var(--primary);margin-bottom:16px;">
-        <div class="section-title" style="display:flex;justify-content:space-between;align-items:center;">
-          <span>💬 Conversation</span>
-        </div>
-        <div class="section-content">
-          ${renderMessagesTab()}
-        </div>
-      </div>`;
-
-      // ── Section: Engagement (merges lp.engagement_log JSON entries with timeline_entries rows) ──
-      {
-        const typeIcons = { update: '✏️', note: '📋', escalation: '🚨', appointment: '📅', milestone: '⭐', message: '💬', engagement: '📝' };
-        const filter = state.engagementFilter || 'all';
-        // Normalize both sources into a single shape: {type, content, author, date, source}
-        const fromLog = (lp.engagement_log || []).map(e => ({
-          type: 'engagement',
-          content: e.entry_text || '',
-          author: e.created_by || 'Buddy',
-          date: e.created_at || null,
-          source: 'engagement_log',
-        }));
-        const fromTimeline = (state.timelineEntries || []).map(e => ({
-          type: e.type || 'note',
-          content: e.content || '',
-          author: e.author?.name || 'Unknown',
-          date: e.created_at || null,
-          source: 'timeline',
-        }));
-        const merged = [...fromLog, ...fromTimeline].sort((a, b) => new Date(b.date) - new Date(a.date));
-        const filtered = filter === 'all' ? merged : merged.filter(e => {
-          if (filter === 'notes') return e.type === 'engagement' || e.type === 'note';
-          if (filter === 'updates') return e.type === 'update';
-          if (filter === 'milestones') return e.type === 'milestone';
-          if (filter === 'system') return e.type === 'escalation' || e.type === 'appointment' || e.type === 'message';
-          return true;
-        });
-
-        html += `<div id="section-engagement" class="care-plan-section" style="border-left:4px solid var(--purple);margin-bottom:16px;">
-          <div class="section-title" style="display:flex;justify-content:space-between;align-items:center;">
-            <span>📝 ${isClient ? 'Notes from your Buddy' : 'Engagement'}</span>
-            ${canEdit ? `<div style="display:flex;gap:6px;">
-              <button class="section-edit-btn" data-action="toggle-add-log-entry">+ Add Entry</button>
-              <button class="section-edit-btn" data-action="toggle-add-timeline" style="background:transparent;">More…</button>
-            </div>` : ''}
-          </div>`;
-        if (canEdit) {
-          const pill = (key, label) => `<button class="btn btn-secondary btn-small" data-action="set-engagement-filter" data-filter="${key}" style="font-size:11px;padding:3px 10px;${filter === key ? 'background:var(--primary);color:white;border-color:var(--primary);' : ''}">${label}</button>`;
-          html += `<div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px;">
-            ${pill('all', 'All')}${pill('notes', 'Notes')}${pill('updates', 'Updates')}${pill('milestones', 'Milestones')}${pill('system', 'System')}
-          </div>`;
-        }
-        html += `<div class="section-content" style="max-height:360px;overflow-y:auto;">`;
-        if (filtered.length === 0) {
-          html += `<div style="font-size:14px;color:var(--text-secondary);">${isClient ? 'Notes from your Buddy will appear here after your first check-in.' : 'No entries yet — add one once you connect with the owner.'}</div>`;
-        } else {
-          for (const entry of filtered) {
-            html += `<div style="padding:10px 0;border-bottom:1px solid var(--border);">
-              <div style="font-size:14px;line-height:1.5;"><span style="margin-right:6px;">${typeIcons[entry.type] || '📌'}</span>${esc(entry.content)}</div>
-              <div style="font-size:11px;color:var(--text-secondary);margin-top:4px;">— ${esc(entry.author)} · ${entry.date ? formatDate(entry.date) : ''}</div>
-            </div>`;
-          }
-        }
-        html += `</div>`;
-        if (state.showAddLogEntry && canEdit) {
-          html += `<div style="background:#f5f0fa;border-radius:8px;padding:14px;margin-top:8px;">
-            <div class="form-group"><label>Engagement entry</label><textarea data-field="log-entry-text" placeholder="e.g. Asked about Percy's appetite after the new medication — owner reported improvement and followed through on the recheck..." style="width:100%;height:60px;"></textarea></div>
-            <button class="btn btn-primary btn-small" data-action="save-log-entry">Save Entry</button>
-          </div>`;
-        }
-        if (state.showAddTimeline && canEdit) {
-          html += `<div style="background:#f0faf8;border-radius:8px;padding:14px;margin-top:8px;border:1px solid var(--primary);">
-            <div style="font-weight:600;margin-bottom:8px;font-size:13px;">Timeline entry (typed + client-visibility flag)</div>
-            <div class="form-group"><label>Type</label>
-              <select data-field="timeline-type" style="width:100%;">
-                <option value="note">📋 Note</option>
-                <option value="update">✏️ Update</option>
-                <option value="milestone">⭐ Milestone</option>
-                <option value="appointment">📅 Appointment</option>
-              </select>
-            </div>
-            <div class="form-group"><label>Content</label><textarea data-field="timeline-content" placeholder="Describe what happened or was discussed..." style="width:100%;height:80px;"></textarea></div>
-            <div class="form-group" style="display:flex;align-items:center;gap:8px;">
-              <input type="checkbox" data-field="timeline-client-visible" id="tl-visible" checked>
-              <label for="tl-visible" style="margin:0;font-size:13px;">Visible to client</label>
-            </div>
-            <button class="btn btn-primary btn-small" data-action="save-timeline-entry">Save Entry</button>
-          </div>`;
-        }
-        html += `</div>`;
-      }
-
-      // ── Section: Documents (uploaded files; was the Files tab) ──
-      html += `<div id="section-documents" class="care-plan-section" style="border-left:4px solid var(--blue);margin-bottom:16px;">
-        <div class="section-content">
-          ${renderDocumentsBody()}
-        </div>
-      </div>`;
 
       // ── Section: Owner Wellness Check-ins (staff-only; opt-in via users.share_checkins_with_buddy) ──
       if (canEdit) {
@@ -5665,32 +5711,6 @@ async function calculateBuddyScorecard(buddyId) {
         </div>`;
       }
 
-      // ── Section 5: Milestones & Wins ──
-      html += `<div id="section-wins" class="care-plan-section" style="border-left:4px solid var(--amber);margin-bottom:16px;background:linear-gradient(135deg,#fffde7 0%,#fff8e1 100%);border-radius:8px;padding:16px;">
-        <div class="section-title" style="display:flex;justify-content:space-between;align-items:center;">
-          <span>🏆 ${isClient ? 'Good things lately' : 'Milestones & Wins'}</span>
-          ${(canEdit || isClient) ? `<button class="section-edit-btn" data-action="toggle-add-milestone">+ Celebrate a Win</button>` : ''}
-        </div>
-        <div class="section-content">`;
-      if (lp.milestones_and_wins.length === 0) {
-        html += `<div style="font-size:14px;color:var(--text-secondary);">Every little win counts. ${isClient ? "Your first celebration will appear here once you and your Buddy share one." : 'Add one whenever the owner has a small (or big) reason to celebrate.'} 🎉</div>`;
-      } else {
-        for (const m of lp.milestones_and_wins) {
-          html += `<div style="background:white;border-radius:8px;padding:12px;margin-bottom:8px;border:1px solid #ffe082;">
-            <div style="font-weight:600;color:#f57f17;">🌟 ${esc(m.title)}</div>
-            ${m.description ? `<div style="font-size:13px;margin-top:4px;">${esc(m.description)}</div>` : ''}
-            <div style="font-size:11px;color:var(--text-secondary);margin-top:4px;">— ${esc(m.created_by) || 'Team'} · ${m.created_at ? formatDate(m.created_at) : ''}</div>
-          </div>`;
-        }
-      }
-      html += `</div>
-        ${state.showAddMilestone ? `<div style="background:white;border-radius:8px;padding:14px;margin-top:8px;border:1px solid #ffe082;">
-          <div class="form-group"><label>Win Title</label><input type="text" data-field="milestone-title" placeholder="e.g. Percy hit his target weight!" style="width:100%;"></div>
-          <div class="form-group"><label>Details (optional)</label><textarea data-field="milestone-desc" placeholder="What happened and why it matters..." style="width:100%;height:50px;"></textarea></div>
-          <button class="btn btn-primary btn-small" data-action="save-milestone" style="background:var(--amber);border-color:var(--amber);">🎉 Save Win</button>
-        </div>` : ''}
-      </div>`;
-
       // ── DVM Clinical Notes (admin only — gated UI + backstopped by trg_care_plans_guard_dvm) ──
       if (state.profile.role === 'admin') {
         const dvmNotes = state.carePlan?.dvm_clinical_notes || '';
@@ -5766,42 +5786,29 @@ async function calculateBuddyScorecard(buddyId) {
         `;
       }
 
-      // ── Genetic Insights (visible to client, buddy, admin, and geneticist) ──
-      const patientInsights = (state.geneticInsights || []).filter(g => g.case_id === state.caseId);
-      if (patientInsights.length > 0) {
-        html += '<div id="section-genetic" class="care-plan-section view-mode" style="margin-bottom:16px;">';
-        html += '<div style="display:flex;align-items:center;gap:8px;margin-bottom:12px;">';
-        html += '<span style="font-size:18px;">&#x1F9EC;</span>';
-        html += '<div style="font-weight:700;font-size:15px;color:#534AB7;">Genetic Insights</div>';
-        html += '<span style="font-size:11px;color:#534AB7;background:#EEEDFE;padding:2px 8px;border-radius:10px;">From Dr. El Hamidi Hay</span>';
-        html += '</div>';
-        for (const insight of patientInsights) {
-          html += '<div style="margin-bottom:16px;">';
-          html += '<div style="font-weight:600;font-size:14px;margin-bottom:6px;">' + esc(insight.title) + '</div>';
-          html += '<div style="font-size:13px;line-height:1.7;color:#444;margin-bottom:10px;white-space:pre-wrap;">' + esc(insight.content) + '</div>';
-          if (insight.breed_risk_flags && insight.breed_risk_flags.length > 0) {
-            html += '<div style="margin-bottom:8px;">';
-            html += '<div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.5px;color:#854F0B;margin-bottom:4px;">Risk Flags</div>';
-            html += '<div style="display:flex;flex-wrap:wrap;gap:6px;">';
-            for (const flag of insight.breed_risk_flags) {
-              html += '<span style="font-size:12px;background:#FFF4E0;color:#854F0B;padding:3px 10px;border-radius:10px;">' + esc(flag) + '</span>';
-            }
-            html += '</div></div>';
-          }
-          if (insight.recommendations && insight.recommendations.length > 0) {
-            html += '<div>';
-            html += '<div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.5px;color:#336026;margin-bottom:6px;">Recommendations</div>';
-            html += '<ul style="margin:0;padding-left:18px;">';
-            for (const rec of insight.recommendations) {
-              html += '<li style="font-size:13px;color:#444;line-height:1.7;">' + esc(rec) + '</li>';
-            }
-            html += '</ul></div>';
-          }
-          html += '<div style="font-size:11px;color:var(--text-secondary);margin-top:8px;">Updated ' + formatDate(insight.updated_at) + '</div>';
-          html += '</div>';
-        }
-        html += '</div>';
+      // ── Closing nudges ──
+
+      // Profile completeness nudge (slim, at the bottom — was a bulky progress bar at the top)
+      {
+        const barColor = completenessScore >= 80 ? 'var(--green)'
+          : completenessScore >= 50 ? 'var(--primary)'
+          : 'var(--amber)';
+        html += `<div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:10px 14px;margin-bottom:12px;display:flex;align-items:center;gap:12px;font-size:13px;">
+          <span style="font-weight:600;color:var(--text);">🐾 Profile ${completenessScore}% complete</span>
+          <div style="flex:1;background:var(--bg);border-radius:6px;height:6px;overflow:hidden;min-width:80px;max-width:200px;">
+            <div style="width:${completenessScore}%;height:100%;background:${barColor};transition:width .3s ease;"></div>
+          </div>
+          ${completenessScore < 80 ? `<span style="color:var(--text-secondary);font-size:12px;">Upload more records to fill in ${esc(petName)}'s profile.</span>` : ''}
+        </div>`;
       }
+
+      // Export/Share toolbar
+      html += `<div style="display:flex;justify-content:flex-end;gap:8px;margin-bottom:12px;flex-wrap:wrap;">
+        ${canEdit ? `<button class="btn btn-secondary btn-small" data-action="refresh-care-plan-from-activity" title="Let AI scan recent messages, notes, appointments, and escalations for this case and suggest updates to the care plan" ${state.aiExtractionInProgress ? 'disabled' : ''}>${state.aiExtractionInProgress ? '⏳ Refreshing…' : '🔄 Refresh from activity'}</button>` : ''}
+        <button class="btn btn-primary btn-small" data-action="prepare-for-visit" title="Generate a focused one-page summary to bring to your vet appointment">📋 Prepare for Visit</button>
+        <button class="btn btn-secondary btn-small" onclick="window.print()" title="Print the full care plan or save as PDF">🖨️ Print Full Plan</button>
+        <button class="btn btn-secondary btn-small" data-action="export-care-plan" title="Export the Living Care Plan as text">📤 Share</button>
+      </div>`;
 
       html += '</div>';
       return html;
