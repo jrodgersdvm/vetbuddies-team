@@ -1455,19 +1455,27 @@ Your free 30-day trial is active. No credit card on file. We'll be in touch.
 
         if (data.role === 'client') {
           // Prompt to set a password on first magic-link sign-in.
-          // Supabase sets identity provider to 'email' for both magic-link and password users,
-          // but only password users have a hashed_password in their identity_data.
-          // We surface the existing reset modal once per session so they can set a password
-          // and log in normally in the future.
+          // Reading identity_data.hashed_password from the client is unreliable —
+          // for older accounts that field isn't present even when encrypted_password
+          // is set, false-positiving the modal on every login. Use the
+          // current_user_has_password() RPC instead (SECURITY DEFINER → reads
+          // auth.users.encrypted_password). Cache on state.profile for reuse by
+          // renderProfileSettings.
           if (!state._passwordPromptShown) {
-            const identities = state.user.identities || [];
-            const hasPassword = identities.some(i =>
-              i.provider === 'email' && i.identity_data && i.identity_data.hashed_password
-            );
-            if (!hasPassword) {
-              state._showPasswordReset = true;
-              state._passwordPromptShown = true;
+            try {
+              const { data: hasPw, error: pwErr } = await sb.rpc('current_user_has_password');
+              if (pwErr) throw pwErr;
+              state.profile._hasPassword = !!hasPw;
+              if (!hasPw) {
+                state._showPasswordReset = true;
+              }
+            } catch (err) {
+              // RPC missing or unreachable — assume password is set so we don't
+              // spam the modal. Logged for debugging.
+              console.warn('current_user_has_password RPC failed:', err);
+              state.profile._hasPassword = true;
             }
+            state._passwordPromptShown = true;
           }
           // Auto-link any pending co-owner invites to this user
           await autoLinkCoOwnerInvites();
@@ -7370,8 +7378,9 @@ async function calculateBuddyScorecard(buddyId) {
 
     function renderProfileSettings() {
       const AVATAR_COLORS = ['#689562', '#336026', '#3498db', '#9b59b6', '#e67e22', '#e74c3c', '#27ae60', '#c0392b'];
-      const identities = state.user?.identities || [];
-      const hasPassword = identities.some(i => i.provider === 'email' && i.identity_data && i.identity_data.hashed_password);
+      // _hasPassword is populated by loadProfile via the current_user_has_password
+      // RPC. Default true so we show "Change password" if we haven't checked yet.
+      const hasPassword = state.profile?._hasPassword !== false;
       return renderLayout(`
         <div class="card" style="max-width: 520px;">
           <div class="card-title" style="margin-bottom: 20px;">Profile Settings</div>
@@ -9956,6 +9965,7 @@ function renderVaccineDueAlerts(vaccines) {
         return;
       }
       state._showPasswordReset=false;
+      if(state.profile) state.profile._hasPassword=true;
       showToast('Password set — you can now log in with your email and password.','success');
       render();
     }).catch(function(e){
