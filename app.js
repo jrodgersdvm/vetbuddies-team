@@ -13895,6 +13895,15 @@ function renderVaccineDueAlerts(vaccines) {
         state._inkwellLanding = true;
         navigate('inkwell-signup');
         render();
+      } else if (urlParams.get('signup') === '1') {
+        // Direct signup link (used by marketing-site CTAs that want to skip the
+        // login screen). Clean the param out of the visible URL so it isn't
+        // re-fired on reload, then land on the signup form. The auth-state
+        // listener below still runs; if a session is restored we'll bounce to
+        // the dashboard instead.
+        window.history.replaceState({}, '', window.location.pathname);
+        navigate('signup');
+        render();
       } else {
         // Show a quiet splash while INITIAL_SESSION resolves. If a session exists
         // we'll restore the user silently; if not we drop to the login form.
