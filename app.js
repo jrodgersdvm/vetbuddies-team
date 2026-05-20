@@ -5115,6 +5115,24 @@ async function calculateBuddyScorecard(buddyId) {
       const completenessScore = Math.max(0, Math.min(100, Number(state.carePlan?.completeness_score) || 0));
       let html = `<div class="care-plan-body">`;
 
+      // Profile completeness nudge — top of the care plan, just under the pet name header.
+      {
+        const barColor = completenessScore >= 80 ? 'var(--green)'
+          : completenessScore >= 50 ? 'var(--primary)'
+          : 'var(--amber)';
+        const breakdown = (typeof getCompletenessBreakdown === 'function') ? getCompletenessBreakdown() : [];
+        const actionableForUser = breakdown.filter(b => isClient ? b.clientActionable : true);
+        const showFinish = actionableForUser.length > 0 && completenessScore < 100;
+        html += `<div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:10px 14px;margin-bottom:12px;display:flex;align-items:center;gap:12px;font-size:13px;flex-wrap:wrap;">
+          <span style="font-weight:600;color:var(--text);">🐾 Profile ${completenessScore}% complete</span>
+          <div style="flex:1;background:var(--bg);border-radius:6px;height:6px;overflow:hidden;min-width:80px;max-width:200px;">
+            <div style="width:${completenessScore}%;height:100%;background:${barColor};transition:width .3s ease;"></div>
+          </div>
+          ${showFinish ? `<button class="btn btn-primary btn-small" data-action="open-completeness-modal" style="font-size:12px;padding:4px 12px;">✏️ Finish</button>` : ''}
+          ${completenessScore < 80 && !showFinish ? `<span style="color:var(--text-secondary);font-size:12px;">Upload more records to fill in ${esc(petName)}'s profile.</span>` : ''}
+        </div>`;
+      }
+
       // ── Status strip: at-a-glance chips (LCP status, next appt, check-in quota for staff, escalations for staff) ──
       {
         const chips = [];
@@ -5846,24 +5864,6 @@ async function calculateBuddyScorecard(buddyId) {
       }
 
       // ── Closing nudges ──
-
-      // Profile completeness nudge (slim, at the bottom — was a bulky progress bar at the top)
-      {
-        const barColor = completenessScore >= 80 ? 'var(--green)'
-          : completenessScore >= 50 ? 'var(--primary)'
-          : 'var(--amber)';
-        const breakdown = (typeof getCompletenessBreakdown === 'function') ? getCompletenessBreakdown() : [];
-        const actionableForUser = breakdown.filter(b => isClient ? b.clientActionable : true);
-        const showFinish = actionableForUser.length > 0 && completenessScore < 100;
-        html += `<div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:10px 14px;margin-bottom:12px;display:flex;align-items:center;gap:12px;font-size:13px;flex-wrap:wrap;">
-          <span style="font-weight:600;color:var(--text);">🐾 Profile ${completenessScore}% complete</span>
-          <div style="flex:1;background:var(--bg);border-radius:6px;height:6px;overflow:hidden;min-width:80px;max-width:200px;">
-            <div style="width:${completenessScore}%;height:100%;background:${barColor};transition:width .3s ease;"></div>
-          </div>
-          ${showFinish ? `<button class="btn btn-primary btn-small" data-action="open-completeness-modal" style="font-size:12px;padding:4px 12px;">✏️ Finish</button>` : ''}
-          ${completenessScore < 80 && !showFinish ? `<span style="color:var(--text-secondary);font-size:12px;">Upload more records to fill in ${esc(petName)}'s profile.</span>` : ''}
-        </div>`;
-      }
 
       // Export/Share toolbar
       html += `<div style="display:flex;justify-content:flex-end;gap:8px;margin-bottom:12px;flex-wrap:wrap;">
