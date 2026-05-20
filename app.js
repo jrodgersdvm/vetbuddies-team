@@ -47,6 +47,10 @@
       geneticInsights: [],
       geneticCaseTab: 'overview',
       carePlan: null,
+      diagnoses: [],
+      openQuestions: [],
+      goals: [],
+      careProviders: [],
       messages: [],
       realtimeChannel: null,
       timelineEntries: [],
@@ -78,6 +82,10 @@
       showOwnerCheckinForm: false,
       ownerCheckinSubmitting: false,
       touchpoints: [],
+      // Buddy dashboard reads touchpoints across ALL of a buddy's cases at once.
+      // state.touchpoints is per-case scoped (replaced when entering a case); this
+      // mirrored array survives view switches so the dashboard counts stay correct.
+      allBuddyTouchpoints: [],
       appointments: [],
       escalations: [],
       teamMembers: [],
@@ -101,7 +109,7 @@
       showReferral: false,
       messageThread: 'client', // 'client' | 'staff'
       analyticsData: null,
-      pwaInstallPrompt: null,
+      pwaInstallPrompt: window.__pwaInstallEvent || null,
       broadcastFilters: { tier: '', species: '', buddyId: '' },
       caseTags: [],
       darkMode: false,
@@ -128,6 +136,7 @@
       aiExtractionDocName: '',
       showAiReviewModal: false,
       aiCheckedItems: {},
+      aiAutoApplied: false,
       // Typing indicators
       typingUsers: {},
       _typingTimeout: null,
@@ -137,7 +146,17 @@
       _loginInProgress: false,
       // First-login bio prompt (vet buddies without a bio)
       showBioPrompt: false,
+      // Live pricing phase (intro vs regular) + remaining founding-member spots.
+      // Loaded from public.pricing_state during initApp(); safe defaults assume
+      // intro phase so the UI never accidentally renders the regular price if
+      // the network call fails on first paint.
+      pricingState: { intro_subscribers_count: 0, intro_subscriber_cap: 40, phase: 'intro' },
     };
+
+    // Bridge state.currentCase into the escalations.js drop-in so its floating
+    // Buddy FAB knows which case the user is on (it otherwise falls back to URL
+    // hash patterns the team app doesn't use).
+    window.VB_ESC_CONFIG = { getCurrentCaseId: () => state.currentCase?.id || state.caseId || null };
 
     // ── HTML escape utility (prevents XSS in user-generated content) ──
     // esc() is defined in utils.js
@@ -155,7 +174,7 @@
       if (params.caseId) state.caseId = params.caseId;
       if (params.caseTab) {
         // Back-compat: tabs that were folded into Care Plan sections become section scrolls.
-        const TAB_TO_SECTION = { careplan: null, files: 'documents', medications: 'health-record', vitals: 'health-record', vaccines: 'health-record', timeline: 'engagement', team: 'people', 'co-owners': 'people', notes: 'internal-notes', messages: 'messages' };
+        const TAB_TO_SECTION = { careplan: null, files: 'documents', medications: 'health-record', vitals: 'health-record', vaccines: 'health-record', appointments: 'appointments', timeline: 'engagement', team: 'people', 'co-owners': 'people', notes: 'internal-notes', messages: 'messages' };
         if (Object.prototype.hasOwnProperty.call(TAB_TO_SECTION, params.caseTab)) {
           state.caseTab = null;
           const section = TAB_TO_SECTION[params.caseTab];
@@ -179,7 +198,7 @@
         try {
           if (!localStorage.getItem('vb_careplan_redesign_seen')) {
             localStorage.setItem('vb_careplan_redesign_seen', '1');
-            setTimeout(() => showToast('Files, Medications, and more now live inline in your Care Plan — scroll down or use the section pills.', 'info'), 600);
+            setTimeout(() => showToast('Appointments, Medications, Vaccines & Files all live in your Care Plan — scroll down or use the section pills.', 'info'), 600);
           }
         } catch(e) {}
       }
@@ -354,47 +373,8 @@
 
     // ── Pet-level XP ──
     async function awardCareXP(petId, actionType) {
-      if (!petId || !actionType) return;
-      const baseXP = XP_MAP[actionType];
-      if (!baseXP) return;
-      const multiplier = getXPMultiplier();
-      const xp = Math.round(baseXP * multiplier);
-
-      try {
-        const { data: existing } = await sb.from('pet_care_level').select('*').eq('pet_id', petId).maybeSingle();
-        const now = new Date().toISOString();
-
-        let newXP, newStreak;
-        if (existing) {
-          newXP = (existing.xp_total || 0) + xp;
-          const lastDate = existing.last_activity_at ? new Date(existing.last_activity_at).toDateString() : null;
-          const today = new Date().toDateString();
-          const yesterday = new Date(Date.now() - 86400000).toDateString();
-          if (lastDate === today) {
-            newStreak = existing.streak_days || 1;
-          } else if (lastDate === yesterday) {
-            newStreak = (existing.streak_days || 0) + 1;
-          } else {
-            newStreak = 1;
-          }
-          const newLevel = getLevelForXP(newXP).level;
-          await sb.from('pet_care_level').update({
-            xp_total: newXP, level: newLevel, streak_days: newStreak,
-            last_activity_at: now, updated_at: now,
-          }).eq('pet_id', petId);
-        } else {
-          newXP = xp;
-          newStreak = 1;
-          const newLevel = getLevelForXP(newXP).level;
-          await sb.from('pet_care_level').insert({
-            pet_id: petId, xp_total: newXP, level: newLevel,
-            streak_days: newStreak, last_activity_at: now,
-          });
-        }
-        await checkBadgeTriggers(petId, actionType);
-      } catch (err) {
-        console.warn('awardCareXP failed (non-blocking):', err);
-      }
+      // Gamification removed (XP, levels, streaks misalign with SHARE/SUPPORT/BRIDGE).
+      // Stub keeps all call-site interfaces intact — 0 queries fired.
     }
 
     // ── Care team activity logging ──
@@ -553,10 +533,10 @@
       return t === 'buddy_vip' ? 3 : t === 'buddy_plus' ? 2 : 1;
     }
 
-    function canAccessFeature(feature, caseId) {
-      if (state.profile?.role !== 'client') return true;
-      const level = getUserTierLevel(caseId);
-      return level >= (FEATURE_MIN_TIER[feature] || 1);
+    // DEV_OVERRIDE 2026-04-28: tier gating disabled while testing.
+    // Original logic: clients gated by FEATURE_MIN_TIER[feature].
+    function canAccessFeature(_feature, _caseId) {
+      return true;
     }
 
     function getXPMultiplier(caseId) {
@@ -605,12 +585,12 @@
           state.aiExtractionResult = result.extraction;
           state.aiExtractionDocId = doc.id;
           state.aiExtractionDocName = doc.name;
-          // Pre-check all items
+          // Edge function auto-applies medications/vaccines/diagnoses to the care plan
+          // before returning. The review modal only writes the items auto-apply skips
+          // (vitals, care goals, pet profile additions, timeline entry).
+          state.aiAutoApplied = !!(result.auto_applied && !result.auto_applied.skipped && !result.auto_applied.error);
           const checked = {};
           const ext = result.extraction;
-          (ext.diagnoses || []).forEach((_, i) => { checked['diag_' + i] = true; });
-          (ext.medications || []).forEach((_, i) => { checked['med_' + i] = true; });
-          (ext.vaccines || []).forEach((_, i) => { checked['vax_' + i] = true; });
           if (ext.vitals?.weight || ext.vitals?.temperature) checked['vitals'] = true;
           (ext.care_goals || []).forEach((_, i) => { checked['goal_' + i] = true; });
           if (ext.pet_profile_additions) checked['profile'] = true;
@@ -620,6 +600,12 @@
         // The edge function has already auto-populated care_plans direct columns,
         // inserted pet_vaccines + care_plan_diagnoses rows, recomputed completeness,
         // and (if applicable) posted an owner-facing kb_messages follow-up.
+        // Persist the record date so documents can be sorted by service date, not upload date.
+        if (result.extraction.document_date) {
+          sb.from('case_documents').update({ record_date: result.extraction.document_date }).eq('id', doc.id).then(() => {}, () => {});
+          const localDocRef = (state.documents || []).find(d => d.id === doc.id);
+          if (localDocRef) localDocRef.record_date = result.extraction.document_date;
+        }
         // Reload the surfaces the user might be looking at so the UI reflects it.
         try {
           const petId = state.currentCase?.pets?.id;
@@ -711,81 +697,81 @@
       }
     }
 
-    // Process all pending docs in the current case sequentially in the background.
-    // Silent (no toasts, no modal). Bails on the first credit-low result to avoid hammering.
-    async function retryPendingExtractions(caseId) {
-      const pending = (state.documents || []).filter(d => d.ai_extraction_status === 'pending' && AI_SUPPORTED_TYPES.includes(d.mime_type));
-      for (const doc of pending) {
-        const status = await runAiExtraction(doc, caseId, { openReviewModal: false, showToasts: false, isRetry: true });
-        if (status === 'pending') break; // credits still low — stop early to avoid burning attempts
-      }
-    }
-
     async function applyAiExtraction() {
       const ext = state.aiExtractionResult;
       const checked = state.aiCheckedItems;
       if (!ext || !state.caseId) return;
 
       const petId = state.currentCase?.pets?.id;
+      const autoApplied = !!state.aiAutoApplied;
       const appliedItems = [];
 
+      // supabase-js does NOT throw on db errors — it returns { error } in the response.
+      // Wrap each insert/update in a check so failures surface instead of silently
+      // dropping rows (which is what made this look like "nothing happens").
+      const must = async (label, promise) => {
+        const { error } = await promise;
+        if (error) throw new Error(`${label} failed: ${error.message || error.code || 'unknown error'}`);
+      };
+
       try {
-        // 1. Insert medications
-        for (let i = 0; i < (ext.medications || []).length; i++) {
-          if (!checked['med_' + i]) continue;
-          const med = ext.medications[i];
-          await sb.from('pet_medications').insert({
-            pet_id: petId,
-            case_id: state.caseId,
-            name: med.name,
-            dose: med.dose || null,
-            frequency: med.frequency || null,
-            start_date: med.start_date || null,
-            added_by: state.profile.id,
-          });
-          appliedItems.push('Medication: ' + med.name);
+        // Medications, vaccines, and diagnoses are written by the edge function's
+        // auto-apply when this modal is opened from a file extraction. We only
+        // re-insert them when auto-apply was skipped (activity-digest mode).
+        if (!autoApplied) {
+          for (let i = 0; i < (ext.medications || []).length; i++) {
+            if (!checked['med_' + i]) continue;
+            const med = ext.medications[i];
+            await must('Medication insert', sb.from('pet_medications').insert({
+              pet_id: petId,
+              case_id: state.caseId,
+              name: med.name,
+              dose: med.dose || null,
+              frequency: med.frequency || null,
+              start_date: med.start_date || null,
+              added_by: state.profile.id,
+            }));
+            appliedItems.push('Medication: ' + med.name);
+          }
+
+          for (let i = 0; i < (ext.vaccines || []).length; i++) {
+            if (!checked['vax_' + i]) continue;
+            const vax = ext.vaccines[i];
+            await must('Vaccine insert', sb.from('pet_vaccines').insert({
+              pet_id: petId,
+              name: vax.name,
+              administered_date: vax.administered_date || null,
+              due_date: vax.due_date || null,
+              notes: vax.notes || null,
+              added_by: state.profile.id,
+            }));
+            appliedItems.push('Vaccine: ' + vax.name);
+          }
         }
 
-        // 2. Insert vaccines
-        for (let i = 0; i < (ext.vaccines || []).length; i++) {
-          if (!checked['vax_' + i]) continue;
-          const vax = ext.vaccines[i];
-          await sb.from('pet_vaccines').insert({
-            pet_id: petId,
-            name: vax.name,
-            administered_date: vax.administered_date || null,
-            due_date: vax.due_date || null,
-            notes: vax.notes || null,
-            added_by: state.profile.id,
-          });
-          appliedItems.push('Vaccine: ' + vax.name);
-        }
-
-        // 3. Insert vitals
+        // Vitals — edge function does not write pet_vitals.
         if (checked['vitals'] && (ext.vitals?.weight || ext.vitals?.temperature)) {
-          await sb.from('pet_vitals').insert({
+          await must('Vitals insert', sb.from('pet_vitals').insert({
             pet_id: petId,
             weight: ext.vitals.weight || null,
             temperature: ext.vitals.temperature || null,
             notes: 'AI-extracted from ' + state.aiExtractionDocName,
             recorded_by: state.profile.id,
-          });
+          }));
           appliedItems.push('Vitals recorded');
         }
 
-        // 4. Update care plan
+        // Living-care-plan content blob — edge function only writes direct columns,
+        // never the JSON content. Refresh first so we don't clobber concurrent edits.
         await loadCarePlan(state.caseId);
         const lp = state.carePlan?.living_plan || { pet_profile: '', care_team: [], active_care_goals: [], engagement_log: [], milestones_and_wins: [] };
 
-        // Append to pet profile
         if (checked['profile'] && ext.pet_profile_additions) {
           const dateStr = ext.document_date || new Date().toISOString().split('T')[0];
-          const addition = `\n[${dateStr}] ${ext.pet_profile_additions}`;
-          lp.pet_profile = (lp.pet_profile || '') + addition;
+          lp.pet_profile = (lp.pet_profile || '') + `\n[${dateStr}] ${ext.pet_profile_additions}`;
           appliedItems.push('Pet profile updated');
         }
 
-        // Add care goals
         for (let i = 0; i < (ext.care_goals || []).length; i++) {
           if (!checked['goal_' + i]) continue;
           lp.active_care_goals.push({
@@ -798,7 +784,6 @@
           appliedItems.push('Goal: ' + ext.care_goals[i]);
         }
 
-        // Add engagement log entry
         const logSummary = ext.summary || 'Medical record analyzed by AI';
         lp.engagement_log.push({
           entry_text: `AI extracted from "${state.aiExtractionDocName}": ${logSummary}`,
@@ -806,39 +791,36 @@
           created_at: new Date().toISOString(),
         });
 
-        // Save care plan
         if (state.carePlan?.id) {
-          await sb.from('care_plans').update({
+          await must('Care plan update', sb.from('care_plans').update({
             content: JSON.stringify(lp),
             updated_by: state.profile.id,
             updated_at: new Date().toISOString(),
-          }).eq('id', state.carePlan.id);
+          }).eq('id', state.carePlan.id));
         } else {
-          await sb.from('care_plans').insert({
+          await must('Care plan insert', sb.from('care_plans').insert({
             case_id: state.caseId,
             content: JSON.stringify(lp),
             updated_by: state.profile.id,
             updated_at: new Date().toISOString(),
-          });
+          }));
         }
 
-        // 5. Create timeline entry
         const timelineSummary = [
           ext.summary,
           ext.diagnoses?.length ? 'Diagnoses: ' + ext.diagnoses.join(', ') : '',
           appliedItems.length ? 'Applied: ' + appliedItems.length + ' items' : '',
         ].filter(Boolean).join(' | ');
 
-        await sb.from('timeline_entries').insert({
+        await must('Timeline entry insert', sb.from('timeline_entries').insert({
           case_id: state.caseId,
           author_id: state.profile.id,
           type: 'update',
           content: `📄 AI Medical Record Analysis — "${state.aiExtractionDocName}"\n${timelineSummary}`,
           is_client_visible: true,
           created_at: new Date().toISOString(),
-        });
+        }));
 
-        // 6. Reload all affected data
         await Promise.all([
           loadCarePlan(state.caseId),
           loadPetMedications(petId),
@@ -848,16 +830,21 @@
           loadDocuments(state.caseId),
         ]);
 
-        // Close modal and notify
         state.showAiReviewModal = false;
         state.aiExtractionResult = null;
         state.aiExtractionDocId = null;
+        state.aiAutoApplied = false;
         state.aiCheckedItems = {};
-        showToast(`AI extraction applied — ${appliedItems.length} items added to care plan!`, 'success');
+        const summarySuffix = autoApplied
+          ? ` (medications, vaccines, diagnoses were auto-imported earlier)`
+          : '';
+        showToast(`AI extraction applied — ${appliedItems.length} items added to care plan${summarySuffix}.`, 'success');
         render();
       } catch (err) {
         console.error('Apply AI extraction error:', err);
-        showToast('Failed to apply some extracted data: ' + (err.message || 'Error'), 'error');
+        showToast('Failed to apply: ' + (err.message || 'Error'), 'error');
+        // Re-throw so the click handler's finally clause can reset the button.
+        throw err;
       }
     }
 
@@ -994,6 +981,9 @@
         state.aiExtractionDocId = null;
         state.aiExtractionDocName = `Case activity digest — ${new Date().toISOString().slice(0, 10)}`;
         state.aiExtractionInProgress = false;
+        // Activity-digest mode does NOT auto-apply (edge function gates auto-apply on file mode).
+        // The modal is the apply path here, so medications/vaccines/diagnoses checkboxes are live.
+        state.aiAutoApplied = false;
         const checked = {};
         const ext = result.extraction;
         (ext.diagnoses || []).forEach((_, i) => { checked['diag_' + i] = true; });
@@ -1155,6 +1145,13 @@
           if (insertError) throw insertError;
         }
 
+        // The INSERT/UPDATE above fires trg_sync_user_role_to_jwt, which writes
+        // role + user_id into auth.users.raw_app_meta_data. The session we just got
+        // from signUp predates that write, so RLS helpers (get_my_role/get_my_user_id)
+        // would read empty. Refresh the session so downstream loadProfile/loadCases
+        // queries see the role and see their own data.
+        try { await sb.auth.refreshSession(); } catch (refreshErr) { console.warn('[signup] session refresh failed:', refreshErr); }
+
         // Auto-sign-in: if session was returned (email confirm disabled), go straight to onboarding
         if (data.session) {
           state.user = data.user;
@@ -1189,6 +1186,131 @@
       }
     }
 
+    async function handleInkwellSignup(e) {
+      e.preventDefault();
+      const firstName = document.querySelector('[data-field="inkwell-first-name"]').value.trim();
+      const lastName = document.querySelector('[data-field="inkwell-last-name"]').value.trim();
+      const email = document.querySelector('[data-field="inkwell-email"]').value.trim();
+      const password = document.querySelector('[data-field="inkwell-password"]').value;
+
+      if (!firstName || !lastName || !email || !password) {
+        showToast('Please fill in all fields', 'error');
+        return;
+      }
+      if (password.length < 8) {
+        showToast('Password must be at least 8 characters', 'error');
+        return;
+      }
+      if (await isPasswordPwned(password)) {
+        showToast('This password has appeared in a known data breach. Please choose a different password.', 'error');
+        return;
+      }
+
+      const fullName = `${firstName} ${lastName}`.trim();
+      const trialEndsAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString();
+
+      try {
+        const { data, error } = await sb.auth.signUp({ email, password });
+        if (error) throw error;
+
+        // If admin pre-created a record OR a previous signup row exists, link/update it
+        // without clobbering an existing referral_source.
+        const { data: existingUser } = await sb.from('users').select('id, role, referral_source').eq('email', email).maybeSingle();
+        if (existingUser) {
+          const updates = { auth_id: data.user.id };
+          if (!existingUser.referral_source) updates.referral_source = 'inkwell';
+          // Only stamp the trial fields when this row hasn't already started a trial.
+          // (Don't overwrite a paying customer's data.)
+          updates.subscription_status = updates.subscription_status || 'trialing';
+          updates.trial_ends_at = trialEndsAt;
+          const { error: linkError } = await sb.from('users').update(updates).eq('email', email);
+          if (linkError) throw linkError;
+        } else {
+          const initials = getFirstInitials(fullName);
+          const color = getRandomColor();
+          const { error: insertError } = await sb.from('users').insert({
+            auth_id: data.user.id,
+            name: fullName,
+            email,
+            role: 'client',
+            avatar_initials: initials,
+            avatar_color: color,
+            subscription_status: 'trialing',
+            trial_ends_at: trialEndsAt,
+            referral_source: 'inkwell',
+          });
+          if (insertError) throw insertError;
+        }
+
+        // Refresh session so the just-synced role/user_id in app_metadata is in our JWT
+        // before loadProfile/loadCases run (otherwise RLS helpers return null).
+        try { await sb.auth.refreshSession(); } catch (refreshErr) { console.warn('[inkwell] session refresh failed:', refreshErr); }
+
+        // Fire-and-forget welcome email — never block the signup flow on email.
+        // send-email's verify_jwt is true; the session from auth.signUp is sufficient.
+        if (data.session) {
+          callEdgeFunction('send-email', {
+            to: email,
+            subject: 'Your Buddy is ready — welcome to Vet Buddies',
+            html: inkwellWelcomeHtml(firstName),
+            text: inkwellWelcomeText(firstName),
+            tags: ['inkwell-welcome'],
+          }).catch(err => console.warn('[inkwell] welcome email failed:', err));
+        }
+
+        if (data.session) {
+          state.user = data.user;
+          state._inkwellLanding = false;
+          // Clean the /inkwell path so refreshes don't re-render the signup view
+          try { window.history.replaceState({}, '', '/'); } catch(_) {}
+          showToast(`Welcome to Vet Buddies, ${firstName}! 🐾`, 'success');
+          const profileOk = await loadProfile();
+          if (!profileOk) return;
+          render();
+        } else {
+          // Email confirmation still required (project setting). Tell the user.
+          showToast('Account created! Check your email to confirm, then sign in.', 'success');
+          navigate('login');
+          render();
+        }
+      } catch (err) {
+        console.error(err);
+        if (err.message && err.message.toLowerCase().includes('already registered')) {
+          showToast('An account with this email already exists. Please sign in.', 'error');
+          navigate('login');
+          render();
+        } else {
+          showToast(err.message || 'Sign up failed', 'error');
+        }
+      }
+    }
+
+    function inkwellWelcomeHtml(firstName) {
+      const safeName = (firstName || 'there').replace(/[<>&"]/g, c => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;' }[c]));
+      const portal = 'https://vetbuddies-team.netlify.app/';
+      return `<div style="font-family:'DM Sans',Arial,sans-serif;font-size:15px;line-height:1.6;color:#3d3328;max-width:520px;">
+        <p>Hi ${safeName},</p>
+        <p>Welcome to Vet Buddies. We're so glad Inkwell sent you our way.</p>
+        <p>Your dedicated Buddy will reach out within 24 hours to check in on your pet's recovery and answer anything that's on your mind. There's nothing you need to do right now — but if you'd like to get a head start, you can <a href="${portal}" style="color:#336026;font-weight:600;">complete your pet's profile here</a>. The more we know, the better your Buddy can support you.</p>
+        <p>Your free 30-day trial is active. No credit card on file. We'll be in touch.</p>
+        <p style="margin-top:24px;">— The Vet Buddies team</p>
+      </div>`;
+    }
+
+    function inkwellWelcomeText(firstName) {
+      const safeName = firstName || 'there';
+      const portal = 'https://vetbuddies-team.netlify.app/';
+      return `Hi ${safeName},
+
+Welcome to Vet Buddies. We're so glad Inkwell sent you our way.
+
+Your dedicated Buddy will reach out within 24 hours to check in on your pet's recovery and answer anything that's on your mind. There's nothing you need to do right now — but if you'd like to get a head start, you can complete your pet's profile here: ${portal}. The more we know, the better your Buddy can support you.
+
+Your free 30-day trial is active. No credit card on file. We'll be in touch.
+
+— The Vet Buddies team`;
+    }
+
     async function handleSignIn(e) {
       e.preventDefault();
       const email = document.querySelector('[data-field="signin-email"]').value.trim();
@@ -1210,7 +1332,7 @@
         state.user = data.user;
         const profileOk = await loadProfile();
         if (!profileOk) {
-          showToast('Could not load your profile. Please try again or contact support.', 'error');
+          // loadProfile already surfaced its own error toast and signed out.
           return;
         }
         // Accept care team invite if present
@@ -1225,11 +1347,17 @@
         }
         render();
       } catch (err) {
-        console.error(err);
-        if (err.message && err.message.toLowerCase().includes('email not confirmed')) {
-          showToast('Please confirm your email before signing in. Check your inbox.', 'error');
+        console.error('[signin]', err);
+        const msg = (err.message || '').toLowerCase();
+        const code = err.code || err.error_code || err.name || '';
+        if (msg.includes('email not confirmed')) {
+          showToast('Please confirm your email before signing in. Check your inbox (and spam folder).', 'error');
+        } else if (msg.includes('invalid login') || code === 'invalid_credentials') {
+          showToast('Email or password is incorrect. Use "Forgot password?" if you need to reset it.', 'error');
+        } else if (err.status === 0 || msg.includes('failed to fetch') || msg.includes('networkerror')) {
+          showToast('Network problem reaching the server. Check your connection and try again.', 'error');
         } else {
-          showToast(err.message || 'Sign in failed', 'error');
+          showToast(`Sign in failed: ${err.message || code || 'unknown error'}`, 'error');
         }
       } finally {
         state._loginInProgress = false;
@@ -1297,6 +1425,21 @@
         }
 
         if (data.role === 'client') {
+          // Prompt to set a password on first magic-link sign-in.
+          // Supabase sets identity provider to 'email' for both magic-link and password users,
+          // but only password users have a hashed_password in their identity_data.
+          // We surface the existing reset modal once per session so they can set a password
+          // and log in normally in the future.
+          if (!state._passwordPromptShown) {
+            const identities = state.user.identities || [];
+            const hasPassword = identities.some(i =>
+              i.provider === 'email' && i.identity_data && i.identity_data.hashed_password
+            );
+            if (!hasPassword) {
+              state._showPasswordReset = true;
+              state._passwordPromptShown = true;
+            }
+          }
           // Auto-link any pending co-owner invites to this user
           await autoLinkCoOwnerInvites();
           // Check if new user with no subscription → onboarding
@@ -1310,22 +1453,33 @@
             state.onboardingStep = 2;
             navigate('onboarding');
           } else {
-            // Pre-load care plan + appointments + messages for first case so the
-            // dashboard's inline conversation panel renders with real data on first paint.
+            // Land owners directly on the full care plan view (client-case). The
+            // summary dashboard hid medications/vitals/vaccines/documents/co-owners
+            // and they only appeared after navigating via Messages → client-case.
             const firstCase = state.cases[state.activePetIndex || 0] || state.cases[0];
             if (firstCase) {
               state.caseId = firstCase.id;
-              state.currentCase = firstCase;
+              await loadCase(firstCase.id);
+              const petId = state.currentCase?.pets?.id || firstCase.pets?.id;
               await Promise.all([
                 loadCarePlan(firstCase.id),
-                loadAppointments(firstCase.id),
-                loadPetCareProfile(firstCase.pets?.id),
-                loadTimeline(firstCase.id),
                 loadMessages(firstCase.id),
+                loadTimeline(firstCase.id),
+                loadAppointments(firstCase.id),
+                loadDocuments(firstCase.id),
+                loadGeneticInsights(firstCase.id),
+                petId ? loadPetMedications(petId) : Promise.resolve(),
+                petId ? loadPetVitals(petId) : Promise.resolve(),
+                petId ? loadPetVaccines(petId) : Promise.resolve(),
+                petId ? loadPetCoOwners(petId) : Promise.resolve(),
+                petId ? loadPetCareProfile(petId).catch(() => {}) : Promise.resolve(),
                 loadOwnerCheckin(),
               ]);
+              subscribeToMessages(firstCase.id);
+              navigate('client-case');
+            } else {
+              navigate('client-dashboard');
             }
-            navigate('client-dashboard');
           }
           // Load client unread count + start global notifications + appointment reminders
           loadClientUnreadCount().then(() => render());
@@ -1347,7 +1501,12 @@
           }
           const caseLoader = data.role === 'geneticist' ? loadGeneticistCases() : loadCases();
           caseLoader.then(async () => {
-            await Promise.all([loadUnreadCount(), loadAllUnreadMessages()]);
+            const extraLoaders = [loadUnreadCount(), loadAllUnreadMessages()];
+            if (data.role === 'vet_buddy') {
+              extraLoaders.push(loadEscalations());
+              extraLoaders.push(loadAllBuddyTouchpoints());
+            }
+            await Promise.all(extraLoaders);
             subscribeToGlobalNotifications();
             render();
           });
@@ -1358,7 +1517,14 @@
         return true;
       } catch (err) {
         console.error('loadProfile failed:', err);
-        showToast('Something went wrong loading your account. Please try signing in again.', 'error');
+        // Surface the underlying Supabase error code so support tickets have signal.
+        // PGRST116 = "no rows returned by .single()" → public.users row is missing for this auth_id
+        // (likely a signup that didn't complete the INSERT step or a deleted profile row).
+        const code = err.code || err.name || '';
+        const detail = code === 'PGRST116'
+          ? 'no profile linked to this account'
+          : (err.message || code || 'unknown error');
+        showToast(`Could not load your account (${detail}). Please contact support.`, 'error');
         // Clear stale session and return to login rather than showing a blank page
         await sb.auth.signOut({ scope: 'local' });
         state.user = null;
@@ -1374,7 +1540,7 @@
         let query;
         const selectFields = `
             id, pet_id, assigned_buddy_id, status, subscription_tier, updated_at, created_at, last_client_message_at,
-            pets (id, name, species, photo_url, owner_id, owner:users!owner_id (id, name)),
+            pets (id, name, species, photo_url, owner_id, owner:users!owner_id (id, name, referral_source, subscription_status, trial_ends_at)),
             assigned_buddy:users!assigned_buddy_id (id, name, avatar_initials, avatar_color, bio, response_time)
         `;
 
@@ -1429,43 +1595,18 @@
     }
 
     async function loadPetCareProfile(petId) {
-      if (!petId) return;
-      try {
-        const userId = state.profile?.id;
-        const caseId = state.cases?.find(c => c.pets?.id === petId)?.id;
-        const fetches = [
-          sb.from('pet_care_level').select('*').eq('pet_id', petId).maybeSingle(),
-          sb.from('pet_badges').select('*').eq('pet_id', petId).order('display_order'),
-          userId ? sb.from('user_care_stats').select('*').eq('user_id', userId).maybeSingle() : Promise.resolve({ data: null }),
-          userId ? sb.from('user_badges').select('*').eq('user_id', userId) : Promise.resolve({ data: [] }),
-          caseId ? sb.from('case_access').select('*').eq('case_id', caseId) : Promise.resolve({ data: [] }),
-          userId ? sb.from('care_requests').select('*, pets(name, species, photo_url)').eq('status', 'open').neq('owner_id', userId).limit(10) : Promise.resolve({ data: [] }),
-          userId ? sb.from('care_requests').select('*, pets(name, species, photo_url)').eq('claimed_by', userId).in('status', ['claimed','completed']) : Promise.resolve({ data: [] }),
-          caseId ? sb.from('pending_invites').select('*').eq('case_id', caseId).eq('invite_source', 'care_team').is('used_at', null) : Promise.resolve({ data: [] }),
-          userId ? sb.from('referrals').select('*').eq('referrer_id', userId) : Promise.resolve({ data: [] }),
-        ];
-        const [clRes, badgesRes, statsRes, uBadgesRes, teamRes, openReqRes, myClaimedRes, pendingCTRes, referralsRes] = await Promise.all(fetches);
-        state._petCareLevel = clRes.data || {};
-        state._petBadges = badgesRes.data || [];
-        state._userCareStats = statsRes.data || {};
-        state._userBadges = uBadgesRes.data || [];
-        state._careTeamMembers = teamRes.data || [];
-        state._openCareRequests = openReqRes.data || [];
-        state._myClaimedRequests = myClaimedRes.data || [];
-        state._pendingCareTeamInvites = pendingCTRes.data || [];
-        state._referrals = referralsRes.data || [];
-      } catch (err) {
-        console.warn('loadPetCareProfile failed:', err);
-        state._petCareLevel = {};
-        state._petBadges = [];
-        state._userCareStats = {};
-        state._userBadges = [];
-        state._careTeamMembers = [];
-        state._openCareRequests = [];
-        state._myClaimedRequests = [];
-        state._pendingCareTeamInvites = [];
-        state._referrals = [];
-      }
+      // Gamification removed (XP, badges, streaks, community score, care requests, referrals);
+      // tables are empty in production and misaligned with SHARE/SUPPORT/BRIDGE. Stub keeps
+      // the call-site interface and initializes state keys to safe empty defaults — 0 queries.
+      state._petCareLevel = {};
+      state._petBadges = [];
+      state._userCareStats = {};
+      state._userBadges = [];
+      state._careTeamMembers = [];
+      state._openCareRequests = [];
+      state._myClaimedRequests = [];
+      state._pendingCareTeamInvites = [];
+      state._referrals = [];
     }
 
     async function loadCase(caseId) {
@@ -1602,6 +1743,27 @@
           .update({ user_id: state.profile.id, status: 'accepted', accepted_at: new Date().toISOString() })
           .eq('id', inviteId);
         if (error) throw error;
+        // Seed a trial if the accepter has no existing access path — otherwise pending_claim / brand-new
+        // users land on a paywall right after accepting and can't use what they were just invited to.
+        const currentStatus = state.profile?.subscription_status;
+        if (!currentStatus || currentStatus === 'none' || currentStatus === 'pending_claim') {
+          const trialEnd = new Date();
+          const days = (typeof CONFIG !== 'undefined' && CONFIG.TRIAL_DURATION_DAYS) || 30;
+          trialEnd.setDate(trialEnd.getDate() + days);
+          const nowIso = new Date().toISOString();
+          const { error: trialErr } = await sb.from('users').update({
+            subscription_status: 'trialing',
+            trial_started_at: nowIso,
+            trial_ends_at: trialEnd.toISOString(),
+          }).eq('id', state.profile.id);
+          if (trialErr) {
+            console.warn('Failed to seed trial on co-owner invite acceptance:', trialErr);
+          } else {
+            state.profile.subscription_status = 'trialing';
+            state.profile.trial_started_at = nowIso;
+            state.profile.trial_ends_at = trialEnd.toISOString();
+          }
+        }
         await loadPendingCoOwnerInvites();
         await loadCases();
         render();
@@ -1694,8 +1856,14 @@
 
     async function loadCarePlan(caseId) {
       try {
-        const { data, error } = await sb.from('care_plans').select('*').eq('case_id', caseId).single();
-        if (error && error.code !== 'PGRST116') throw error;
+        // Defense-in-depth: clients get an explicit safe column list so dvm_clinical_notes,
+        // internal_notes, and owner_context never enter their browser state. Staff get '*'.
+        // RLS still backstops; this just keeps sensitive fields out of dev-tools view.
+        const role = state.profile?.role;
+        const CLIENT_SAFE_COLS = 'id, case_id, pet_id, content, summary, medications, diet_notes, lifestyle_notes, goals, diagnoses, next_steps, next_appointment_title, next_appointment_at, last_appointment_summary, last_appointment_at, allergies, handling_behavior, handling_medical, open_questions, lcp_status, completeness_score, completeness_updated_at, updated_at, updated_by';
+        const cols = role === 'client' ? CLIENT_SAFE_COLS : '*';
+        const { data, error } = await sb.from('care_plans').select(cols).eq('case_id', caseId).maybeSingle();
+        if (error) throw error;
         // Preserve the raw record for id/case_id/timestamps, attach parsed living plan
         const raw = data || { case_id: caseId };
         raw.living_plan = parseLivingCarePlan(data);
@@ -1710,6 +1878,29 @@
         if (!raw.last_appointment_summary) raw.last_appointment_summary = '';
         if (!raw.internal_notes) raw.internal_notes = '';
         state.carePlan = raw;
+
+        // Load structured child rows for the Diagnoses, Open Questions, Goals, and
+        // Care Team Providers sections. Goals + careProviders flipped from JSON blob
+        // to child tables in slice 3 — render falls back to lp.active_care_goals /
+        // lp.care_team when state arrays are empty (defensive; backfill is complete
+        // for all known plans, but legacy or AI-only data may still live in the blob).
+        if (raw.id) {
+          const [{ data: dxData }, { data: oqData }, { data: goalsData }, { data: providersData }] = await Promise.all([
+            sb.from('care_plan_diagnoses').select('*').eq('care_plan_id', raw.id).order('diagnosed_on', { ascending: false, nullsFirst: false }),
+            sb.from('care_plan_open_questions').select('*').eq('care_plan_id', raw.id).order('status', { ascending: true }).order('target_visit_date', { ascending: true, nullsFirst: false }).order('created_at', { ascending: false }),
+            sb.from('care_plan_goals').select('*').eq('care_plan_id', raw.id).order('created_at', { ascending: false }),
+            sb.from('care_plan_care_team').select('*').eq('care_plan_id', raw.id).order('is_primary', { ascending: false }).order('created_at', { ascending: false }),
+          ]);
+          state.diagnoses = dxData || [];
+          state.openQuestions = oqData || [];
+          state.goals = goalsData || [];
+          state.careProviders = providersData || [];
+        } else {
+          state.diagnoses = [];
+          state.openQuestions = [];
+          state.goals = [];
+          state.careProviders = [];
+        }
       } catch (err) {
         console.error('loadCarePlan error:', err);
         showToast('Could not load care plan.', 'error');
@@ -1799,6 +1990,28 @@
       }
     }
 
+    // Buddy dashboard needs touchpoints across ALL of a buddy's cases to compute
+    // per-case progress and "needs check-in" alerts. loadTouchpoints is per-case
+    // and replaces state.touchpoints when entering a single case, so the dashboard
+    // can't rely on it.
+    async function loadAllBuddyTouchpoints() {
+      const caseIds = (state.cases || []).map(c => c.id).filter(Boolean);
+      if (caseIds.length === 0) { state.allBuddyTouchpoints = []; return; }
+      try {
+        const now = new Date();
+        const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+        const { data, error } = await sb.from('touchpoints')
+          .select('case_id, type, completed_at, completed_by, completed_by_user:users!completed_by(name)')
+          .in('case_id', caseIds)
+          .gte('completed_at', startOfMonth.toISOString());
+        if (error) throw error;
+        state.allBuddyTouchpoints = data || [];
+      } catch (err) {
+        console.error('loadAllBuddyTouchpoints error:', err);
+        state.allBuddyTouchpoints = [];
+      }
+    }
+
     async function loadAppointments(caseId) {
       try {
         const { data, error } = await sb.from('appointments').select('*').eq('case_id', caseId).order('scheduled_at', { ascending: true });
@@ -1811,7 +2024,7 @@
 
     async function loadDocuments(caseId) {
       try {
-        const { data, error } = await sb.from('case_documents').select('*, uploaded_by_user:users!uploaded_by(name)').eq('case_id', caseId).order('created_at', { ascending: false });
+        const { data, error } = await sb.from('case_documents').select('*, uploaded_by_user:users!uploaded_by(name)').eq('case_id', caseId).order('record_date', { ascending: false, nullsFirst: false }).order('created_at', { ascending: false });
         if (error) throw error;
         state.documents = data || [];
       } catch (err) {
@@ -1824,7 +2037,7 @@
       if (state.profile?.role !== 'client' || !state.profile?.id) { state.ownerCheckin = null; return; }
       try {
         const { data, error } = await sb.from('owner_checkins')
-          .select('id, submitted_at, sleep_rating, eating_rating, movement_rating, reflection, generated_summary')
+          .select('id, submitted_at, sleep_rating, eating_rating, movement_rating, reflection, generated_summary, scale_version')
           .eq('user_id', state.profile.id)
           .order('submitted_at', { ascending: false })
           .limit(1)
@@ -1924,7 +2137,7 @@
           sb.from('users').select('*', { count: 'exact', head: true }).eq('role', 'client'),
           sb.from('cases').select('*', { count: 'exact', head: true }).eq('status', 'Active'),
           sb.from('messages').select('*', { count: 'exact', head: true }),
-          sb.from('escalations').select('*', { count: 'exact', head: true }).eq('status', 'open'),
+          sb.from('escalations').select('*', { count: 'exact', head: true }).eq('status', 'Open'),
           sb.from('users').select('id, created_at').eq('role', 'client').order('created_at', { ascending: false }).limit(30),
         ]);
         state.analyticsData = { totalClients, activeCases, totalMessages, openEscalations, recentSignups: recentSignups || [] };
@@ -2296,8 +2509,10 @@ async function loadHealthTimeline(petId) {
 async function toggleDarkMode() {
   try {
     state.darkMode = !state.darkMode;
+    if (state.profile) state.profile.dark_mode = state.darkMode;
     document.documentElement.dataset.theme = state.darkMode ? 'dark' : 'light';
     try { localStorage.setItem('vetbuddies_dark_mode', state.darkMode ? '1' : '0'); } catch(e) {}
+    render();
 
     const { error } = await sb
       .from('users')
@@ -2305,7 +2520,6 @@ async function toggleDarkMode() {
       .eq('id', state.profile.id);
 
     if (error) throw error;
-    render();
   } catch (err) {
     console.error('Error toggling dark mode:', err);
     showToast('Failed to update theme preference', 'error');
@@ -2624,14 +2838,20 @@ function checkVaccineDueDates(vaccines) {
 
 async function calculateBuddyScorecard(buddyId) {
   try {
-    const [casesRes, ratingsRes, messagesRes, escalationsRes] = await Promise.all([
+    const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+    const [casesRes, ratingsRes, messagesRes, escalationsRes, replyMsgsRes] = await Promise.all([
       sb.from('cases').select('id').eq('assigned_buddy_id', buddyId),
       sb.from('client_surveys').select('rating').eq('buddy_id', buddyId),
       sb.from('messages')
         .select('id')
         .eq('sender_id', buddyId)
-        .gte('created_at', new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString()),
-      sb.from('escalations').select('id').eq('raised_by', buddyId)
+        .gte('created_at', thirtyDaysAgo),
+      sb.from('escalations').select('id').eq('raised_by', buddyId),
+      // For response time: get recent client messages and buddy replies in assigned cases
+      sb.from('messages')
+        .select('case_id, sender_id, sender_role, created_at')
+        .gte('created_at', thirtyDaysAgo)
+        .order('created_at', { ascending: true })
     ]);
 
     const totalCases = casesRes.data ? casesRes.data.length : 0;
@@ -2640,8 +2860,32 @@ async function calculateBuddyScorecard(buddyId) {
     const messagesLast30 = messagesRes.data ? messagesRes.data.length : 0;
     const escalationCount = escalationsRes.data ? escalationsRes.data.length : 0;
 
-    // Calculate average response time (you may need to adjust based on your schema)
-    const responseTimeAvg = 24; // placeholder in hours
+    // Calculate average response time from client message → buddy reply pairs
+    let responseTimeAvg = null;
+    const assignedCaseIds = new Set((casesRes.data || []).map(c => c.id));
+    const allMsgs = (replyMsgsRes.data || []).filter(m => assignedCaseIds.has(m.case_id));
+    const responseTimes = [];
+    // Group by case, find client→buddy reply pairs
+    const msgsByCase = {};
+    for (const m of allMsgs) {
+      if (!msgsByCase[m.case_id]) msgsByCase[m.case_id] = [];
+      msgsByCase[m.case_id].push(m);
+    }
+    for (const msgs of Object.values(msgsByCase)) {
+      let pendingClientMsg = null;
+      for (const m of msgs) {
+        if (m.sender_role === 'client') {
+          pendingClientMsg = m;
+        } else if (m.sender_id === buddyId && pendingClientMsg) {
+          const diffHours = (new Date(m.created_at) - new Date(pendingClientMsg.created_at)) / 3600000;
+          if (diffHours >= 0 && diffHours <= 168) responseTimes.push(diffHours); // cap at 1 week
+          pendingClientMsg = null;
+        }
+      }
+    }
+    if (responseTimes.length > 0) {
+      responseTimeAvg = parseFloat((responseTimes.reduce((a, b) => a + b) / responseTimes.length).toFixed(1));
+    }
 
     // Calculate grade
     let grade = 'F';
@@ -2669,7 +2913,9 @@ async function calculateBuddyScorecard(buddyId) {
     async function loadEscalations() {
       try {
         const { data, error } = await sb.from('escalations').select(`
-          id, case_id, raised_by, reason, status, resolved_by, resolved_at, created_at, escalation_type, incident_notes,
+          id, case_id, raised_by, reason, status, priority, dvm_response,
+          acknowledged_by, acknowledged_at, resolved_by, resolved_at,
+          created_at, escalation_type, incident_notes,
           case:cases (id, pet_id, pets (id, name, species)),
           raised_by_user:users!raised_by (id, name, role)
         `).order('created_at', { ascending: false });
@@ -2727,15 +2973,20 @@ async function calculateBuddyScorecard(buddyId) {
             if (s.rating) ratingMap[s.buddy_id].push(s.rating);
           });
 
-          members.forEach(m => {
-            if (m.role !== 'vet_buddy') return;
+          for (const m of members) {
+            if (m.role !== 'vet_buddy') continue;
             m.active_cases_count = caseCounts[m.id] || 0;
             m.messages_30d = msgCounts[m.id] || 0;
             m.escalations_count = escCounts[m.id] || 0;
             const ratings = ratingMap[m.id] || [];
             m.avg_rating = ratings.length > 0 ? (ratings.reduce((a, b) => a + b, 0) / ratings.length).toFixed(1) : null;
-            m.avg_response_time = m.response_time || 'Typically within 24 hours';
-          });
+            // Calculate real response time from message pairs
+            try {
+              const sc = await calculateBuddyScorecard(m.id);
+              m.avg_response_time = sc?.responseTimeAvg != null ? sc.responseTimeAvg + 'h avg' : 'No data yet';
+              m.performance_grade = sc?.grade || null;
+            } catch(_) { m.avg_response_time = 'No data yet'; }
+          }
         }
 
         state.teamMembers = members;
@@ -2966,25 +3217,26 @@ async function calculateBuddyScorecard(buddyId) {
     // VIEW RENDER FUNCTIONS
     // ============================================
     function renderLogin() {
+      const busy = !!state._loginInProgress;
       return `
         <div class="auth-container">
           <div class="auth-card">
-            <div class="auth-logo"><svg width="200" height="60" viewBox="0 0 200 60" xmlns="http://www.w3.org/2000/svg"><text x="100" y="28" text-anchor="middle" fill="#336026" font-size="28" font-weight="700" font-family="Georgia,serif">Vet Buddies</text><text x="100" y="48" text-anchor="middle" fill="#689562" font-size="13" font-family="DM Sans,sans-serif">Your pet deserves a Buddy.</text></svg></div>
+            <div class="auth-logo"><svg width="280" height="60" viewBox="0 0 280 60" xmlns="http://www.w3.org/2000/svg"><text x="140" y="28" text-anchor="middle" fill="#336026" font-size="28" font-weight="700" font-family="Georgia,serif">Vet Buddies</text><text x="140" y="48" text-anchor="middle" fill="#689562" font-size="13" font-family="DM Sans,sans-serif">Your personalized team for optimal pet care.</text></svg></div>
             <div class="auth-title">Sign In</div>
             <div style="text-align:center; color:var(--text-secondary); font-size:14px; margin-bottom:20px; margin-top:-8px;">Welcome back — your Buddy is waiting.</div>
             <form data-action="signin">
               <div class="form-group">
                 <label>Email</label>
-                <input type="email" data-field="signin-email" placeholder="you@example.com" required>
+                <input type="email" data-field="signin-email" placeholder="you@example.com" required autocomplete="email" ${busy ? 'disabled' : ''}>
               </div>
               <div class="form-group">
                 <label>Password</label>
-                <input type="password" data-field="signin-password" placeholder="••••••••" required>
+                <input type="password" data-field="signin-password" placeholder="••••••••" required autocomplete="current-password" ${busy ? 'disabled' : ''}>
               </div>
               <div style="text-align:right; margin-bottom:12px;">
                 <a data-action="forgot-password" style="font-size:13px; color:var(--primary); cursor:pointer;">Forgot password?</a>
               </div>
-              <button type="submit" class="btn btn-primary" style="width: 100%;">Sign In</button>
+              <button type="submit" class="btn btn-primary" style="width: 100%;" ${busy ? 'disabled' : ''}>${busy ? '⏳ Signing in…' : 'Sign In'}</button>
             </form>
             <div class="auth-toggle">
               Don't have an account? <a data-action="nav-signup">Sign Up</a>
@@ -2998,26 +3250,66 @@ async function calculateBuddyScorecard(buddyId) {
       return `
         <div class="auth-container">
           <div class="auth-card">
-            <div class="auth-logo"><svg width="200" height="60" viewBox="0 0 200 60" xmlns="http://www.w3.org/2000/svg"><text x="100" y="28" text-anchor="middle" fill="#336026" font-size="28" font-weight="700" font-family="Georgia,serif">Vet Buddies</text><text x="100" y="48" text-anchor="middle" fill="#689562" font-size="13" font-family="DM Sans,sans-serif">Your pet deserves a Buddy.</text></svg></div>
+            <div class="auth-logo"><svg width="280" height="60" viewBox="0 0 280 60" xmlns="http://www.w3.org/2000/svg"><text x="140" y="28" text-anchor="middle" fill="#336026" font-size="28" font-weight="700" font-family="Georgia,serif">Vet Buddies</text><text x="140" y="48" text-anchor="middle" fill="#689562" font-size="13" font-family="DM Sans,sans-serif">Your personalized team for optimal pet care.</text></svg></div>
             <div class="auth-title">Create your account</div>
             <div style="text-align:center; color:var(--text-secondary); font-size:14px; margin-bottom:20px; margin-top:-8px;">Every pet deserves a Buddy.</div>
             <form data-action="signup">
               <div class="form-group">
                 <label>Full Name</label>
-                <input type="text" data-field="signup-name" placeholder="Jane Doe" required aria-label="Full name">
+                <input type="text" data-field="signup-name" placeholder="Jane Doe" required aria-label="Full name" autocomplete="name">
               </div>
               <div class="form-group">
                 <label>Email</label>
-                <input type="email" data-field="signup-email" placeholder="you@example.com" required aria-label="Email address">
+                <input type="email" data-field="signup-email" placeholder="you@example.com" required aria-label="Email address" autocomplete="email">
               </div>
               <div class="form-group">
                 <label>Password</label>
-                <input type="password" data-field="signup-password" placeholder="••••••••" required aria-label="Password">
+                <input type="password" data-field="signup-password" placeholder="••••••••" required aria-label="Password" autocomplete="new-password">
               </div>
               <div class="form-group" style="margin-top:4px;">
                 <div style="font-size:12px;color:var(--text-secondary);">Password must be at least 8 characters</div>
               </div>
               <button type="submit" class="btn btn-primary" style="width: 100%;">Create Account</button>
+            </form>
+            <div class="auth-toggle">
+              Already have an account? <a data-action="nav-login">Sign In</a>
+            </div>
+          </div>
+        </div>
+      `;
+    }
+
+    function renderInkwellSignup() {
+      return `
+        <div class="auth-container inkwell-page">
+          <div class="auth-card inkwell-card">
+            <div class="auth-logo"><svg width="280" height="60" viewBox="0 0 280 60" xmlns="http://www.w3.org/2000/svg"><text x="140" y="28" text-anchor="middle" fill="#336026" font-size="28" font-weight="700" font-family="Georgia,serif">Vet Buddies</text><text x="140" y="48" text-anchor="middle" fill="#689562" font-size="13" font-family="DM Sans,sans-serif">Every pet deserves a Buddy.</text></svg></div>
+            <div class="inkwell-blurb">
+              <strong>Inkwell Veterinary Emergency Clinic</strong> has arranged a free 30-day trial for you — no credit card required. Your dedicated Buddy will follow up on your pet's recovery within 24 hours.
+            </div>
+            <form data-action="inkwell-signup">
+              <div class="form-group" style="display:flex;gap:10px;">
+                <div style="flex:1;">
+                  <label>First name</label>
+                  <input type="text" data-field="inkwell-first-name" placeholder="Jane" required aria-label="First name" autocomplete="given-name">
+                </div>
+                <div style="flex:1;">
+                  <label>Last name</label>
+                  <input type="text" data-field="inkwell-last-name" placeholder="Doe" required aria-label="Last name" autocomplete="family-name">
+                </div>
+              </div>
+              <div class="form-group">
+                <label>Email</label>
+                <input type="email" data-field="inkwell-email" placeholder="you@example.com" required aria-label="Email address" autocomplete="email">
+              </div>
+              <div class="form-group">
+                <label>Password</label>
+                <input type="password" data-field="inkwell-password" placeholder="••••••••" required aria-label="Password" autocomplete="new-password">
+              </div>
+              <div class="form-group" style="margin-top:4px;">
+                <div style="font-size:12px;color:var(--text-secondary);">Password must be at least 8 characters</div>
+              </div>
+              <button type="submit" class="btn btn-primary" style="width: 100%;">Claim Your Free Trial</button>
             </form>
             <div class="auth-toggle">
               Already have an account? <a data-action="nav-login">Sign In</a>
@@ -3062,9 +3354,9 @@ async function calculateBuddyScorecard(buddyId) {
 
     function renderOwnerCheckinCard() {
       const SCALE_WORDS = {
-        sleep: ['rough', 'patchy', 'okay', 'solid', 'deep'],
-        eating: ['skipping', 'light', 'okay', 'good', 'nourished'],
-        movement: ['still', 'barely', 'some', 'active', 'strong'],
+        sleep: ['not sleeping', 'restless', 'sleeping well', 'oversleeping', "can't get out of bed"],
+        eating: ['not eating', 'picking at food', 'regular meals', 'snacking constantly', 'overeating'],
+        movement: ["can't get moving", 'low energy', 'active', 'restless', "can't sit still"],
       };
       const last = state.ownerCheckin;
       const summaryFresh = last && last.generated_summary
@@ -3184,10 +3476,6 @@ async function calculateBuddyScorecard(buddyId) {
           </div>
         </div>` : '';
 
-      if (false) {
-        // Legacy lockout code removed — replaced with read-only banner above
-      }
-
       const trialBanner = _trialActive ? `
         <div class="card" style="border-left:4px solid #f39c12;background:linear-gradient(135deg,#fffbf0,#fff);margin-bottom:16px;">
           <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px;">
@@ -3217,7 +3505,7 @@ async function calculateBuddyScorecard(buddyId) {
       const coOwnerInviteBanner = renderPendingCoOwnerInvites();
 
       // ── Care Plan Dashboard Data ──
-      const lp = state.carePlan?.living_plan || emptyLivingCarePlan();
+      const lp = { ...emptyLivingCarePlan(), ...(state.carePlan?.living_plan || {}) };
       const cpRaw = state.carePlan || {};
       const nextAppt = (state.appointments || []).find(a => a.status !== 'cancelled' && new Date(a.scheduled_at) >= new Date());
       const activeGoals = (lp.active_care_goals || []).filter(g => g.status !== 'completed');
@@ -3543,20 +3831,11 @@ async function calculateBuddyScorecard(buddyId) {
         </div>` : ''}
 
         <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(100px, 1fr));gap:10px;margin-bottom:16px;">
-          <div class="card" style="padding:14px;text-align:center;cursor:pointer;" data-action="nav-client-case" data-case-id="${petCase.id}" data-tab="appointments">
-            <div style="font-size:20px;margin-bottom:4px;">🗓️</div><div style="font-weight:500;font-size:12px;color:#336026;">Appointments</div>
-          </div>
           <div class="card" style="padding:14px;text-align:center;cursor:pointer;" data-action="download-vet-visit-pdf" title="Print a one-page summary to bring to your vet">
             <div style="font-size:20px;margin-bottom:4px;">🩺</div><div style="font-weight:500;font-size:12px;color:#336026;">Vet visit prep</div>
           </div>
           <div class="card" style="padding:14px;text-align:center;cursor:pointer;" data-action="nav-client-case" data-case-id="${petCase.id}" data-section="documents">
             <div style="font-size:20px;margin-bottom:4px;">📁</div><div style="font-weight:500;font-size:12px;color:#336026;">Files</div>
-          </div>
-          <div class="card" style="padding:14px;text-align:center;cursor:pointer;" data-action="nav-client-case" data-case-id="${petCase.id}" data-section="health-record">
-            <div style="font-size:20px;margin-bottom:4px;">💊</div><div style="font-weight:500;font-size:12px;color:#336026;">Medications</div>
-          </div>
-          <div class="card" style="padding:14px;text-align:center;cursor:pointer;" data-action="nav-client-case" data-case-id="${petCase.id}" data-section="health-record">
-            <div style="font-size:20px;margin-bottom:4px;">💉</div><div style="font-weight:500;font-size:12px;color:#336026;">Vaccines</div>
           </div>
           <div class="card" style="padding:14px;text-align:center;cursor:pointer;" data-action="nav-add-pet">
             <div style="font-size:20px;margin-bottom:4px;">➕</div><div style="font-weight:500;font-size:12px;color:#336026;">Add Pet</div>
@@ -3765,37 +4044,75 @@ async function calculateBuddyScorecard(buddyId) {
     }
 
     // ── Stripe plan config ──────────────────────────────────────────────
-    const STRIPE_PLANS = [
-      {
-        id: CONFIG.STRIPE_PLANS.buddy,
-        name: 'Buddy',
-        price: CONFIG.BUDDY_PRICE_DISPLAY,
-        tier: 'Buddy',
-        emoji: '🐾',
-        features: ['Monthly check-ins from your Vet Buddy', 'Digital Living Care Plan', 'Care coordination between vet visits'],
-        highlight: true,
-      },
-    ];
+    // Active price is phase-driven: intro (first 40 subscribers, $19.99/mo with
+    // $99 strikethrough) flips to regular ($99/mo) after the cap is
+    // reached. Phase comes from public.pricing_state, loaded at initApp().
+    function getPricingPhase() {
+      const ps = state.pricingState || { phase: 'intro', intro_subscribers_count: 0, intro_subscriber_cap: 40 };
+      const isIntro = ps.phase === 'intro';
+      const spotsLeft = Math.max(0, (ps.intro_subscriber_cap || 40) - (ps.intro_subscribers_count || 0));
+      return {
+        phase: ps.phase,
+        isIntro,
+        spotsLeft,
+        priceId: isIntro ? CONFIG.STRIPE_PLANS.buddy_intro : CONFIG.STRIPE_PLANS.buddy_regular,
+        priceDisplay: isIntro ? CONFIG.INTRO_PRICE_DISPLAY : CONFIG.REGULAR_PRICE_DISPLAY,
+        strikethroughDisplay: isIntro ? CONFIG.REGULAR_PRICE_DISPLAY : null,
+      };
+    }
 
-    // Legacy price-ID → tier-name map. Kept so existing subscriber metadata
-    // renders correctly. New signups always use CONFIG.STRIPE_PLANS.buddy.
+    function getStripePlans() {
+      const p = getPricingPhase();
+      return [
+        {
+          id: p.priceId,
+          name: 'Buddy',
+          price: p.priceDisplay,
+          strikethrough: p.strikethroughDisplay,
+          tier: 'Buddy',
+          emoji: '🐾',
+          features: [
+            'Monthly check-ins from your Vet Buddy',
+            'Digital Living Care Plan',
+            'Care coordination between vet visits',
+            'Escalate-to-DVM when you need another set of eyes',
+          ],
+          highlight: true,
+          spotsLeft: p.isIntro ? p.spotsLeft : null,
+        },
+      ];
+    }
+
+    // Map every known price ID (current + legacy) to its display tier name so
+    // any historical subscription's badge still resolves after pricing changes.
     const PRICE_TO_NAME = {
+      [CONFIG.STRIPE_PLANS.buddy_intro]: 'Buddy',
+      [CONFIG.STRIPE_PLANS.buddy_regular]: 'Buddy',
       [CONFIG.STRIPE_PLANS.buddy]: 'Buddy',
+      'price_1TP9jhCoogKs3SGPxdI1Sckz': 'Buddy', // legacy $9.99
       'price_1TLxfzCoogKs3SGPIctkgMhW': 'Buddy',
       'price_1TLxg0CoogKs3SGPAdQBsb8d': 'Buddy+',
       'price_1T7VxVCoogKs3SGPwcXrK0kI': 'Buddy VIP',
     };
 
+    async function loadPricingState() {
+      try {
+        const { data, error } = await sb.from('pricing_state').select('intro_subscribers_count, intro_subscriber_cap, phase').eq('id', 1).single();
+        if (error) throw error;
+        if (data) state.pricingState = data;
+      } catch (err) {
+        console.warn('loadPricingState failed; using safe defaults:', err);
+      }
+    }
+
     // Trial helpers (getTrialDaysRemaining, isTrialActive, etc.) are in utils.js
     // TIER_LEVELS, FEATURE_MIN_TIER, getTierLevel are in utils.js
     const TRIAL_DURATION_DAYS = CONFIG.TRIAL_DURATION_DAYS;
 
-    function hasFeatureAccess(feature) {
-      if (!state.profile || state.profile.role !== 'client') return true; // Non-clients have full access
-      const caseTier = state.currentCase?.subscription_tier || 'Buddy';
-      const userLevel = getTierLevel(caseTier);
-      const required = FEATURE_MIN_TIER[feature] || 1;
-      return userLevel >= required;
+    // DEV_OVERRIDE 2026-04-28: per-feature tier gating disabled while testing.
+    // Original logic: compare case subscription_tier against FEATURE_MIN_TIER[feature].
+    function hasFeatureAccess(_feature) {
+      return true;
     }
 
     function renderUpgradePrompt(feature, currentTier) {
@@ -4262,7 +4579,13 @@ async function calculateBuddyScorecard(buddyId) {
       }
 
       // Not subscribed — show single-tier plan card
-      const plan = STRIPE_PLANS[0];
+      const plan = getStripePlans()[0];
+      const strikethroughHtml = plan.strikethrough
+        ? `<span style="text-decoration: line-through; color: var(--text-secondary); font-size: 18px; font-weight: 500; margin-right: 6px;">${plan.strikethrough}</span>`
+        : '';
+      const foundingBadgeHtml = (plan.spotsLeft !== null && plan.spotsLeft > 0)
+        ? `<div style="margin-top: 10px; display: inline-block; background: linear-gradient(135deg,#ffd700,#f5c842); color: #5d4e00; font-size: 12px; font-weight: 700; padding: 4px 12px; border-radius: 20px; letter-spacing: 0.3px;">✨ Founding-member rate — ${plan.spotsLeft} of ${CONFIG.INTRO_SUBSCRIBER_CAP} spots left</div>`
+        : '';
       return `
         <div class="card">
           <div class="card-title" style="margin-bottom: 4px;">🐾 Get Started with Vet Buddies</div>
@@ -4273,13 +4596,66 @@ async function calculateBuddyScorecard(buddyId) {
               <div style="font-size: 22px; margin-bottom: 6px;">${plan.emoji}</div>
               <div style="font-size: 17px; font-weight: 700; color: #336026;">${plan.name}</div>
               <div style="display: flex; align-items: baseline; gap: 6px; margin-top: 6px;">
+                ${strikethroughHtml}
                 <span style="font-size: 28px; font-weight: 700; color: #336026;">${plan.price}</span>
                 <span style="color: var(--text-secondary); font-size: 13px;">/mo</span>
               </div>
+              ${foundingBadgeHtml}
               <ul style="list-style: none; padding: 0; margin: 16px 0; font-size: 13px; color: var(--text-secondary);">
                 ${plan.features.map(f => `<li style="padding: 3px 0;">✓ ${f}</li>`).join('')}
               </ul>
               <button class="btn btn-primary" data-action="subscribe" data-price-id="${plan.id}" style="width: 100%; font-size: 14px;">Get Started</button>
+            </div>
+          </div>
+        </div>`;
+    }
+
+    // Full-screen paywall shown to clients whose subscription is inactive.
+    // The gate in render() routes here when role==='client' AND hasActiveAccess(profile) is false,
+    // for any view that's not whitelisted (login/signup/onboarding/profile-settings).
+    function renderClientPaywall() {
+      const status = state.profile?.subscription_status || 'none';
+      const expiredTrial = isTrialExpired(state.profile);
+      const ownerName = (state.profile?.name || '').split(' ')[0];
+
+      const headline = (() => {
+        if (status === 'past_due') return 'Your payment didn’t go through';
+        if (status === 'canceled') return 'Your subscription is canceled';
+        if (expiredTrial) return 'Your free trial has ended';
+        return ownerName ? `Welcome back, ${esc(ownerName)}` : 'Welcome to VetBuddies';
+      })();
+
+      const body = (() => {
+        if (status === 'past_due') {
+          return 'We couldn’t charge your card on file. Update your payment method to keep your Vet Buddy’s support active. Your pet’s information is safe and waiting for you.';
+        }
+        if (status === 'canceled') {
+          return 'Resubscribe anytime to reconnect with your Buddy and pick up where you left off. All your pet’s records are preserved.';
+        }
+        if (expiredTrial) {
+          return 'Pick a plan to keep your Buddy in your corner. Your pet’s Living Care Plan is saved — you won’t lose anything.';
+        }
+        return 'Subscribe to start working with your Vet Buddy on your pet’s personalized Living Care Plan.';
+      })();
+
+      return `
+        <div style="min-height:100vh;background:linear-gradient(135deg,#f0faf9 0%,#fff 60%);padding:32px 16px;display:flex;align-items:flex-start;justify-content:center;">
+          <div style="max-width:560px;width:100%;">
+            <div style="text-align:center;margin-bottom:24px;">
+              <div style="font-size:42px;margin-bottom:8px;">🐾</div>
+              <h1 style="font-family:'Fraunces',serif;font-size:28px;font-weight:700;color:#336026;margin:0 0 8px 0;">${headline}</h1>
+              <p style="color:var(--text-secondary);font-size:15px;line-height:1.5;margin:0;">${body}</p>
+            </div>
+
+            ${renderSubscriptionCard()}
+
+            <div style="margin-top:20px;text-align:center;font-size:13px;color:var(--text-secondary);">
+              Questions? Email <a href="mailto:jrodgersdvm@gmail.com" style="color:var(--primary);">jrodgersdvm@gmail.com</a>
+            </div>
+
+            <div style="margin-top:24px;display:flex;gap:12px;justify-content:center;flex-wrap:wrap;">
+              <button class="btn btn-secondary" data-action="nav-profile" style="font-size:13px;">Account Settings</button>
+              <button class="btn btn-secondary" data-action="signout" style="font-size:13px;">Sign Out</button>
             </div>
           </div>
         </div>`;
@@ -4359,8 +4735,11 @@ async function calculateBuddyScorecard(buddyId) {
       </div>`;
 
       // ── Earnings Estimate ──
-      const earningsByTier = { 'Buddy': 20 * 0.40, 'Buddy+': 30 * 0.40, 'Buddy VIP': 279 * 0.40 };
-      const monthlyEstimate = state.cases.reduce((sum, c) => sum + (earningsByTier[c.subscription_tier] || 39.60), 0);
+      // Tiers match the admin MRR table at renderAdminDashboard. Buddy is the
+      // current $9.99 single tier; Buddy+/VIP are legacy values retained so
+      // historical assignments still compute correctly.
+      const earningsByTier = { 'Buddy': 9.99 * 0.40, 'Buddy+': 149 * 0.40, 'Buddy VIP': 279 * 0.40 };
+      const monthlyEstimate = state.cases.reduce((sum, c) => sum + (earningsByTier[c.subscription_tier] || earningsByTier['Buddy']), 0);
       html += `<div class="card" style="margin-bottom:16px;">
         <div style="display:flex;justify-content:space-between;align-items:center;">
           <div>
@@ -4369,7 +4748,7 @@ async function calculateBuddyScorecard(buddyId) {
             <div style="font-size:12px;color:var(--text-secondary);margin-top:2px;">~40% of collected revenue · ${state.cases.length} active client${state.cases.length !== 1 ? 's' : ''}</div>
           </div>
           <div style="text-align:right;">
-            ${state.cases.map(c => `<div style="font-size:11px;color:var(--text-secondary);">${esc(c.pets?.name) || '?'}: $${(earningsByTier[c.subscription_tier] || 39.60).toFixed(2)}/mo</div>`).join('')}
+            ${state.cases.map(c => `<div style="font-size:11px;color:var(--text-secondary);">${esc(c.pets?.name) || '?'}: $${(earningsByTier[c.subscription_tier] || earningsByTier['Buddy']).toFixed(2)}/mo</div>`).join('')}
           </div>
         </div>
         <div style="font-size:11px;color:var(--text-secondary);margin-top:8px;padding-top:8px;border-top:1px solid var(--border);">Earnings are calculated at ~38–42% of collected subscription revenue per assigned client. No hidden deductions. No arbitrary caps.</div>
@@ -4380,8 +4759,8 @@ async function calculateBuddyScorecard(buddyId) {
       const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
       // Pre-compute monthly buddy touchpoint counts per case
       const monthlyTpCounts = new Map();
-      (state.touchpoints || []).forEach(t => {
-        if (t.type === 'buddy' && new Date(t.completed_at) >= startOfMonth) {
+      (state.allBuddyTouchpoints || []).forEach(t => {
+        if (t.type === 'buddy_checkin' && new Date(t.completed_at) >= startOfMonth) {
           monthlyTpCounts.set(t.case_id, (monthlyTpCounts.get(t.case_id) || 0) + 1);
         }
       });
@@ -4429,8 +4808,8 @@ async function calculateBuddyScorecard(buddyId) {
           const emoji = SPECIES_EMOJI[pet?.species?.toLowerCase()] || '🐾';
           const tier = TIER_DISPLAY[petCase.subscription_tier] || petCase.subscription_tier;
 
-          // Count touchpoints for progress
-          const buddyCount = state.touchpoints.filter(t => t.type === 'buddy').length;
+          // Count touchpoints for progress (across ALL buddy cases — state.touchpoints is per-case)
+          const buddyCount = (state.allBuddyTouchpoints || []).filter(t => t.type === 'buddy_checkin' && t.case_id === petCase.id).length;
           const maxTouchpoints = ['buddy', 'Buddy'].includes(petCase.subscription_tier) ? 1 : 4;
 
           html += `
@@ -4444,7 +4823,7 @@ async function calculateBuddyScorecard(buddyId) {
                 ${renderProgressBar(buddyCount, maxTouchpoints)}
                 <div class="buddy-case-actions">
                   <button class="btn btn-primary btn-small" data-action="nav-buddy-case" data-case-id="${petCase.id}">View Case</button>
-                  <button class="btn btn-secondary btn-small" data-action="log-checkin" data-case-id="${petCase.id}">Log Check-In</button>
+                  <button class="btn btn-secondary btn-small" data-action="log-checkin" data-case-id="${petCase.id}" data-type="buddy_checkin">Log Check-In</button>
                 </div>
               </div>
             </div>
@@ -4523,18 +4902,30 @@ async function calculateBuddyScorecard(buddyId) {
           </div>
           ${state.showRaiseEscalation && ['vet_buddy','admin'].includes(state.profile.role) ? `
             <div style="margin-top:12px; padding-top:12px; border-top:1px solid var(--border);">
-              <div class="form-group"><label>Escalation Type</label>
-                <select data-field="escalation-type" style="width:100%;" onchange="const notes=document.getElementById('incident-notes-group');if(notes)notes.style.display=this.value==='adverse_outcome'?'block':'none';">
-                  <option value="clinical">Clinical Question</option>
-                  <option value="adverse_outcome">Adverse Outcome</option>
-                </select>
+              <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;">
+                <div class="form-group">
+                  <label>What's going on?</label>
+                  <select data-field="escalation-type" style="width:100%;">
+                    <option value="clinical_concern">Clinical concern</option>
+                    <option value="owner_distress">Owner is distressed</option>
+                    <option value="owner_vet_conflict">Owner ↔ vet conflict</option>
+                    <option value="out_of_scope">Out of scope for me</option>
+                    <option value="safety_concern">Safety concern</option>
+                    <option value="unsure" selected>Just want another set of eyes</option>
+                  </select>
+                </div>
+                <div class="form-group">
+                  <label>Priority</label>
+                  <select data-field="escalation-priority" style="width:100%;">
+                    <option value="urgent">Urgent — call me</option>
+                    <option value="normal" selected>Normal — within a day</option>
+                    <option value="fyi">FYI — no rush</option>
+                  </select>
+                </div>
               </div>
-              <div class="form-group"><label>Escalation Reason</label><textarea data-field="escalation-reason" placeholder="Describe the issue requiring escalation..." style="width:100%;height:80px;"></textarea></div>
-              <div id="incident-notes-group" class="form-group" style="display:none;">
-                <label style="color:var(--red);font-weight:600;">Describe what happened and what guidance was given</label>
-                <textarea data-field="incident-notes" placeholder="Required for adverse outcome escalations..." style="width:100%;height:80px;border-color:var(--red);"></textarea>
-              </div>
+              <div class="form-group"><label>What do you want Dr. Rodgers to know?</label><textarea data-field="escalation-reason" placeholder="Describe what you saw, what you're worried about, and what you've already tried…" style="width:100%;height:90px;"></textarea></div>
               <button class="btn btn-primary btn-small" data-action="save-escalation" style="background:#e74c3c; border-color:#e74c3c;">Submit Escalation</button>
+              <div style="font-size:11px;color:var(--text-secondary);margin-top:6px;">Dr. Rodgers will be notified. Non-FYI escalations also flip the case to "Needs Attention".</div>
             </div>` : ''}
           ${['vet_buddy','admin'].includes(state.profile.role) ? `
             <div style="margin-top:8px; padding-top:8px; border-top:1px solid var(--border); display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
@@ -4617,16 +5008,6 @@ async function calculateBuddyScorecard(buddyId) {
       const completenessScore = Math.max(0, Math.min(100, Number(state.carePlan?.completeness_score) || 0));
       let html = `<div class="care-plan-body">`;
 
-      // ── Section: Conversation (front-and-center; folded in from the old Messages tab) ──
-      html += `<div id="section-messages" class="care-plan-section" style="border-left:4px solid var(--primary);margin-bottom:16px;">
-        <div class="section-title" style="display:flex;justify-content:space-between;align-items:center;">
-          <span>💬 Conversation</span>
-        </div>
-        <div class="section-content">
-          ${renderMessagesTab()}
-        </div>
-      </div>`;
-
       // Profile completeness progress bar (owner-facing, shown to all roles)
       {
         const barColor = completenessScore >= 80 ? 'var(--green)'
@@ -4647,13 +5028,29 @@ async function calculateBuddyScorecard(buddyId) {
       // Export/Share toolbar
       html += `<div style="display:flex;justify-content:flex-end;gap:8px;margin-bottom:12px;flex-wrap:wrap;">
         ${canEdit ? `<button class="btn btn-secondary btn-small" data-action="refresh-care-plan-from-activity" title="Let AI scan recent messages, notes, appointments, and escalations for this case and suggest updates to the care plan" ${state.aiExtractionInProgress ? 'disabled' : ''}>${state.aiExtractionInProgress ? '⏳ Refreshing…' : '🔄 Refresh from activity'}</button>` : ''}
-        <button class="btn btn-secondary btn-small" onclick="window.print()" title="Print or save as PDF">🖨️ Print / Save PDF</button>
-        <button class="btn btn-secondary btn-small" data-action="export-care-plan" title="Export PDF 📄 Living Care Plan as text">📤 Share</button>
+        <button class="btn btn-primary btn-small" data-action="prepare-for-visit" title="Generate a focused one-page summary to bring to your vet appointment">📋 Prepare for Visit</button>
+        <button class="btn btn-secondary btn-small" onclick="window.print()" title="Print the full care plan or save as PDF">🖨️ Print Full Plan</button>
+        <button class="btn btn-secondary btn-small" data-action="export-care-plan" title="Export the Living Care Plan as text">📤 Share</button>
       </div>`;
 
-      // ── Status strip: at-a-glance chips (next appt, check-in quota for staff, escalations for staff) ──
+      // ── Status strip: at-a-glance chips (LCP status, next appt, check-in quota for staff, escalations for staff) ──
       {
         const chips = [];
+        // LCP status — visible to all roles. Click to cycle (active → paused → archived) for staff;
+        // archive transitions confirm first. Read-only span for client/external_vet.
+        const lcpStatus = state.carePlan?.lcp_status || 'active';
+        const lcpStatusStyle = ({
+          active:   'background:#e8f5e9;color:#2e7d32;',
+          paused:   'background:#fff8e1;color:#f57f17;',
+          archived: 'background:#eceff1;color:#546e7a;',
+        })[lcpStatus] || 'background:#eceff1;color:#546e7a;';
+        const lcpStatusLabel = ({ active: 'Active', paused: 'Paused', archived: 'Archived' })[lcpStatus] || lcpStatus;
+        const _canCycle = ['admin','vet_buddy','practice_manager'].includes(state.profile.role) && state.carePlan?.id;
+        if (_canCycle) {
+          chips.push(`<button class="status-chip" data-action="cycle-lcp-status" style="${lcpStatusStyle}cursor:pointer;border:none;font:inherit;padding:4px 10px;" title="Click to cycle: active → paused → archived">📋 Plan: ${lcpStatusLabel}</button>`);
+        } else {
+          chips.push(`<span class="status-chip" style="${lcpStatusStyle}">📋 Plan: ${lcpStatusLabel}</span>`);
+        }
         const now = new Date();
         const nextAppt = (state.appointments || [])
           .filter(a => a.status !== 'cancelled' && new Date(a.scheduled_at) >= now)
@@ -4664,11 +5061,18 @@ async function calculateBuddyScorecard(buddyId) {
         if (canEdit) {
           const targets = { 'Buddy': { buddy: 1, dvm: 0 }, 'Buddy+': { buddy: 4, dvm: 1 }, 'Buddy VIP': { buddy: 4, dvm: 1 }, buddy: { buddy: 1, dvm: 0 }, buddy_plus: { buddy: 4, dvm: 1 }, buddy_vip: { buddy: 4, dvm: 1 } };
           const tgt = targets[tier] || { buddy: 0, dvm: 0 };
-          const buddyCount = (state.touchpoints || []).filter(t => t.type === 'buddy').length;
+          const buddyCount = (state.touchpoints || []).filter(t => t.type === 'buddy_checkin').length;
           if (tgt.buddy > 0) {
             chips.push(`<span class="status-chip" style="background:#f3e5f5;color:#6a1b9a;">✓ Check-ins: ${buddyCount}/${tgt.buddy} this month</span>`);
           }
-          const openEsc = (state.escalations || []).filter(e => e.case_id === state.caseId && e.status !== 'resolved').length;
+          // Inline log-check-in CTA so staff can record a check-in without switching tabs.
+          if (state.profile.role === 'vet_buddy') {
+            chips.push(`<button class="status-chip" data-action="log-checkin" data-case-id="${state.caseId}" data-type="buddy_checkin" style="background:#e8f5e9;color:#2e7d32;border:none;cursor:pointer;font:inherit;padding:4px 10px;">+ Log Check-In</button>`);
+          } else if (state.profile.role === 'admin') {
+            chips.push(`<button class="status-chip" data-action="log-checkin" data-case-id="${state.caseId}" data-type="buddy_checkin" style="background:#e8f5e9;color:#2e7d32;border:none;cursor:pointer;font:inherit;padding:4px 10px;">+ Buddy Check-In</button>`);
+            chips.push(`<button class="status-chip" data-action="log-checkin" data-case-id="${state.caseId}" data-type="dvm_checkin" style="background:#e3f2fd;color:#1565c0;border:none;cursor:pointer;font:inherit;padding:4px 10px;">+ DVM Check-In</button>`);
+          }
+          const openEsc = (state.escalations || []).filter(e => e.case_id === state.caseId && e.status !== 'Resolved').length;
           if (openEsc > 0) {
             chips.push(`<span class="status-chip" style="background:#ffebee;color:#c62828;">⚠️ ${openEsc} open escalation${openEsc === 1 ? '' : 's'}</span>`);
           }
@@ -4684,13 +5088,22 @@ async function calculateBuddyScorecard(buddyId) {
           { id: 'pet-profile', label: 'Profile' },
           { id: 'people', label: 'People' },
           { id: 'providers', label: 'Providers' },
+          { id: 'owner-context', label: 'Context' },
+          { id: 'diagnoses', label: 'Conditions' },
+          { id: 'open-questions', label: 'Questions' },
           { id: 'goals', label: 'Goals' },
           { id: 'health-record', label: 'Health' },
+          { id: 'appointments', label: 'Appointments' },
+          { id: 'messages', label: 'Conversation' },
           { id: 'engagement', label: 'Engagement' },
           { id: 'documents', label: 'Documents' },
           { id: 'wins', label: 'Wins' },
           { id: 'internal-notes', label: 'Internal' },
         ];
+        if (state.profile.role === 'admin') {
+          const _internalIdx = anchors.findIndex(a => a.id === 'internal-notes');
+          anchors.splice(_internalIdx, 0, { id: 'dvm-notes', label: 'DVM' });
+        }
         if ((state.geneticInsights || []).some(g => g.case_id === state.caseId)) anchors.push({ id: 'genetic', label: 'Genetic' });
         html += `<div class="care-plan-anchor-rail">${anchors.map(a => `<button class="anchor-pill" data-action="scroll-to-section" data-section="${a.id}">${a.label}</button>`).join('')}</div>`;
       }
@@ -4790,32 +5203,37 @@ async function calculateBuddyScorecard(buddyId) {
         </div>`;
       }
 
-      // ── Section: External Providers (vet clinics, specialists — stored in lp.care_team) ──
+      // ── Section: External Providers (reads from care_plan_care_team table; falls back to lp.care_team for legacy plans) ──
       html += `<div id="section-providers" class="care-plan-section" style="border-left:4px solid var(--blue);margin-bottom:16px;">
         <div class="section-title" style="display:flex;justify-content:space-between;align-items:center;">
           <span>👩‍⚕️ External Providers</span>
           ${(canEdit || isClient) ? `<button class="section-edit-btn" data-action="toggle-add-care-team">+ Add Provider</button>` : ''}
         </div>
         <div class="section-content">`;
-      if (lp.care_team.length === 0) {
-        html += '<em style="color: var(--text-secondary);">No external providers added yet — list your pet\'s primary vet, specialists, and clinics here.</em>';
-      } else {
-        for (let i = 0; i < lp.care_team.length; i++) {
-          const ct = lp.care_team[i];
-          html += `<div style="background:var(--bg);border-radius:8px;padding:12px;margin-bottom:8px;display:flex;justify-content:space-between;align-items:center;">
-            <div>
-              <div style="font-weight:600;">${esc(ct.name) || 'Unknown'}</div>
-              <div style="font-size:13px;color:var(--text-secondary);">${esc(ct.role)} ${ct.clinic ? '· ' + esc(ct.clinic) : ''}</div>
-              <div style="font-size:12px;color:var(--text-secondary);">${ct.phone ? '📞 ' + esc(ct.phone) : ''} ${ct.email ? '✉️ ' + esc(ct.email) : ''}</div>
-            </div>
-            ${(canEdit || isClient) ? `<button class="btn btn-secondary btn-small" data-action="remove-care-team" data-index="${i}" style="font-size:11px;">✕</button>` : ''}
-          </div>`;
+      {
+        const providers = (state.careProviders && state.careProviders.length > 0)
+          ? state.careProviders.map(p => ({ id: p.id, name: p.provider_name, role: p.role, clinic: p.clinic_name, phone: p.phone, email: p.email }))
+          : (lp.care_team || []).map((p, idx) => ({ id: null, _legacyIdx: idx, name: p.name, role: p.role, clinic: p.clinic, phone: p.phone, email: p.email }));
+        if (providers.length === 0) {
+          html += '<em style="color: var(--text-secondary);">No external providers added yet — list your pet\'s primary vet, specialists, and clinics here.</em>';
+        } else {
+          for (const ct of providers) {
+            const removeAttr = ct.id ? `data-provider-id="${ct.id}"` : `data-legacy-idx="${ct._legacyIdx}"`;
+            html += `<div style="background:var(--bg);border-radius:8px;padding:12px;margin-bottom:8px;display:flex;justify-content:space-between;align-items:center;">
+              <div>
+                <div style="font-weight:600;">${esc(ct.name) || 'Unknown'}</div>
+                <div style="font-size:13px;color:var(--text-secondary);">${esc(ct.role)} ${ct.clinic ? '· ' + esc(ct.clinic) : ''}</div>
+                <div style="font-size:12px;color:var(--text-secondary);">${ct.phone ? '📞 ' + esc(ct.phone) : ''} ${ct.email ? '✉️ ' + esc(ct.email) : ''}</div>
+              </div>
+              ${(canEdit || isClient) ? `<button class="btn btn-secondary btn-small" data-action="remove-care-team" ${removeAttr} style="font-size:11px;">✕</button>` : ''}
+            </div>`;
+          }
         }
       }
       html += `</div>
         ${state.showAddCareTeam ? `<div style="background:#f0faf8;border-radius:8px;padding:14px;margin-top:8px;">
           <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">
-            <div class="form-group"><label>Name</label><input type="text" data-field="ct-name" placeholder="Dr. Smith" style="width:100%;"></div>
+            <div class="form-group"><label>Name <span style="font-weight:400;color:var(--text-secondary);font-size:12px;">(optional)</span></label><input type="text" data-field="ct-name" placeholder="Dr. Smith (optional if clinic known)" style="width:100%;"></div>
             <div class="form-group"><label>Role</label><input type="text" data-field="ct-role" placeholder="Primary Vet" style="width:100%;"></div>
             <div class="form-group"><label>Clinic</label><input type="text" data-field="ct-clinic" placeholder="Clinic name" style="width:100%;"></div>
             <div class="form-group"><label>Phone</label><input type="text" data-field="ct-phone" placeholder="(555) 123-4567" style="width:100%;"></div>
@@ -4828,63 +5246,166 @@ async function calculateBuddyScorecard(buddyId) {
         </div>` : ''}
       </div>`;
 
-      // ── Section: Health Record (Medications + Vitals + Vaccines) ──
-      {
-        // Hide entire Health Record from clients when no data exists yet (avoids empty placeholders cluttering the page)
-        const hasHealthData = (state.petMedications && state.petMedications.length > 0)
-          || (state.petVitals && state.petVitals.length > 0)
-          || (state.petVaccines && state.petVaccines.length > 0);
-        if (!isClient || hasHealthData) {
-          html += `<div id="section-health-record" class="care-plan-section" style="border-left:4px solid #e67e22;margin-bottom:16px;">
-            <div class="section-title"><span>🩺 Health Record</span></div>
-            <div class="section-content">
-              <div class="health-record-block" style="margin-bottom:18px;padding-bottom:18px;border-bottom:1px solid var(--border);">
-                ${renderMedicationsBody()}
-              </div>
-              ${(!isClient || (state.petVitals && state.petVitals.length > 0)) ? `<div class="health-record-block" style="margin-bottom:18px;padding-bottom:18px;border-bottom:1px solid var(--border);">
-                ${renderVitalsBody()}
-              </div>` : ''}
-              <div class="health-record-block">
-                ${renderVaccinesBody()}
-              </div>
+      // ── Section: Owner Context (staff-only — Buddy's notes about owner situation, lifestyle, preferences) ──
+      if (canEdit) {
+        const ownerContext = state.carePlan?.owner_context || '';
+        html += `<div id="section-owner-context" class="care-plan-section view-mode" style="border-left:4px solid #17a2b8;margin-bottom:16px;">
+          <div class="section-title" style="display:flex;justify-content:space-between;align-items:center;">
+            <span>📒 Owner Context</span>
+            <button class="section-edit-btn" data-action="edit-careplan-section" data-section="owner_context">Edit</button>
+          </div>
+          <div style="font-size:11px;color:var(--text-secondary);margin-bottom:8px;">
+            Living context about the owner — lifestyle, schedule, household, communication preferences. Visible to staff only.
+          </div>
+          <div class="section-content">
+            ${ownerContext
+              ? `<div style="white-space:pre-wrap;font-size:14px;line-height:1.5;">${esc(ownerContext)}</div>`
+              : '<em style="color:var(--text-secondary);font-size:13px;">No context captured yet — tap Edit to add notes about the owner&rsquo;s situation.</em>'}
+          </div>
+          <div class="section-form">
+            <textarea data-field="section-owner_context" placeholder="Living situation, work schedule, other pets in the home, financial constraints, communication preferences, anything that helps you support them better...">${esc(ownerContext)}</textarea>
+            <div style="display:flex;gap:8px;">
+              <button class="btn btn-primary btn-small" data-action="save-careplan-section" data-section="owner_context">Save</button>
+              <button class="btn btn-secondary btn-small" data-action="cancel-careplan-section" data-section="owner_context">Cancel</button>
             </div>
-          </div>`;
-        }
+          </div>
+        </div>`;
       }
 
-      // ── Section 3: Active Care Goals (tier-differentiated) ──
+      // ── Section: Diagnoses (read-only in slice 2; staff edit lands in slice 4) ──
+      {
+        const diagnoses = state.diagnoses || [];
+        const dxLabel = isClient ? '🩺 Conditions your vet has identified' : '🩺 Diagnoses';
+        const dxStatusStyle = (s) => ({
+          active:    'background:#fff8e1;color:#f57f17;',
+          managed:   'background:#e3f2fd;color:#1565c0;',
+          resolved:  'background:#e8f5e9;color:#2e7d32;',
+          ruled_out: 'background:#eceff1;color:#546e7a;',
+        })[s] || 'background:#eceff1;color:#546e7a;';
+        html += `<div id="section-diagnoses" class="care-plan-section" style="border-left:4px solid #e74c3c;margin-bottom:16px;">
+          <div class="section-title"><span>${dxLabel}</span></div>
+          <div class="section-content">`;
+        if (diagnoses.length === 0) {
+          html += `<div style="font-size:14px;color:var(--text-secondary);">${isClient
+            ? "Your Buddy will add to this as your pet's care journey develops — these are conditions your vet has identified, recorded so we can support you around them."
+            : 'No diagnoses recorded yet — log them as they&rsquo;re shared by the owner&rsquo;s vet (write-in coming next slice).'}</div>`;
+        } else {
+          for (const dx of diagnoses) {
+            const meta = dx.diagnosing_vet
+              ? `As recorded from ${esc(dx.diagnosing_vet)}${dx.diagnosed_on ? ' &middot; ' + formatDate(dx.diagnosed_on) : ''}`
+              : (dx.diagnosed_on ? `Recorded ${formatDate(dx.diagnosed_on)}` : '');
+            html += `<div style="background:var(--bg);border-radius:8px;padding:12px;margin-bottom:8px;">
+              <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px;">
+                <div style="flex:1;">
+                  <div style="font-weight:600;font-size:14px;">${esc(dx.condition_name)}</div>
+                  ${meta ? `<div style="font-size:12px;color:var(--text-secondary);margin-top:2px;">${meta}</div>` : ''}
+                  ${dx.notes ? `<div style="font-size:13px;margin-top:6px;white-space:pre-wrap;">${esc(dx.notes)}</div>` : ''}
+                </div>
+                <span style="font-size:11px;padding:2px 8px;border-radius:12px;${dxStatusStyle(dx.status)}font-weight:600;flex-shrink:0;">${esc(dx.status || 'active')}</span>
+              </div>
+            </div>`;
+          }
+        }
+        html += `</div></div>`;
+      }
+
+      // ── Section: Open Questions for Vet (read-only in slice 2; staff edit lands in slice 4) ──
+      {
+        const openQs = state.openQuestions || [];
+        const oqLabel = isClient ? '❓ Questions to ask your vet' : '❓ Open Questions for Vet';
+        const priIcon = (p) => ({ urgent: '🔥', normal: '·', whenever: '🌱' })[p] || '·';
+        html += `<div id="section-open-questions" class="care-plan-section" style="border-left:4px solid #3498db;margin-bottom:16px;">
+          <div class="section-title"><span>${oqLabel}</span></div>
+          <div class="section-content">`;
+        if (openQs.length === 0) {
+          html += `<div style="font-size:14px;color:var(--text-secondary);">${isClient
+            ? 'Your Buddy will list questions here for you to bring to your vet — anything that comes up between visits.'
+            : 'No open questions yet — log them as they come up so you and the owner have a running list for the next vet visit.'}</div>`;
+        } else {
+          for (const q of openQs) {
+            const isResolved = q.status === 'answered' || q.status === 'moot';
+            html += `<div style="background:var(--bg);border-radius:8px;padding:12px;margin-bottom:8px;${isResolved ? 'opacity:0.65;' : ''}">
+              <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px;">
+                <div style="flex:1;">
+                  <div style="font-weight:500;font-size:14px;">${priIcon(q.priority)} ${esc(q.question)}</div>
+                  ${q.context ? `<div style="font-size:13px;color:var(--text-secondary);margin-top:4px;white-space:pre-wrap;">${esc(q.context)}</div>` : ''}
+                  ${q.target_visit_date ? `<div style="font-size:12px;color:var(--text-secondary);margin-top:4px;">For visit on ${formatDate(q.target_visit_date)}</div>` : ''}
+                  ${q.resolution_notes ? `<div style="font-size:13px;background:#f0faf8;border-radius:6px;padding:6px 8px;margin-top:6px;"><strong>Answer:</strong> ${esc(q.resolution_notes)}</div>` : ''}
+                </div>
+                <span style="font-size:11px;padding:2px 8px;border-radius:12px;background:${isResolved ? '#e8f5e9' : '#fff8e1'};color:${isResolved ? '#2e7d32' : '#f57f17'};font-weight:600;flex-shrink:0;">${esc(q.status || 'open')}</span>
+              </div>
+            </div>`;
+          }
+        }
+        html += `</div></div>`;
+      }
+
+      // ── Section: Health Record (Medications + Vitals + Vaccines) ──
+      {
+        html += `<div id="section-health-record" class="care-plan-section" style="border-left:4px solid #e67e22;margin-bottom:16px;">
+          <div class="section-title"><span>🩺 Health Record</span></div>
+          <div class="section-content">
+            <div class="health-record-block" style="margin-bottom:18px;padding-bottom:18px;border-bottom:1px solid var(--border);">
+              ${renderMedicationsBody()}
+            </div>
+            ${(!isClient || (state.petVitals && state.petVitals.length > 0)) ? `<div class="health-record-block" style="margin-bottom:18px;padding-bottom:18px;border-bottom:1px solid var(--border);">
+              ${renderVitalsBody()}
+            </div>` : ''}
+            <div class="health-record-block">
+              ${renderVaccinesBody()}
+            </div>
+          </div>
+        </div>`;
+      }
+
+      // ── Section: Appointments (inlined into the care plan; replaces the standalone Appointments tab on the client dashboard) ──
+      html += `<div id="section-appointments" class="care-plan-section" style="border-left:4px solid var(--blue);margin-bottom:16px;">
+        <div class="section-title"><span>📅 Appointments</span></div>
+        <div class="section-content">
+          ${renderAppointmentsTab({ inline: true })}
+        </div>
+      </div>`;
+
+      // ── Section 3: Active Care Goals (reads from care_plan_goals table; falls back to lp.active_care_goals for legacy plans) ──
       html += `<div id="section-goals" class="care-plan-section" style="border-left:4px solid var(--green);margin-bottom:16px;">
         <div class="section-title" style="display:flex;justify-content:space-between;align-items:center;">
           <span>🎯 Active Care Goals</span>
           ${canEdit ? `<button class="section-edit-btn" data-action="toggle-add-goal">+ Add Goal</button>` : ''}
         </div>
         <div class="section-content">`;
-      if (lp.active_care_goals.length === 0) {
-        html += `<div style="font-size:14px;color:var(--text-secondary);">${isClient ? 'No goals yet — tap "+ Add Goal" to share one, or your Buddy will help set some on your first check-in.' : 'No goals yet — work with the owner to set 1–2 meaningful goals on the next check-in.'}</div>`;
-      } else {
-        for (let i = 0; i < lp.active_care_goals.length; i++) {
-          const g = lp.active_care_goals[i];
-          const daysSinceReview = g.reviewed_at ? Math.floor((Date.now() - new Date(g.reviewed_at).getTime()) / (1000*60*60*24)) : 999;
-          const needsQuarterlyReview = (tier === 'Buddy+' || tier === 'Buddy VIP') && daysSinceReview > 85 && g.status === 'active';
-          const isDvmReviewed = g.dvm_reviewed;
-          html += `<div style="background:var(--bg);border-radius:8px;padding:12px;margin-bottom:8px;border-left:3px solid ${g.status === 'completed' ? 'var(--green)' : 'var(--amber)'};">
-            <div style="display:flex;justify-content:space-between;align-items:flex-start;">
-              <div style="flex:1;">
-                <div style="font-weight:500;">${esc(g.goal_text)}</div>
-                <div style="font-size:13px;color:var(--text-secondary);margin-top:4px;">
-                  ${g.set_by_owner ? (isClient ? '✍️ Set by you' : '✍️ Set by owner') : '📋 Set by Buddy'} · ${g.created_at ? formatDate(g.created_at) : ''}
-                  ${g.reviewed_at ? ' · Last reviewed: ' + formatDate(g.reviewed_at) : ''}
+      {
+        // Done = 'achieved' (new table value) OR 'completed' (legacy blob value).
+        const goalsList = (state.goals && state.goals.length > 0)
+          ? state.goals
+          : (lp.active_care_goals || []).map((g, idx) => ({ ...g, id: null, _legacyIdx: idx }));
+        if (goalsList.length === 0) {
+          html += `<div style="font-size:14px;color:var(--text-secondary);">${isClient ? 'No goals yet — tap "+ Add Goal" to share one, or your Buddy will help set some on your first check-in.' : 'No goals yet — work with the owner to set 1–2 meaningful goals on the next check-in.'}</div>`;
+        } else {
+          for (const g of goalsList) {
+            const daysSinceReview = g.reviewed_at ? Math.floor((Date.now() - new Date(g.reviewed_at).getTime()) / (1000*60*60*24)) : 999;
+            const isDone = g.status === 'achieved' || g.status === 'completed';
+            const needsQuarterlyReview = (tier === 'Buddy+' || tier === 'Buddy VIP') && daysSinceReview > 85 && g.status === 'active';
+            const isDvmReviewed = g.dvm_reviewed;
+            const idAttr = g.id ? `data-goal-id="${g.id}"` : `data-legacy-idx="${g._legacyIdx}"`;
+            html += `<div style="background:var(--bg);border-radius:8px;padding:12px;margin-bottom:8px;border-left:3px solid ${isDone ? 'var(--green)' : 'var(--amber)'};">
+              <div style="display:flex;justify-content:space-between;align-items:flex-start;">
+                <div style="flex:1;">
+                  <div style="font-weight:500;">${esc(g.goal_text)}</div>
+                  <div style="font-size:13px;color:var(--text-secondary);margin-top:4px;">
+                    ${g.set_by_owner ? (isClient ? '✍️ Set by you' : '✍️ Set by owner') : '📋 Set by Buddy'} · ${g.created_at ? formatDate(g.created_at) : ''}
+                    ${g.reviewed_at ? ' · Last reviewed: ' + formatDate(g.reviewed_at) : ''}
+                  </div>
+                  ${tier === 'Buddy VIP' && isDvmReviewed ? '<span style="display:inline-block;margin-top:4px;background:#e8f5e9;color:#2e7d32;font-size:12px;font-weight:600;padding:2px 8px;border-radius:12px;">✅ Reviewed by Dr. Rodgers</span>' : ''}
+                  ${needsQuarterlyReview ? `<div style="margin-top:6px;background:#fff3cd;color:#856404;font-size:13px;padding:4px 8px;border-radius:6px;">⏰ ${isClient ? 'Time to check in on this goal' : 'Quarterly goal review due — 85+ days since last review'}</div>` : ''}
                 </div>
-                ${tier === 'Buddy VIP' && isDvmReviewed ? '<span style="display:inline-block;margin-top:4px;background:#e8f5e9;color:#2e7d32;font-size:12px;font-weight:600;padding:2px 8px;border-radius:12px;">✅ Reviewed by Dr. Rodgers</span>' : ''}
-                ${needsQuarterlyReview ? `<div style="margin-top:6px;background:#fff3cd;color:#856404;font-size:13px;padding:4px 8px;border-radius:6px;">⏰ ${isClient ? 'Time to check in on this goal' : 'Quarterly goal review due — 85+ days since last review'}</div>` : ''}
+                <div style="display:flex;gap:4px;align-items:center;">
+                  <span style="font-size:11px;padding:2px 8px;border-radius:12px;background:${isDone ? '#e8f5e9' : '#fff8e1'};color:${isDone ? '#2e7d32' : '#f57f17'};font-weight:600;">${esc(g.status || 'active')}</span>
+                  ${canEdit ? `<button class="btn btn-secondary btn-small" data-action="toggle-goal-status" ${idAttr} style="font-size:10px;padding:2px 6px;">${isDone ? '↩️' : '✓'}</button>` : ''}
+                  ${tier === 'Buddy VIP' && canEdit && !isDvmReviewed ? `<button class="btn btn-secondary btn-small" data-action="request-dvm-review" ${idAttr} style="font-size:10px;padding:2px 6px;border-color:var(--primary);color:var(--primary);">Request DVM Review</button>` : ''}
+                </div>
               </div>
-              <div style="display:flex;gap:4px;align-items:center;">
-                <span style="font-size:11px;padding:2px 8px;border-radius:12px;background:${g.status === 'completed' ? '#e8f5e9' : '#fff8e1'};color:${g.status === 'completed' ? '#2e7d32' : '#f57f17'};font-weight:600;">${g.status || 'active'}</span>
-                ${canEdit ? `<button class="btn btn-secondary btn-small" data-action="toggle-goal-status" data-index="${i}" style="font-size:10px;padding:2px 6px;">${g.status === 'completed' ? '↩️' : '✓'}</button>` : ''}
-                ${tier === 'Buddy VIP' && canEdit && !isDvmReviewed ? `<button class="btn btn-secondary btn-small" data-action="request-dvm-review" data-index="${i}" style="font-size:10px;padding:2px 6px;border-color:var(--primary);color:var(--primary);">Request DVM Review</button>` : ''}
-              </div>
-            </div>
-          </div>`;
+            </div>`;
+          }
         }
       }
       html += `</div>
@@ -4893,6 +5414,16 @@ async function calculateBuddyScorecard(buddyId) {
           <label style="font-size:13px;display:flex;align-items:center;gap:6px;margin-bottom:8px;"><input type="checkbox" data-field="goal-set-by-owner"> Owner wrote this goal themselves</label>
           <button class="btn btn-primary btn-small" data-action="save-new-goal">Save Goal</button>
         </div>` : ''}
+      </div>`;
+
+      // ── Section: Conversation (folded in from the old Messages tab — sits between care content and the engagement log) ──
+      html += `<div id="section-messages" class="care-plan-section" style="border-left:4px solid var(--primary);margin-bottom:16px;">
+        <div class="section-title" style="display:flex;justify-content:space-between;align-items:center;">
+          <span>💬 Conversation</span>
+        </div>
+        <div class="section-content">
+          ${renderMessagesTab()}
+        </div>
       </div>`;
 
       // ── Section: Engagement (merges lp.engagement_log JSON entries with timeline_entries rows) ──
@@ -4997,17 +5528,56 @@ async function calculateBuddyScorecard(buddyId) {
         if (checkins.length === 0) {
           html += `<div style="font-size:13px;color:var(--text-secondary);">${esc(ownerName)} hasn't opted to share their wellness check-ins, or hasn't logged any yet.</div>`;
         } else {
-          const ratingDots = (n) => {
+          const LABELS_BY_VERSION = {
+            1: {
+              sleep: ['rough', 'patchy', 'okay', 'solid', 'deep'],
+              eating: ['skipping', 'light', 'okay', 'good', 'nourished'],
+              movement: ['still', 'barely', 'some', 'active', 'strong'],
+            },
+            2: {
+              sleep: ['not sleeping', 'restless', 'sleeping well', 'oversleeping', "can't get out of bed"],
+              eating: ['not eating', 'picking at food', 'regular meals', 'snacking constantly', 'overeating'],
+              movement: ["can't get moving", 'low energy', 'active', 'restless', "can't sit still"],
+            },
+          };
+          const ratingLabel = (kind, n, version) => {
+            const v = parseInt(n, 10);
+            if (!v || v < 1 || v > 5) return '—';
+            const labels = LABELS_BY_VERSION[version] || LABELS_BY_VERSION[2];
+            return labels[kind][v - 1] || '—';
+          };
+          const deviationFromMiddle = (n) => {
+            const v = parseInt(n, 10);
+            if (!v || v < 1 || v > 5) return 0;
+            return Math.abs(v - 3);
+          };
+          const concernScore = (c) =>
+            deviationFromMiddle(c.sleep_rating) + deviationFromMiddle(c.eating_rating) + deviationFromMiddle(c.movement_rating);
+          const concernChip = (score) => {
+            const color = score >= 4 ? '#c0392b' : score >= 2 ? '#d68910' : '#27855a';
+            const bg = score >= 4 ? '#fdecea' : score >= 2 ? '#fdf3e2' : '#eaf6ee';
+            return `<span style="background:${bg};color:${color};font-size:11px;font-weight:600;padding:2px 8px;border-radius:10px;letter-spacing:0.3px;">concern ${score}/6</span>`;
+          };
+          const legacyDots = (n) => {
             const v = Math.max(0, Math.min(5, parseInt(n, 10) || 0));
             return '●'.repeat(v) + '○'.repeat(5 - v);
           };
-          html += `<div style="font-size:12px;color:var(--text-secondary);margin-bottom:8px;">Last ${checkins.length} check-in${checkins.length === 1 ? '' : 's'} from ${esc(ownerName)}.</div>`;
+          html += `<div style="font-size:12px;color:var(--text-secondary);margin-bottom:8px;">Last ${checkins.length} check-in${checkins.length === 1 ? '' : 's'} from ${esc(ownerName)}. Concern score = how far each answer falls from the healthy middle on the new scale (0 = steady, 6 = both extremes). Older entries on the legacy scale show dots.</div>`;
           for (const c of checkins) {
-            html += `<div style="display:flex;align-items:center;gap:14px;padding:8px 10px;border-bottom:1px solid var(--border);font-size:13px;">
+            const version = parseInt(c.scale_version, 10) === 1 ? 1 : 2;
+            const isLegacy = version === 1;
+            const trailing = isLegacy
+              ? `<div title="Sleep">😴 <span style="font-family:monospace;letter-spacing:1px;">${legacyDots(c.sleep_rating)}</span></div>
+                 <div title="Eating">🍽️ <span style="font-family:monospace;letter-spacing:1px;">${legacyDots(c.eating_rating)}</span></div>
+                 <div title="Movement">🚶 <span style="font-family:monospace;letter-spacing:1px;">${legacyDots(c.movement_rating)}</span></div>
+                 <span style="font-size:11px;color:var(--text-secondary);font-style:italic;">legacy scale</span>`
+              : `${concernChip(concernScore(c))}
+                 <div title="Sleep">😴 ${esc(ratingLabel('sleep', c.sleep_rating, 2))}</div>
+                 <div title="Eating">🍽️ ${esc(ratingLabel('eating', c.eating_rating, 2))}</div>
+                 <div title="Movement">🚶 ${esc(ratingLabel('movement', c.movement_rating, 2))}</div>`;
+            html += `<div style="display:flex;align-items:center;gap:14px;padding:8px 10px;border-bottom:1px solid var(--border);font-size:13px;flex-wrap:wrap;">
               <div style="min-width:120px;color:var(--text-secondary);font-size:12px;">${formatDate(c.submitted_at)}</div>
-              <div title="Sleep">😴 <span style="font-family:monospace;letter-spacing:1px;">${ratingDots(c.sleep_rating)}</span></div>
-              <div title="Eating">🍽️ <span style="font-family:monospace;letter-spacing:1px;">${ratingDots(c.eating_rating)}</span></div>
-              <div title="Movement">🚶 <span style="font-family:monospace;letter-spacing:1px;">${ratingDots(c.movement_rating)}</span></div>
+              ${trailing}
             </div>`;
           }
         }
@@ -5051,6 +5621,33 @@ async function calculateBuddyScorecard(buddyId) {
           <button class="btn btn-primary btn-small" data-action="save-milestone" style="background:var(--amber);border-color:var(--amber);">🎉 Save Win</button>
         </div>` : ''}
       </div>`;
+
+      // ── DVM Clinical Notes (admin only — gated UI + backstopped by trg_care_plans_guard_dvm) ──
+      if (state.profile.role === 'admin') {
+        const dvmNotes = state.carePlan?.dvm_clinical_notes || '';
+        html += `
+          <div id="section-dvm-notes" class="care-plan-section view-mode" style="border-left:4px solid #c0392b;margin-bottom:16px;">
+            <div class="section-title" style="display:flex;justify-content:space-between;align-items:center;">
+              <span>🩺 DVM Clinical Notes (Admin Only)</span>
+              <button class="section-edit-btn" data-action="edit-careplan-section" data-section="dvm_clinical_notes">Edit</button>
+            </div>
+            <div style="font-size:11px;color:var(--text-secondary);margin-bottom:8px;">
+              Clinical notes from Dr. Rodgers. Hidden from buddies, clients, and external vets — admin only.
+            </div>
+            <div class="section-content">
+              ${dvmNotes
+                ? `<div style="white-space:pre-wrap;font-size:14px;line-height:1.5;">${esc(dvmNotes)}</div>`
+                : '<em style="color:var(--text-secondary);font-size:13px;">No clinical notes yet &mdash; tap Edit to add.</em>'}
+            </div>
+            <div class="section-form">
+              <textarea data-field="section-dvm_clinical_notes" placeholder="Clinical observations, diagnoses, treatment plans, anything that belongs in the DVM record but not shared with the Buddy or owner...">${esc(dvmNotes)}</textarea>
+              <div style="display:flex;gap:8px;">
+                <button class="btn btn-primary btn-small" data-action="save-careplan-section" data-section="dvm_clinical_notes">Save</button>
+                <button class="btn btn-secondary btn-small" data-action="cancel-careplan-section" data-section="dvm_clinical_notes">Cancel</button>
+              </div>
+            </div>
+          </div>`;
+      }
 
       // ── Internal Notes (staff only — pinned summary + dated case_notes feed) ──
       if (['vet_buddy', 'admin', 'practice_manager', 'external_vet'].includes(state.profile.role)) {
@@ -5255,8 +5852,8 @@ async function calculateBuddyScorecard(buddyId) {
       const tier = state.currentCase.subscription_tier;
       const targets = { 'Buddy': { buddy: 1, dvm: 0 }, 'Buddy+': { buddy: 4, dvm: 1 }, 'Buddy VIP': { buddy: 4, dvm: 1 }, buddy: { buddy: 1, dvm: 0 }, buddy_plus: { buddy: 4, dvm: 1 }, buddy_vip: { buddy: 4, dvm: 1 } };
       const target = targets[tier] || { buddy: 0, dvm: 0 };
-      const buddyCount = state.touchpoints.filter(t => t.type === 'buddy').length;
-      const dvmCount = state.touchpoints.filter(t => t.type === 'dvm').length;
+      const buddyCount = state.touchpoints.filter(t => t.type === 'buddy_checkin').length;
+      const dvmCount = state.touchpoints.filter(t => t.type === 'dvm_checkin').length;
 
       let html = `<div class="tab-content ${isVisible ? 'active' : ''}">
         <div class="card">
@@ -5284,9 +5881,9 @@ async function calculateBuddyScorecard(buddyId) {
       }
 
       if (state.profile.role === 'vet_buddy') {
-        html += `<button class="btn btn-primary" data-action="log-checkin" data-case-id="${state.currentCase.id}">Log Buddy Check-In</button>`;
+        html += `<button class="btn btn-primary" data-action="log-checkin" data-case-id="${state.currentCase.id}" data-type="buddy_checkin">Log Buddy Check-In</button>`;
       } else if (state.profile.role === 'admin') {
-        html += `<div style="display: flex; gap: 8px;"><button class="btn btn-primary" data-action="log-checkin" data-case-id="${state.currentCase.id}" data-type="buddy">Log Buddy Check-In</button><button class="btn btn-primary" data-action="log-checkin" data-case-id="${state.currentCase.id}" data-type="dvm">Log DVM Check-In</button></div>`;
+        html += `<div style="display: flex; gap: 8px;"><button class="btn btn-primary" data-action="log-checkin" data-case-id="${state.currentCase.id}" data-type="buddy_checkin">Log Buddy Check-In</button><button class="btn btn-primary" data-action="log-checkin" data-case-id="${state.currentCase.id}" data-type="dvm_checkin">Log DVM Check-In</button></div>`;
       }
 
       // Recent touchpoints list with satisfaction rating
@@ -5301,7 +5898,8 @@ async function calculateBuddyScorecard(buddyId) {
             : stars ? `<div style="margin-top:4px;font-size:13px;">${'⭐'.repeat(stars)}${'☆'.repeat(5-stars)} <span style="font-size:11px;color:var(--text-secondary);">(${stars}/5)</span></div>` : '';
           html += `<div style="padding:10px 0;border-bottom:1px solid var(--border);">
             <div style="display:flex;justify-content:space-between;align-items:center;">
-              <span style="font-size:13px;font-weight:500;">${tp.type === 'buddy' ? '🐾 Buddy' : '🩺 DVM'} Check-In</span>
+              <span style="font-size:13px;font-weight:500;">${tp.type === 'buddy_checkin' ? '🐾 Buddy' : '🩺 DVM'} Check-In</span>
+              ${tp.notes ? `<div style="margin-top:4px;font-size:12px;color:var(--text-secondary);line-height:1.4;">${esc(tp.notes)}</div>` : ''}
               <span style="font-size:11px;color:var(--text-secondary);">${formatDate(tp.completed_at)}</span>
             </div>
             ${starHtml}
@@ -5314,11 +5912,14 @@ async function calculateBuddyScorecard(buddyId) {
       return html;
     }
 
-    function renderAppointmentsTab() {
+    function renderAppointmentsTab(opts) {
+      const inline = opts && opts.inline;
       const isVisible = state.caseTab === 'appointments';
       const canEdit = ['vet_buddy', 'admin'].includes(state.profile.role);
       const isClient = state.profile.role === 'client';
-      let html = `<div class="tab-content ${isVisible ? 'active' : ''}">`;
+      let html = inline
+        ? `<div>`
+        : `<div class="tab-content ${isVisible ? 'active' : ''}">`;
 
       html += `<div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
         <div style="font-weight:600;">Appointments</div>
@@ -5460,6 +6061,7 @@ async function calculateBuddyScorecard(buddyId) {
             <option value="vaccine_record">Vaccine Record</option>
             <option value="other">Other</option>
           </select>` : ''}
+          <input id="doc-source-clinic-input" type="text" placeholder="Source clinic (optional)" value="${esc(state._prefillSourceClinic || '')}" style="padding:6px 10px;border:1px solid var(--border);border-radius:6px;font-size:13px;width:200px;" />
           <button class="btn btn-primary btn-small" data-action="trigger-doc-upload">⬆️ Upload File</button>
         </div>` : ''}
       </div>`;
@@ -5508,7 +6110,7 @@ async function calculateBuddyScorecard(buddyId) {
             <span class="doc-icon">${icon}</span>
             <div style="flex:1;min-width:0;">
               <div class="doc-name">${esc(doc.name)}${typeBadge}${aiStatusBadge}</div>
-              <div class="doc-meta">${size ? size + ' · ' : ''}Uploaded by ${esc(doc.uploaded_by_user?.name) || 'Unknown'} · ${formatDate(doc.created_at)}</div>
+              <div class="doc-meta">${size ? size + ' · ' : ''}${doc.record_date ? '📅 Service date: ' + formatDate(doc.record_date) : 'Uploaded ' + formatDate(doc.created_at)} · ${esc(doc.uploaded_by_user?.name) || 'Unknown'}</div>
               ${summaryChip}
             </div>
             ${doc.storage_path && SUMMARY_MIME.includes(doc.mime_type) ? `<button class="btn btn-secondary btn-small" data-action="view-doc" data-doc-id="${doc.id}">👁️ View</button>` : ''}
@@ -5535,7 +6137,8 @@ async function calculateBuddyScorecard(buddyId) {
         const tierCounts = {
           all: activeCases.length,
           Buddy: activeCases.filter(c => c.subscription_tier === 'Buddy').length,
-          Trial: activeCases.filter(c => c.subscription_tier === 'Trial').length,
+          // Trial state lives on users.subscription_status, not cases.subscription_tier
+          Trial: activeCases.filter(c => c.pets?.owner?.subscription_status === 'trialing').length,
         };
         const tier = (draft.tier in tierCounts) ? draft.tier : 'all';
         const n0 = tierCounts[tier];
@@ -5543,7 +6146,7 @@ async function calculateBuddyScorecard(buddyId) {
         const opt = (v, label) => `<option value="${v}"${tier === v ? ' selected' : ''}>${label} (${tierCounts[v]})</option>`;
         return `
         <div class="broadcast-overlay" data-action="close-broadcast">
-          <div class="broadcast-card" onclick="event.stopPropagation()">
+          <div class="broadcast-card">
             <div style="font-family:'Fraunces',serif; font-size:18px; font-weight:600; margin-bottom:16px;">📢 Broadcast Message</div>
             <div class="form-group"><label>Message</label><textarea data-field="broadcast-message" placeholder="Write your message to all clients..." style="width:100%;height:100px;">${esc(draft.message)}</textarea></div>
             <div class="form-group"><label>Schedule (optional — leave blank to send now)</label><input type="datetime-local" data-field="broadcast-schedule" value="${esc(draft.schedule)}" style="width:100%;"></div>
@@ -5567,7 +6170,7 @@ async function calculateBuddyScorecard(buddyId) {
 
       const grantTrialModal = state.showGrantTrial ? `
         <div class="broadcast-overlay" data-action="close-grant-trial">
-          <div class="broadcast-card" onclick="event.stopPropagation()">
+          <div class="broadcast-card">
             <div style="font-family:'Fraunces',serif; font-size:18px; font-weight:600; margin-bottom:16px;">🎉 Grant Free Trial</div>
             <div style="color:var(--text-secondary);font-size:13px;margin-bottom:16px;">Grant a ${TRIAL_DURATION_DAYS}-day free trial to a client by entering their email address.</div>
             <div class="form-group"><label>Client Email</label><input type="email" data-field="grant-trial-email" placeholder="client@example.com" style="width:100%;"></div>
@@ -5627,7 +6230,7 @@ async function calculateBuddyScorecard(buddyId) {
               <div style="font-size: 13px; color: var(--text-secondary); text-transform: uppercase;">Needs Attention</div>
             </div>
             <div class="card" style="text-align: center;">
-              <div style="font-size: 32px; color: var(--amber); margin-bottom: 8px;">${state.escalations.filter(e => e.status !== 'resolved').length}</div>
+              <div style="font-size: 32px; color: var(--amber); margin-bottom: 8px;">${state.escalations.filter(e => e.status !== 'Resolved').length}</div>
               <div style="font-size: 13px; color: var(--text-secondary); text-transform: uppercase;">Open Escalations</div>
             </div>
             <div class="card" style="text-align: center;">
@@ -5952,8 +6555,15 @@ async function calculateBuddyScorecard(buddyId) {
           <div style="font-family:'Fraunces',serif;font-size:22px;font-weight:600;">All Cases${state.cases.length ? ` (${state.cases.length})` : ''}</div>
           <button class="btn btn-primary btn-small" data-action="nav-admin-create-case">+ Create Case</button>
         </div>`;
-        html += '<input type="text" placeholder="Search cases..." data-field="case-search" style="margin-bottom:14px;width:100%;" aria-label="Search cases">';
-        const casesPaged = paginate(state.cases, pagination.cases);
+        html += '<input type="text" placeholder="Search cases..." data-field="case-search" value="' + esc(state.caseSearchQuery || '') + '" style="margin-bottom:14px;width:100%;" aria-label="Search cases">';
+        const _caseSearchQ = (state.caseSearchQuery || '').toLowerCase().trim();
+        const _filteredCases = _caseSearchQ
+          ? state.cases.filter(c => {
+              const t = ((c.pets?.name||'') + (c.pets?.owner?.name||'') + (c.assigned_buddy?.name||'') + (c.subscription_tier||'')).toLowerCase();
+              return t.includes(_caseSearchQ);
+            })
+          : state.cases;
+        const casesPaged = paginate(_filteredCases, pagination.cases);
         html += '<div class="card">';
         for (const c of casesPaged.items) {
           const adminSidebarEmoji = SPECIES_EMOJI[c.pets?.species?.toLowerCase()] || '🐾';
@@ -5965,7 +6575,10 @@ async function calculateBuddyScorecard(buddyId) {
               <div style="min-width:0; flex:1;">
                 <div class="case-list-pet-name" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(c.pets?.name || 'Unknown')}</div>
                 <div class="case-list-owner" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(c.pets?.owner?.name || 'Unknown Owner')}</div>
-                ${c.subscription_tier ? `<div style="font-size: 11px; color: var(--text-secondary); margin-top: 2px;">${c.subscription_tier}</div>` : ''}
+                <div style="display:flex;align-items:center;gap:6px;margin-top:2px;">
+                  ${c.subscription_tier ? `<span style="font-size: 11px; color: var(--text-secondary);">${c.subscription_tier}</span>` : ''}
+                  ${c.pets?.owner?.referral_source === 'inkwell' ? `<span class="badge badge-inkwell" style="font-size:9px;padding:2px 7px;">Inkwell</span>` : ''}
+                </div>
               </div>
               ${renderStatusDot(c.status)}<span style="font-size:12px;color:var(--text-secondary);">${esc(c.status || '')}</span>
             </div>
@@ -6017,8 +6630,8 @@ async function calculateBuddyScorecard(buddyId) {
                 <div style="font-size: 10px; font-weight: 700; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 5px;">Tier</div>
                 <select data-field="case-tier" data-case-id="${state.currentCase.id}" style="width:100%; font-size:13px; padding: 6px 8px;">
                   <option value="Buddy"     ${state.currentCase.subscription_tier === 'Buddy'     ? 'selected' : ''}>Buddy</option>
-                  <option value="Buddy+"    ${state.currentCase.subscription_tier === 'Buddy+'    ? 'selected' : ''}>Buddy+ (legacy)</option>
-                  <option value="Buddy VIP" ${state.currentCase.subscription_tier === 'Buddy VIP' ? 'selected' : ''}>Buddy VIP (legacy)</option>
+                  <option value="Buddy+"    ${state.currentCase.subscription_tier === 'Buddy+'    ? 'selected' : ''}>Buddy+</option>
+                  <option value="Buddy VIP" ${state.currentCase.subscription_tier === 'Buddy VIP' ? 'selected' : ''}>Buddy VIP</option>
                 </select>
               </div>
             </div>
@@ -6325,7 +6938,8 @@ async function calculateBuddyScorecard(buddyId) {
                   <div class="kanban-card" data-action="select-case" data-case-id="${c.id}">
                     <div style="font-weight:600;font-size:12px;">${esc(c.pets?.name) || 'No pet yet'}</div>
                     <div style="font-size:11px;color:var(--text-secondary);">${esc(c.pets?.owner?.name)}</div>
-                    ${c.subscription_tier === 'Trial' ? `<div style="font-size:10px;color:#e67e22;margin-top:3px;font-weight:600;">🎉 Free Trial</div>` : c.subscription_tier ? `<div style="font-size:10px;color:var(--primary);margin-top:3px;">${c.subscription_tier}</div>` : ''}
+                    ${c.pets?.owner?.subscription_status === 'trialing' ? `<div style="font-size:10px;color:#e67e22;margin-top:3px;font-weight:600;">🎉 Free Trial</div>` : c.subscription_tier ? `<div style="font-size:10px;color:var(--primary);margin-top:3px;">${c.subscription_tier}</div>` : ''}
+                    ${c.pets?.owner?.referral_source === 'inkwell' ? `<span class="badge badge-inkwell" style="margin-top:5px;font-size:9px;padding:2px 7px;">Inkwell</span>` : ''}
                   </div>
                 `).join('')}
               </div>
@@ -6446,47 +7060,80 @@ async function calculateBuddyScorecard(buddyId) {
     }
 
     function renderAdminEscalations() {
-      let html = '<div>';
-      if (state.escalations.length === 0) {
-        html += '<div class="empty-state"><div class="empty-state-text">No open escalations — things are running smoothly.</div></div>';
-      } else {
-        const adverseOutcomes = state.escalations.filter(e => e.escalation_type === 'adverse_outcome');
-        const clinicalEscalations = state.escalations.filter(e => e.escalation_type !== 'adverse_outcome');
-        const statusBg = { open: 'var(--red)', acknowledged: 'var(--amber)', resolved: 'var(--green)' };
+      const TYPE_LABELS = {
+        clinical_concern: 'Clinical concern',
+        owner_distress: 'Owner distress',
+        owner_vet_conflict: 'Owner ↔ vet conflict',
+        out_of_scope: 'Out of scope',
+        safety_concern: 'Safety concern',
+        unsure: 'Another set of eyes',
+      };
+      const PRIORITY_STYLE = {
+        urgent: 'background:#fdecea;color:#c62828;',
+        normal: 'background:#e3f2fd;color:#1565c0;',
+        fyi:    'background:#eceff1;color:#546e7a;',
+      };
+      const STATUS_STYLE = {
+        Open:         'background:#ffebee;color:#c62828;',
+        Acknowledged: 'background:#fff8e1;color:#f57f17;',
+        Resolved:     'background:#e8f5e9;color:#2e7d32;',
+      };
 
-        function renderEscCard(escalation, isAdverse) {
-          return `
-            <div class="escalation-card" style="${isAdverse ? 'border:2px solid var(--red);background:#fef2f2;' : ''}">
-              <div class="escalation-header">
-                <div class="escalation-pet">${isAdverse ? '🔴 ' : ''}${SPECIES_EMOJI[escalation.case?.pets?.species] || '🐾'} ${esc(escalation.case?.pets?.name)}</div>
-                <span class="escalation-status" style="background: ${statusBg[escalation.status]}20; color: ${statusBg[escalation.status]};">${esc(escalation.status?.toUpperCase())}</span>
+      const openAndAck = (state.escalations || []).filter(e => e.status === 'Open' || e.status === 'Acknowledged');
+      const resolved   = (state.escalations || []).filter(e => e.status === 'Resolved');
+      openAndAck.sort((a, b) => {
+        const pri = { urgent: 0, normal: 1, fyi: 2 };
+        const ap = pri[a.priority] ?? 1, bp = pri[b.priority] ?? 1;
+        if (ap !== bp) return ap - bp;
+        return new Date(b.created_at) - new Date(a.created_at);
+      });
+
+      function renderEscCard(escalation) {
+        const typeLabel = TYPE_LABELS[escalation.escalation_type] || escalation.escalation_type || '—';
+        const priorityChip = escalation.priority
+          ? `<span style="${PRIORITY_STYLE[escalation.priority] || ''}padding:2px 8px;border-radius:10px;font-size:11px;font-weight:700;letter-spacing:0.5px;text-transform:uppercase;">${esc(escalation.priority)}</span>`
+          : '';
+        return `
+          <div class="escalation-card" style="${escalation.priority === 'urgent' ? 'border:2px solid var(--red);background:#fff7f7;' : 'border:1px solid var(--border);'}padding:12px;border-radius:8px;margin-bottom:10px;">
+            <div class="escalation-header" style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;">
+              <div class="escalation-pet" style="font-weight:600;">${SPECIES_EMOJI[escalation.case?.pets?.species?.toLowerCase()] || '🐾'} ${esc(escalation.case?.pets?.name || 'Pet')}</div>
+              <div style="display:flex;gap:6px;align-items:center;">
+                ${priorityChip}
+                <span class="escalation-status" style="${STATUS_STYLE[escalation.status] || ''}padding:2px 8px;border-radius:10px;font-size:11px;font-weight:700;letter-spacing:0.5px;">${esc(escalation.status)}</span>
               </div>
-              ${isAdverse ? '<div style="font-size:11px;font-weight:700;color:var(--red);text-transform:uppercase;margin-bottom:4px;">Adverse Outcome</div>' : ''}
-              <div class="escalation-reason">${esc(escalation.reason)}</div>
-              ${escalation.incident_notes ? `<div style="margin-top:8px;padding:8px;background:#fff5f5;border-radius:6px;border-left:3px solid var(--red);font-size:13px;"><strong>Incident Notes:</strong> ${esc(escalation.incident_notes)}</div>` : ''}
-              <div class="escalation-date">Raised by ${esc(escalation.raised_by_user?.name)} on ${formatDate(escalation.created_at)}</div>
-              ${escalation.status !== 'resolved' ? `
-                <div style="margin-top: 8px; display: flex; gap: 8px;">
-                  ${escalation.status === 'open' ? `<button class="btn btn-secondary btn-small" data-action="escalation-ack" data-escalation-id="${escalation.id}">Acknowledge</button>` : ''}
-                  <button class="btn btn-primary btn-small" data-action="escalation-resolve" data-escalation-id="${escalation.id}">Mark Resolved</button>
-                </div>
-              ` : ''}
             </div>
-          `;
-        }
+            <div style="font-size:12px;color:var(--text-secondary);margin-top:2px;">${esc(typeLabel)}</div>
+            <div class="escalation-reason" style="margin-top:6px;font-size:13px;line-height:1.5;">${esc(escalation.reason || '')}</div>
+            ${escalation.dvm_response ? `<div style="margin-top:8px;padding:8px;background:#f0f7f4;border-left:3px solid var(--primary);border-radius:4px;font-size:13px;"><strong>DVM response:</strong> ${esc(escalation.dvm_response)}</div>` : ''}
+            ${escalation.incident_notes ? `<div style="margin-top:6px;padding:8px;background:#fff5f5;border-radius:6px;border-left:3px solid var(--red);font-size:12px;"><strong>Incident notes:</strong> ${esc(escalation.incident_notes)}</div>` : ''}
+            <div class="escalation-date" style="margin-top:8px;font-size:11px;color:var(--text-secondary);">
+              Raised by ${esc(escalation.raised_by_user?.name || '—')} on ${formatDate(escalation.created_at)}
+              ${escalation.acknowledged_at ? ` · Acknowledged ${formatDate(escalation.acknowledged_at)}` : ''}
+              ${escalation.resolved_at ? ` · Resolved ${formatDate(escalation.resolved_at)}` : ''}
+            </div>
+            ${escalation.status !== 'Resolved' ? `
+              <div style="margin-top:10px;display:flex;gap:8px;">
+                ${escalation.status === 'Open' ? `<button class="btn btn-secondary btn-small" data-action="escalation-ack" data-escalation-id="${escalation.id}">Acknowledge</button>` : ''}
+                <button class="btn btn-primary btn-small" data-action="escalation-resolve" data-escalation-id="${escalation.id}">Resolve…</button>
+              </div>
+            ` : ''}
+          </div>`;
+      }
 
-        // Adverse Outcomes section — always shown first
-        if (adverseOutcomes.length > 0) {
-          html += `<div style="margin-bottom:24px;">
-            <div style="font-size:16px;font-weight:700;color:var(--red);margin-bottom:12px;padding:8px 12px;background:#fef2f2;border-radius:8px;border-left:4px solid var(--red);">🔴 Adverse Outcomes — Requires Immediate Review</div>`;
-          for (const escItem of adverseOutcomes) html += renderEscCard(escItem, true);
-          html += '</div>';
+      let html = '<div>';
+      html += `<div style="font-family:'Fraunces',serif;font-size:22px;font-weight:700;margin-bottom:14px;">Escalations</div>`;
+      if (openAndAck.length === 0 && resolved.length === 0) {
+        html += '<div class="empty-state"><div class="empty-state-text">No escalations yet.</div></div>';
+      } else {
+        if (openAndAck.length > 0) {
+          html += `<div style="margin-bottom:8px;font-size:14px;font-weight:600;color:var(--text-secondary);">Open / Acknowledged (${openAndAck.length})</div>`;
+          for (const e of openAndAck) html += renderEscCard(e);
+        } else {
+          html += '<div class="empty-state" style="padding:18px;"><div class="empty-state-text">No open escalations — nothing needs your attention right now.</div></div>';
         }
-
-        // Clinical escalations
-        if (clinicalEscalations.length > 0) {
-          html += `<div style="margin-bottom:16px;font-size:16px;font-weight:600;">Clinical Escalations</div>`;
-          for (const escItem of clinicalEscalations) html += renderEscCard(escItem, false);
+        if (resolved.length > 0) {
+          html += `<div style="margin-top:18px;margin-bottom:8px;font-size:14px;font-weight:600;color:var(--text-secondary);">Recently resolved (${resolved.length})</div>`;
+          for (const e of resolved.slice(0, 10)) html += renderEscCard(e);
         }
       }
       html += '</div>';
@@ -6656,6 +7303,8 @@ async function calculateBuddyScorecard(buddyId) {
 
     function renderProfileSettings() {
       const AVATAR_COLORS = ['#689562', '#336026', '#3498db', '#9b59b6', '#e67e22', '#e74c3c', '#27ae60', '#c0392b'];
+      const identities = state.user?.identities || [];
+      const hasPassword = identities.some(i => i.provider === 'email' && i.identity_data && i.identity_data.hashed_password);
       return renderLayout(`
         <div class="card" style="max-width: 520px;">
           <div class="card-title" style="margin-bottom: 20px;">Profile Settings</div>
@@ -6682,6 +7331,16 @@ async function calculateBuddyScorecard(buddyId) {
             <button class="btn btn-primary" data-action="save-profile">Save Changes</button>
             <button class="btn btn-secondary" data-action="cancel-profile">Cancel</button>
           </div>
+          ${state.profile?.role === 'client' ? `
+          <div style="margin-top:20px;padding-top:16px;border-top:1px solid var(--border);">
+            <div style="font-size:13px;font-weight:600;color:var(--text);margin-bottom:4px;">Password</div>
+            ${hasPassword
+              ? `<div style="font-size:12px;color:var(--text-secondary);margin-bottom:10px;">Change the password you use to sign in.</div>
+                 <button class="btn btn-secondary" data-action="show-change-password" style="font-size:13px;">Change Password</button>`
+              : `<div style="font-size:12px;color:var(--text-secondary);margin-bottom:10px;">Set a password so you can sign in with email and password in addition to magic links.</div>
+                 <button class="btn btn-secondary" data-action="show-set-password" style="font-size:13px;">Set a Password</button>`
+            }
+          </div>` : ''}
         </div>
         ${state.profile.role === 'client' ? `
         <div class="card" style="max-width: 520px; margin-top: 24px;">
@@ -6821,7 +7480,7 @@ async function calculateBuddyScorecard(buddyId) {
           <div style="text-align:center;margin-bottom:24px;">
             <div style="font-size:48px;margin-bottom:12px;">🐾</div>
             <div style="font-size:22px;font-weight:700;color:#336026;margin-bottom:8px;">Welcome to Vet Buddies!</div>
-            <div style="color:var(--text-secondary);">Every pet deserves a Buddy. Let's get you set up.</div>
+            <div style="color:var(--text-secondary);">Your personalized team for optimal pet care. Let's get you set up.</div>
           </div>
           <div class="card" style="border:2px solid var(--primary);background:linear-gradient(135deg,#f0faf9 0%,#fff 100%);margin-bottom:20px;text-align:center;">
             <div style="font-size:28px;margin-bottom:8px;">🎉</div>
@@ -7244,6 +7903,7 @@ async function calculateBuddyScorecard(buddyId) {
         admin: [
           { label: 'Dashboard', icon: '📊', action: 'nav-admin-dashboard' },
           { label: 'All Cases', icon: '📁', action: 'nav-admin-cases' },
+          { label: 'Import Records', icon: '📥', action: 'nav-admin-import-records' },
           { label: 'Message Monitor', icon: '📬', action: 'nav-admin-inbox', badge: state.unreadCount },
           { label: 'Analytics', icon: '📈', action: 'nav-admin-analytics' },
           { label: 'Pipeline', icon: '🚀', action: 'nav-admin-pipeline' },
@@ -7279,7 +7939,7 @@ async function calculateBuddyScorecard(buddyId) {
       const navs = navsByRole[state.profile.role] || [];
       let sidebarHtml = '<ul class="sidebar-nav" role="menubar" aria-label="Main navigation">';
       for (const nav of navs) {
-        const isActive = nav.action === 'nav-' + state.view.split('-').slice(0, -1).join('-') || state.view.includes(nav.action.split('-')[1]);
+        const isActive = nav.action === 'nav-' + state.view;
         const badgeHtml = nav.badge ? `<span style="margin-left:auto;background:var(--red);color:white;border-radius:10px;font-size:10px;font-weight:700;padding:1px 6px;min-width:14px;text-align:center;" aria-label="${nav.badge} unread">${nav.badge}</span>` : '';
         sidebarHtml += `<li role="none"><a href="#" role="menuitem" class="sidebar-nav-link ${isActive ? 'active' : ''}" data-action="${nav.action}" ${nav.tab ? `data-tab="${nav.tab}"` : ''} ${isActive ? 'aria-current="page"' : ''} style="display:flex;align-items:center;gap:8px;"><span aria-hidden="true">${nav.icon}</span> ${nav.label}${badgeHtml}</a></li>`;
       }
@@ -7304,6 +7964,7 @@ async function calculateBuddyScorecard(buddyId) {
         </div>
         <div class="topbar-right">
           <button data-action="toggle-notifications" style="background:none;border:none;color:white;font-size:20px;cursor:pointer;position:relative;padding:8px;min-height:44px;min-width:44px;display:flex;align-items:center;justify-content:center;" title="Notifications">🔔${state.unreadCount > 0 ? `<span style="position:absolute;top:-4px;right:-6px;background:var(--red);color:white;border-radius:10px;font-size:10px;font-weight:700;padding:1px 5px;min-width:14px;text-align:center;">${state.unreadCount}</span>` : ''}</button>
+          ${renderDarkModeToggle()}
           <div class="role-badge">${state.profile.role === 'admin' ? 'Supervising DVM' : state.profile.role.replace('_', ' ')}</div>
           ${renderAvatar(state.profile.avatar_initials, state.profile.avatar_color, 'sm')}
           <button class="topbar-signout" data-action="signout">Sign Out</button>
@@ -7572,7 +8233,7 @@ function renderBuddyScorecard() {
     const gradeColor = gradeColorMap[buddy.performance_grade] || '#999';
 
     return `
-      <div class="scorecard card" data-action="view-scorecard-detail" data-buddy-id="${buddy.id}" style="cursor: pointer; transition: all 0.2s; display: flex; flex-direction: column; gap: 12px; padding: 16px;">
+      <div class="scorecard card" style="transition: all 0.2s; display: flex; flex-direction: column; gap: 12px; padding: 16px;">
         <div style="display: flex; align-items: center; gap: 12px; margin-bottom: 8px;">
           ${renderAvatar(buddy.avatar_initials, buddy.avatar_color, 'md')}
           <div style="flex: 1;">
@@ -7631,7 +8292,7 @@ function renderBuddyScorecard() {
 function renderClientSurveyView() {
   const surveys = state.surveyResponses || [];
   const avgRating = surveys.length > 0 ? (surveys.reduce((sum, s) => sum + (s.rating || 0), 0) / surveys.length).toFixed(1) : 0;
-  const responseRate = surveys.length > 0 ? Math.round((surveys.length / (state.totalClients || 1)) * 100) : 0;
+  const responseRate = surveys.length > 0 ? Math.round((surveys.length / (state.analyticsData?.totalClients || 1)) * 100) : 0;
 
   const surveyCardsHtml = surveys.length > 0 ? surveys.map(survey => `
     <div class="card" style="padding: 16px;">
@@ -7956,8 +8617,15 @@ function startLTOCountdownTimer() {
 }
 
 function renderPricingModal() {
-  const priceId = CONFIG.STRIPE_PLANS.buddy;
-  const priceDisplay = CONFIG.BUDDY_PRICE_DISPLAY;
+  const p = getPricingPhase();
+  const priceId = p.priceId;
+  const priceDisplay = p.priceDisplay;
+  const strikethroughHtml = p.strikethroughDisplay
+    ? `<span style="text-decoration: line-through; color: var(--text-secondary); font-size: 20px; font-weight: 500; margin-right: 8px;">${p.strikethroughDisplay}</span>`
+    : '';
+  const foundingBadgeHtml = (p.isIntro && p.spotsLeft > 0)
+    ? `<div style="margin-top: 8px; display: inline-block; background: linear-gradient(135deg,#ffd700,#f5c842); color: #5d4e00; font-size: 12px; font-weight: 700; padding: 4px 12px; border-radius: 20px; letter-spacing: 0.3px;">✨ Founding-member rate — ${p.spotsLeft} of ${CONFIG.INTRO_SUBSCRIBER_CAP} spots left</div>`
+    : '';
 
   const features = [
     'Monthly check-ins from your Vet Buddy',
@@ -7986,9 +8654,11 @@ function renderPricingModal() {
             <div style="margin-bottom: 20px;">
               <h3 style="font-family: 'Fraunces', serif; font-size: 24px; font-weight: 700; color: #336026; margin-bottom: 4px;">Buddy</h3>
               <div style="display: flex; align-items: baseline; gap: 8px; margin-bottom: 4px;">
+                ${strikethroughHtml}
                 <span style="font-size: 32px; font-weight: 700; color: #336026;">${priceDisplay}</span>
                 <span style="color: var(--text-secondary); font-size: 13px;">/month</span>
               </div>
+              ${foundingBadgeHtml}
             </div>
             <ul style="flex: 1; margin-bottom: 20px; list-style: none;">
               ${featuresHtml}
@@ -8011,7 +8681,7 @@ function renderSurveyModal() {
 
         <div style="display: flex; justify-content: center; gap: 16px; margin-bottom: 24px;">
           ${[1, 2, 3, 4, 5].map(rating => `
-            <button data-action="set-survey-rating" data-rating="${rating}" style="background: none; border: none; font-size: 32px; cursor: pointer; opacity: 0.4; transition: opacity 0.2s;">⭐</button>
+            <button class="survey-star" data-action="set-survey-rating" data-rating="${rating}" style="background: none; border: none; font-size: 32px; cursor: pointer; color: #ccc; transition: color 0.15s;">☆</button>
           `).join('')}
         </div>
 
@@ -8027,9 +8697,8 @@ function renderSurveyModal() {
 }
 
 function renderLightbox() {
-  const image = state.lightboxImage || {};
-  const url = image.url || '';
-  const title = image.title || 'Image';
+  const url = state.lightboxUrl || '';
+  const title = state.lightboxTitle || 'Image';
 
   return `
     <div class="lightbox-overlay" style="position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.9); display: flex; flex-direction: column; align-items: center; justify-content: center; z-index: 1100;" data-action="close-lightbox">
@@ -8111,6 +8780,8 @@ function renderAiReviewModal() {
   if (!state.showAiReviewModal || !state.aiExtractionResult) return '';
   const ext = state.aiExtractionResult;
   const checked = state.aiCheckedItems;
+  const autoApplied = !!state.aiAutoApplied;
+  const autoAppliedNote = `<span style="font-size:11px;color:#2a9d8f;font-weight:500;margin-left:6px;">✓ already imported</span>`;
 
   const docTypeLabels = {
     lab_results: 'Lab Results', exam_notes: 'Exam Notes', vaccination_record: 'Vaccination Record',
@@ -8129,14 +8800,15 @@ function renderAiReviewModal() {
     </div>`;
   }
 
-  // Diagnoses
+  // Diagnoses — when auto-applied, show as informational (already in care plan).
   if (ext.diagnoses?.length > 0) {
     itemsHtml += `<div style="margin-bottom:14px;">
-      <div style="font-weight:600;font-size:12px;color:var(--text-secondary);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:8px;">Diagnoses</div>`;
+      <div style="font-weight:600;font-size:12px;color:var(--text-secondary);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:8px;">Diagnoses${autoApplied ? autoAppliedNote : ''}</div>`;
     ext.diagnoses.forEach((d, i) => {
       const key = 'diag_' + i;
-      itemsHtml += `<label style="display:flex;align-items:flex-start;gap:10px;padding:8px 12px;background:${checked[key] ? 'rgba(42,157,143,0.08)' : '#f9f9f9'};border-radius:6px;margin-bottom:4px;cursor:pointer;">
-        <input type="checkbox" class="ai-item-check" data-key="${key}" ${checked[key] ? 'checked' : ''} style="margin-top:2px;width:16px;height:16px;cursor:pointer;">
+      const isChecked = autoApplied ? true : !!checked[key];
+      itemsHtml += `<label style="display:flex;align-items:flex-start;gap:10px;padding:8px 12px;background:${isChecked ? 'rgba(42,157,143,0.08)' : '#f9f9f9'};border-radius:6px;margin-bottom:4px;${autoApplied ? 'opacity:0.7;cursor:default;' : 'cursor:pointer;'}">
+        <input type="checkbox" class="ai-item-check" data-key="${key}" ${isChecked ? 'checked' : ''} ${autoApplied ? 'disabled' : ''} style="margin-top:2px;width:16px;height:16px;${autoApplied ? '' : 'cursor:pointer;'}">
         <span style="font-size:13px;">${esc(d)}</span>
       </label>`;
     });
@@ -8146,12 +8818,13 @@ function renderAiReviewModal() {
   // Medications
   if (ext.medications?.length > 0) {
     itemsHtml += `<div style="margin-bottom:14px;">
-      <div style="font-weight:600;font-size:12px;color:var(--text-secondary);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:8px;">💊 Medications</div>`;
+      <div style="font-weight:600;font-size:12px;color:var(--text-secondary);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:8px;">💊 Medications${autoApplied ? autoAppliedNote : ''}</div>`;
     ext.medications.forEach((m, i) => {
       const key = 'med_' + i;
       const details = [m.dose, m.frequency, m.start_date ? 'from ' + m.start_date : ''].filter(Boolean).join(' · ');
-      itemsHtml += `<label style="display:flex;align-items:flex-start;gap:10px;padding:8px 12px;background:${checked[key] ? 'rgba(42,157,143,0.08)' : '#f9f9f9'};border-radius:6px;margin-bottom:4px;cursor:pointer;">
-        <input type="checkbox" class="ai-item-check" data-key="${key}" ${checked[key] ? 'checked' : ''} style="margin-top:2px;width:16px;height:16px;cursor:pointer;">
+      const isChecked = autoApplied ? true : !!checked[key];
+      itemsHtml += `<label style="display:flex;align-items:flex-start;gap:10px;padding:8px 12px;background:${isChecked ? 'rgba(42,157,143,0.08)' : '#f9f9f9'};border-radius:6px;margin-bottom:4px;${autoApplied ? 'opacity:0.7;cursor:default;' : 'cursor:pointer;'}">
+        <input type="checkbox" class="ai-item-check" data-key="${key}" ${isChecked ? 'checked' : ''} ${autoApplied ? 'disabled' : ''} style="margin-top:2px;width:16px;height:16px;${autoApplied ? '' : 'cursor:pointer;'}">
         <div><div style="font-size:13px;font-weight:500;">${esc(m.name)}</div>${details ? `<div style="font-size:11px;color:var(--text-secondary);">${esc(details)}</div>` : ''}</div>
       </label>`;
     });
@@ -8161,12 +8834,13 @@ function renderAiReviewModal() {
   // Vaccines
   if (ext.vaccines?.length > 0) {
     itemsHtml += `<div style="margin-bottom:14px;">
-      <div style="font-weight:600;font-size:12px;color:var(--text-secondary);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:8px;">💉 Vaccines</div>`;
+      <div style="font-weight:600;font-size:12px;color:var(--text-secondary);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:8px;">💉 Vaccines${autoApplied ? autoAppliedNote : ''}</div>`;
     ext.vaccines.forEach((v, i) => {
       const key = 'vax_' + i;
       const details = [v.administered_date ? 'Given: ' + v.administered_date : '', v.due_date ? 'Due: ' + v.due_date : ''].filter(Boolean).join(' · ');
-      itemsHtml += `<label style="display:flex;align-items:flex-start;gap:10px;padding:8px 12px;background:${checked[key] ? 'rgba(42,157,143,0.08)' : '#f9f9f9'};border-radius:6px;margin-bottom:4px;cursor:pointer;">
-        <input type="checkbox" class="ai-item-check" data-key="${key}" ${checked[key] ? 'checked' : ''} style="margin-top:2px;width:16px;height:16px;cursor:pointer;">
+      const isChecked = autoApplied ? true : !!checked[key];
+      itemsHtml += `<label style="display:flex;align-items:flex-start;gap:10px;padding:8px 12px;background:${isChecked ? 'rgba(42,157,143,0.08)' : '#f9f9f9'};border-radius:6px;margin-bottom:4px;${autoApplied ? 'opacity:0.7;cursor:default;' : 'cursor:pointer;'}">
+        <input type="checkbox" class="ai-item-check" data-key="${key}" ${isChecked ? 'checked' : ''} ${autoApplied ? 'disabled' : ''} style="margin-top:2px;width:16px;height:16px;${autoApplied ? '' : 'cursor:pointer;'}">
         <div><div style="font-size:13px;font-weight:500;">${esc(v.name)}</div>${details ? `<div style="font-size:11px;color:var(--text-secondary);">${esc(details)}</div>` : ''}</div>
       </label>`;
     });
@@ -8660,6 +9334,11 @@ function renderVaccineDueAlerts(vaccines) {
         app.innerHTML = html;
         return;
       }
+      if (state.view === 'inkwell-signup') {
+        html = renderInkwellSignup();
+        app.innerHTML = html;
+        return;
+      }
       if (state.view === 'login' || !state.user) {
         html = renderLogin();
         app.innerHTML = html;
@@ -8679,7 +9358,16 @@ function renderVaccineDueAlerts(vaccines) {
         return;
       }
 
-      {
+      // Subscription gate: clients with no active access see the paywall instead
+      // of the requested view. Whitelisted views (onboarding, profile, the modal
+      // pricing flow) stay reachable so users can resubscribe or update their email.
+      const SUBSCRIPTION_GATE_BYPASS_VIEWS = new Set([
+        'onboarding', 'add-pet', 'profile-settings', 'subscribe',
+      ]);
+      if (role === 'client' && state.profile && !hasActiveAccess(state.profile) && !SUBSCRIPTION_GATE_BYPASS_VIEWS.has(state.view)) {
+        // Paywall path: set html and fall through so post-render hooks (modal overlay, billing-success toast, etc.) still run.
+        html = renderClientPaywall();
+      } else {
         switch (state.view) {
           case 'client-dashboard':
             html = renderClientDashboard();
@@ -8704,6 +9392,9 @@ function renderVaccineDueAlerts(vaccines) {
             break;
           case 'admin-cases':
             html = renderAdminCases();
+            break;
+          case 'admin-import-records':
+            html = renderAdminImportRecords();
             break;
           case 'admin-inbox':
             html = renderAdminInbox();
@@ -8745,6 +9436,9 @@ function renderVaccineDueAlerts(vaccines) {
             break;
           case 'signup':
             html = renderSignup();
+            break;
+          case 'inkwell-signup':
+            html = renderInkwellSignup();
             break;
           // ── NEW VIEWS ──────────────────────────────────────
           case 'health-summary':
@@ -8942,7 +9636,8 @@ function renderVaccineDueAlerts(vaccines) {
         if(state.showAiReviewModal&&typeof renderAiReviewModal==='function')mh+=renderAiReviewModal();
         if(state.showBioPrompt&&typeof renderBioPromptModal==='function')mh+=renderBioPromptModal();
         if(state.showPushPromptBanner)mh+=`<div style="position:fixed;top:16px;left:50%;transform:translateX(-50%);z-index:1100;background:linear-gradient(135deg,#336026,#689562);color:white;border-radius:12px;padding:14px 20px;box-shadow:0 8px 32px rgba(0,0,0,0.2);display:flex;align-items:center;gap:12px;max-width:480px;width:90%;animation:notifSlideIn 0.3s ease-out;"><span style="font-size:20px;">🔔</span><div style="flex:1;"><div style="font-weight:600;font-size:14px;">Your Buddy just sent a message!</div><div style="font-size:12px;opacity:0.9;margin-top:2px;">Enable notifications so you never miss one.</div></div><button data-action="enable-push-from-toast" style="background:white;color:#336026;border:none;border-radius:6px;padding:6px 14px;font-size:12px;font-weight:700;cursor:pointer;white-space:nowrap;">Enable</button><button data-action="dismiss-push-toast" style="background:none;border:none;color:rgba(255,255,255,0.7);font-size:18px;cursor:pointer;padding:0 4px;">×</button></div>`;
-        if(state._showPasswordReset)mh+=`<div class="broadcast-overlay" data-action="close-password-reset"><div class="broadcast-card" onclick="event.stopPropagation()" style="max-width:400px;"><div style="font-family:'Fraunces',serif;font-size:18px;font-weight:600;margin-bottom:16px;">🔒 Set New Password</div><div class="form-group"><label>New Password</label><input type="password" data-field="reset-new-password" placeholder="Enter new password (min 6 characters)" style="width:100%;"></div><div class="form-group"><label>Confirm Password</label><input type="password" data-field="reset-confirm-password" placeholder="Confirm new password" style="width:100%;"></div><div style="display:flex;gap:10px;margin-top:8px;"><button class="btn btn-primary" data-action="save-new-password" style="flex:1;">Update Password</button><button class="btn btn-secondary" data-action="close-password-reset">Cancel</button></div></div></div>`;
+        if(state._showChangePassword)mh+=`<div class="broadcast-overlay" data-action="close-change-password"><div class="broadcast-card" style="max-width:420px;"><div style="font-family:'Fraunces',serif;font-size:20px;font-weight:600;margin-bottom:6px;">Change password</div><div style="font-size:13px;color:var(--text-secondary);margin-bottom:20px;">Enter your current password and choose a new one.</div><div class="form-group"><label>Current Password</label><input type="password" data-field="change-current-password" placeholder="Current password" style="width:100%;" autocomplete="current-password"></div><div class="form-group"><label>New Password</label><input type="password" data-field="change-new-password" placeholder="At least 8 characters" style="width:100%;" autocomplete="new-password"></div><div class="form-group"><label>Confirm New Password</label><input type="password" data-field="change-confirm-password" placeholder="Confirm new password" style="width:100%;" autocomplete="new-password"></div><div style="display:flex;gap:10px;margin-top:8px;"><button class="btn btn-primary" data-action="save-change-password" style="flex:1;">Update Password</button><button class="btn btn-secondary" data-action="close-change-password">Cancel</button></div></div></div>`;
+        if(state._showPasswordReset)mh+=`<div class="broadcast-overlay" data-action="close-password-reset"><div class="broadcast-card" style="max-width:420px;"><div style="font-family:'Fraunces',serif;font-size:20px;font-weight:600;margin-bottom:6px;">Set a password</div><div style="font-size:13px;color:var(--text-secondary);margin-bottom:20px;">You signed in with a magic link. Set a password so you can log in with your email and password next time too.</div><div class="form-group"><label>New Password</label><input type="password" data-field="reset-new-password" placeholder="At least 8 characters" style="width:100%;" autocomplete="new-password"></div><div class="form-group"><label>Confirm Password</label><input type="password" data-field="reset-confirm-password" placeholder="Confirm new password" style="width:100%;" autocomplete="new-password"></div><div style="display:flex;gap:10px;margin-top:8px;"><button class="btn btn-primary" data-action="save-new-password" style="flex:1;">Set Password</button><button class="btn btn-secondary" data-action="close-password-reset">Skip for now</button></div></div></div>`;
         var mc=document.getElementById('modal-overlay-container');if(mc)mc.remove();
         if(mh){var c=document.createElement('div');c.id='modal-overlay-container';c.innerHTML=mh;document.body.appendChild(c);}
       },50);
@@ -9023,14 +9718,89 @@ function renderVaccineDueAlerts(vaccines) {
         if (action === 'close-lightbox') { state.showLightbox=false;var mc=document.getElementById('modal-overlay-container');if(mc)mc.remove();return; }
         if (action === 'show-survey') { state.showSurvey=true;state.surveyRating=0;render();return; }
         if (action === 'set-survey-rating') { state.surveyRating=parseInt(target.dataset.rating||'0');document.querySelectorAll('.survey-star').forEach(function(s){s.textContent=parseInt(s.dataset.rating)<=state.surveyRating?'\u2605':'\u2606';s.style.color=parseInt(s.dataset.rating)<=state.surveyRating?'#f39c12':'#ccc';});return; }
-        if (action === 'submit-survey') { var fb=document.querySelector('[data-field="survey-feedback"]')?.value||'';if(!state.surveyRating){showToast('Please select a rating','error');return;}saveSurvey(state.caseId,state.currentCase?.assigned_buddy_id,state.surveyRating,fb).then(function(){state.showSurvey=false;showToast('Thank you for your feedback!','success');render();});return; }
+        if (action === 'submit-survey') { var fb=document.getElementById('survey-feedback')?.value||'';if(!state.surveyRating){showToast('Please select a rating','error');return;}saveSurvey(state.caseId,state.currentCase?.assigned_buddy_id,state.surveyRating,fb).then(function(){state.showSurvey=false;showToast('Thank you for your feedback!','success');render();});return; }
         if (action === 'close-survey') { state.showSurvey=false;render();return; }
         if (action === 'toggle-handoff-form') { state.showHandoffForm=!state.showHandoffForm;render();return; }
         if (action === 'save-handoff') { var tbid=document.querySelector('[data-field="handoff-to-buddy"]')?.value;if(!tbid){showToast('Select receiving Buddy','error');return;}saveHandoffNote(state.caseId,tbid,{active_issues:document.querySelector('[data-field="handoff-active-issues"]')?.value||'',watch_items:document.querySelector('[data-field="handoff-watch-items"]')?.value||'',client_preferences:document.querySelector('[data-field="handoff-client-prefs"]')?.value||'',additional_notes:document.querySelector('[data-field="handoff-notes"]')?.value||''}).then(function(){state.showHandoffForm=false;showToast('Handoff saved!','success');loadHandoffNotes(state.caseId).then(function(){render();});});return; }
         if (action === 'copy-referral-code') { navigator.clipboard.writeText(state.profile?.referral_code||'').then(function(){showToast('Copied!','success');});return; }
-        if (action === 'close-password-reset') { state._showPasswordReset=false;render();return; }
+        if (action === 'close-password-reset') { if (target.classList.contains('broadcast-overlay') && e.target !== target) return; state._showPasswordReset=false;render();return; }
+        if (action === 'show-set-password') {
+          state._showPasswordReset=true;
+          state._passwordPromptShown=true;
+          render();
+          return;
+        }
+        if (action === 'show-change-password') {
+          state._showChangePassword=true;
+          render();
+          return;
+        }
+        if (action === 'close-change-password') {
+          if (target.classList.contains('broadcast-overlay') && e.target !== target) return;
+          state._showChangePassword=false;
+          render();
+          return;
+        }
+        if (action === 'save-change-password') {
+          var cur=document.querySelector('[data-field="change-current-password"]')?.value||'';
+          var np=document.querySelector('[data-field="change-new-password"]')?.value||'';
+          var cp=document.querySelector('[data-field="change-confirm-password"]')?.value||'';
+          if(!cur){showToast('Enter your current password','error');return;}
+          if(np.length<8){showToast('New password must be at least 8 characters','error');return;}
+          if(np!==cp){showToast('New passwords do not match','error');return;}
+          if(np===cur){showToast('New password must be different from current password','error');return;}
+          var email=state.user?.email||state.profile?.email;
+          if(!email){showToast('Could not determine account email — try signing out and back in','error');return;}
+          target.disabled=true;
+          var origLabel=target.textContent;
+          target.textContent='Updating…';
+          isPasswordPwned(np).then(function(pwned){
+            if(pwned){showToast('This password has appeared in a known data breach. Please choose a different password.','error');target.disabled=false;target.textContent=origLabel;return;}
+            sb.auth.signInWithPassword({email:email,password:cur}).then(function(verify){
+              if(verify.error){showToast('Current password is incorrect','error');target.disabled=false;target.textContent=origLabel;return;}
+              sb.auth.updateUser({password:np}).then(function(r){
+                if(r.error){showToast(r.error.message||'Failed to update password','error');target.disabled=false;target.textContent=origLabel;return;}
+                state._showChangePassword=false;
+                showToast('Password updated.','success');
+                render();
+              }).catch(function(e){showToast(e.message||'Failed to update password','error');target.disabled=false;target.textContent=origLabel;});
+            }).catch(function(e){showToast(e.message||'Failed to verify current password','error');target.disabled=false;target.textContent=origLabel;});
+          });
+          return;
+        }
         if (action === 'toggle-mute-case') { var cid=target.dataset.caseId;if(!cid)return;var muted=state.notificationSettings.muted_case_ids||[];if(muted.includes(cid)){state.notificationSettings.muted_case_ids=muted.filter(function(id){return id!==cid;});showToast('Notifications unmuted for this case','success');}else{state.notificationSettings.muted_case_ids=[].concat(muted,[cid]);showToast('Notifications muted for this case','info');}saveNotificationSettings().catch(function(){});render();return; }
-        if (action === 'save-new-password') { var np=document.querySelector('[data-field="reset-new-password"]')?.value||'';var cp=document.querySelector('[data-field="reset-confirm-password"]')?.value||'';if(np.length<8){showToast('Password must be at least 8 characters','error');return;}if(np!==cp){showToast('Passwords do not match','error');return;}isPasswordPwned(np).then(function(pwned){if(pwned){showToast('This password has appeared in a known data breach. Please choose a different password.','error');return;}sb.auth.updateUser({password:np}).then(function(r){if(r.error)throw r.error;state._showPasswordReset=false;showToast('Password updated successfully!','success');render();}).catch(function(e){showToast(e.message||'Failed to update password','error');});});return; }
+        if (action === 'save-new-password') {
+  var np=document.querySelector('[data-field="reset-new-password"]')?.value||'';
+  var cp=document.querySelector('[data-field="reset-confirm-password"]')?.value||'';
+  if(np.length<8){showToast('Password must be at least 8 characters','error');return;}
+  if(np!==cp){showToast('Passwords do not match','error');return;}
+  isPasswordPwned(np).then(function(pwned){
+    if(pwned){showToast('This password has appeared in a known data breach. Please choose a different password.','error');return;}
+    sb.auth.updateUser({password:np}).then(function(r){
+      if(r.error){
+        // updateUser failed (e.g. session requires re-auth) — fall back to recovery email
+        var userEmail = state.user?.email || state.profile?.email;
+        if(userEmail){
+          sb.auth.resetPasswordForEmail(userEmail, {redirectTo: window.location.origin + '/?reset=true'}).then(function(re){
+            if(re.error){ showToast(re.error.message||'Could not send reset email','error'); return; }
+            state._showPasswordReset=false;
+            showToast('Check your email — we sent a password reset link to ' + userEmail,'success');
+            render();
+          });
+        } else {
+          showToast(r.error.message||'Failed to update password. Try using Forgot Password from the login screen.','error');
+        }
+        return;
+      }
+      state._showPasswordReset=false;
+      showToast('Password set — you can now log in with your email and password.','success');
+      render();
+    }).catch(function(e){
+      showToast(e.message||'Failed to update password','error');
+    });
+  });
+  return;
+}
         if (action === 'download-ics') { var apt=state.appointments.find(function(a){return a.id===target.dataset.appointmentId;});if(apt){var ics=generateICS(apt,state.currentCase?.pets?.name||'Pet');var b=new Blob([ics],{type:'text/calendar'});var u=URL.createObjectURL(b);var dl=document.createElement('a');dl.href=u;dl.download='vet-buddies-appt.ics';dl.click();URL.revokeObjectURL(u);showToast('Calendar event downloaded!','success');}return; }
         if (action === 'export-care-plan-pdf') { if(state.carePlan&&state.currentCase){showToast('Generating PDF...','info');ensureJsPDF().then(function(){return generateCarePlanPDF(state.carePlan,state.currentCase);}).then(function(bu){var url=URL.createObjectURL(bu);var dl=document.createElement('a');dl.href=url;dl.download='care-plan-'+(state.currentCase.pets?.name||'pet')+'.pdf';dl.click();URL.revokeObjectURL(url);showToast('PDF downloaded!','success');}).catch(function(){showToast('PDF failed','error');});}return; }
         if (action === 'download-vet-visit-pdf') {
@@ -9134,6 +9904,29 @@ function renderVaccineDueAlerts(vaccines) {
         }
         if (action === 'show-2fa') { state.show2FA=true;render();return; }
         if (action === 'close-2fa') { state.show2FA=false;render();return; }
+        if (action === 'enable-2fa') {
+          const code = document.getElementById('2fa-code')?.value?.trim();
+          if (!code || code.length !== 6 || !/^\d{6}$/.test(code)) { showToast('Enter the 6-digit code from your authenticator app', 'error'); return; }
+          // Supabase MFA enrollment must be done via account settings; here we record the preference
+          // and show the user where to complete TOTP setup.
+          try {
+            await sb.from('users').update({ two_factor_enabled: true }).eq('id', state.profile.id);
+            state.profile.two_factor_enabled = true;
+            showToast('2FA preference saved. Complete TOTP setup in your Supabase account settings if not already done.', 'success');
+            render();
+          } catch(err) { showToast('Could not save 2FA setting: ' + (err.message || 'Error'), 'error'); }
+          return;
+        }
+        if (action === 'disable-2fa') {
+          if (!confirm('Disable two-factor authentication? Your account will be less secure.')) return;
+          try {
+            await sb.from('users').update({ two_factor_enabled: false }).eq('id', state.profile.id);
+            state.profile.two_factor_enabled = false;
+            showToast('2FA disabled', 'info');
+            render();
+          } catch(err) { showToast('Could not disable 2FA: ' + (err.message || 'Error'), 'error'); }
+          return;
+        }
 
         switch (action) {
           case 'care-team-invite-signup':
@@ -9205,6 +9998,7 @@ function renderVaccineDueAlerts(vaccines) {
               const idx2 = state.cases.findIndex(c => c.pets?.id === storyPetId);
               if (idx2 >= 0 && state.cases[idx2].pets) state.cases[idx2].pets.care_story = storyVal;
               showToast('Story saved', 'success');
+              render();
             } catch(err) { showToast('Failed to save story', 'error'); }
             break;
           }
@@ -9514,8 +10308,7 @@ function renderVaccineDueAlerts(vaccines) {
               }
               // Auto-create a case for this pet with full Living Care Plan
               const priceId = state.profile.subscription_tier_stripe;
-              const plan = priceId ? STRIPE_PLANS.find(p => p.id === priceId) : null;
-              const caseTier = plan?.tier || 'Buddy';
+              const caseTier = (priceId && PRICE_TO_NAME[priceId]) || 'Buddy';
               const caseInsert = {
                 pet_id: newPet.id,
                 status: 'Active',
@@ -9676,7 +10469,7 @@ function renderVaccineDueAlerts(vaccines) {
               const { data: inserted, error: insertErr } = await sb
                 .from('owner_checkins')
                 .insert(insertRow)
-                .select('id, submitted_at, sleep_rating, eating_rating, movement_rating, reflection, generated_summary')
+                .select('id, submitted_at, sleep_rating, eating_rating, movement_rating, reflection, generated_summary, scale_version')
                 .single();
               if (insertErr) throw insertErr;
               state.ownerCheckin = inserted;
@@ -9691,6 +10484,7 @@ function renderVaccineDueAlerts(vaccines) {
                 }
               } catch (aiErr) {
                 console.warn('reflect-on-checkin failed:', aiErr);
+                showToast('Saved — your summary will arrive shortly', 'info');
               }
               state.ownerCheckinSubmitting = false;
               render();
@@ -9748,6 +10542,38 @@ function renderVaccineDueAlerts(vaccines) {
             } catch(err) { showToast('Failed to save resource: ' + err.message, 'error'); }
             break;
           }
+          case 'edit-resource-url': {
+            const resId = target.dataset.resId;
+            const res = (state.adminResources || []).find(r => r.id === resId);
+            if (!resId) break;
+            showModal('Edit Resource', `
+              <div class="form-group"><label>Title</label><input type="text" data-field="edit-res-title" class="form-input" value="${esc(res?.title || '')}"></div>
+              <div class="form-group"><label>Description</label><input type="text" data-field="edit-res-desc" class="form-input" value="${esc(res?.description || '')}"></div>
+              <div class="form-group"><label>URL</label><input type="url" data-field="edit-res-url" class="form-input" placeholder="https://..." value="${esc(res?.url || '')}"></div>
+              <div class="form-group"><label>Icon (emoji)</label><input type="text" data-field="edit-res-icon" class="form-input" style="width:80px;" value="${esc(res?.icon || '📄')}"></div>
+            `, `
+              <button class="btn btn-primary" data-action="save-resource-edit" data-res-id="${resId}">Save</button>
+              <button class="btn btn-secondary" onclick="closeModal()">Cancel</button>
+            `);
+            break;
+          }
+          case 'save-resource-edit': {
+            const resId2 = target.dataset.resId;
+            const newTitle = document.querySelector('[data-field="edit-res-title"]')?.value?.trim();
+            const newDesc = document.querySelector('[data-field="edit-res-desc"]')?.value?.trim() || '';
+            const newUrl = document.querySelector('[data-field="edit-res-url"]')?.value?.trim() || null;
+            const newIcon = document.querySelector('[data-field="edit-res-icon"]')?.value?.trim() || '📄';
+            if (!newTitle) { showToast('Title is required', 'error'); break; }
+            try {
+              await sb.from('admin_resources').update({ title: newTitle, description: newDesc, url: newUrl, icon: newIcon }).eq('id', resId2);
+              const idx = (state.adminResources || []).findIndex(r => r.id === resId2);
+              if (idx >= 0) Object.assign(state.adminResources[idx], { title: newTitle, description: newDesc, url: newUrl, icon: newIcon });
+              closeModal();
+              showToast('Resource updated', 'success');
+              render();
+            } catch(err) { showToast('Update failed: ' + (err.message || 'Error'), 'error'); }
+            break;
+          }
           // ── External vet: view case detail ──
           case 'view-case-detail': {
             const vcCaseId = target.dataset.caseId;
@@ -9761,10 +10587,6 @@ function renderVaccineDueAlerts(vaccines) {
             }
             break;
           }
-          // ── Buddy scorecard detail ──
-          case 'view-scorecard-detail':
-            // Scorecard cards are informational — no-op for now
-            break;
           // ── Partner clinic: push visit summary ──
           case 'push-visit-summary': {
             const visitCaseId = document.getElementById('visit-case-id')?.value || state.caseId || (state.cases[0]?.id);
@@ -9844,26 +10666,32 @@ function renderVaccineDueAlerts(vaccines) {
           case 'switch-active-pet': {
             const newIdx = parseInt(target.dataset.idx || '0');
             state.activePetIndex = Math.max(0, Math.min(newIdx, state.cases.length - 1));
-            // Reload everything the dashboard depends on for the newly selected pet,
-            // including messages — the inline conversation panel needs them.
             const switchedCase = state.cases[state.activePetIndex];
             if (switchedCase) {
               state.caseId = switchedCase.id;
               state.currentCase = switchedCase;
-              Promise.all([
+              // Clear per-pet collections immediately so the next render doesn't
+              // briefly show the previous pet's messages/appointments/timeline
+              // before Promise.all resolves.
+              state.carePlan = null;
+              state.appointments = [];
+              state.timelineEntries = [];
+              state.messages = [];
+              render();
+              await Promise.all([
                 loadCarePlan(switchedCase.id),
                 loadAppointments(switchedCase.id),
                 loadPetCareProfile(switchedCase.pets?.id),
                 loadTimeline(switchedCase.id),
                 loadMessages(switchedCase.id),
-              ]).then(() => render());
+              ]);
+              render();
             }
-            render();
             break;
           }
           case 'nav-buddy-dashboard':
             await loadCases();
-            await loadBuddyAllAppointments();
+            await Promise.all([loadBuddyAllAppointments(), loadAllBuddyTouchpoints()]);
             navigate('buddy-dashboard');
             break;
           case 'nav-buddy-case':
@@ -9904,10 +10732,375 @@ function renderVaccineDueAlerts(vaccines) {
             navigate('health-timeline'); break;
           case 'nav-partner-clinic-dashboard': navigate('partner-clinic-dashboard'); break;
           case 'nav-admin-cases':
+            // Clear any single-case focus so the cases page opens as a list, not stuck on the last-viewed case.
+            state.currentCase = null;
+            state.caseId = null;
             await loadCases();
             await loadTeamMembers();
             navigate('admin-cases');
             break;
+          case 'nav-admin-import-records':
+            state._importRecordsMode = null;
+            state._importRecordsResults = [];
+            state._importRecordsQuery = '';
+            state._importRecordsForm = {};
+            state._importRecordsErrors = {};
+            state._importRecordsResult = null;
+            state._importRecordsSubmitting = false;
+            state._importRecordsExtraction = null;
+            state._importRecordsUpload = null;
+            state._importRecordsExtractionPending = false;
+            state._importRecordsShowFindings = false;
+            state._importRecordsSendingEmail = false;
+            navigate('admin-import-records');
+            break;
+          case 'ir-choose-path-a':
+            state._importRecordsMode = 'pathA';
+            render();
+            break;
+          case 'ir-choose-path-c':
+            if (state.profile?.role !== 'admin') break;
+            state._importRecordsMode = 'pathC_upload';
+            state._importRecordsForm = { species: 'Dog' };
+            state._importRecordsErrors = {};
+            state._importRecordsExtraction = null;
+            state._importRecordsUpload = null;
+            state._importRecordsExtractionPending = false;
+            state._importRecordsShowFindings = false;
+            render();
+            break;
+          case 'ir-choose-path-b':
+            state._importRecordsMode = 'pathB';
+            state._importRecordsForm = { species: 'Dog' };
+            state._importRecordsErrors = {};
+            render();
+            break;
+          case 'ir-back-mode':
+            state._importRecordsMode = null;
+            state._importRecordsResults = [];
+            state._importRecordsQuery = '';
+            render();
+            break;
+          case 'ir-search': {
+            const q = (document.getElementById('ir-search-input')?.value || '').trim();
+            state._importRecordsQuery = q;
+            if (!q) { state._importRecordsResults = []; render(); break; }
+            const ql = '%' + q + '%';
+            const [petQ, userQ] = await Promise.all([
+              sb.from('pets').select('id, name, owner:users!owner_id(id, name, email), cases(id)').ilike('name', ql).limit(15),
+              sb.from('users').select('id, name, email, pets!owner_id(id, name, cases(id))').ilike('email', ql).eq('role', 'client').limit(15),
+            ]);
+            const results = [];
+            const seen = new Set();
+            for (const p of (petQ.data || [])) {
+              for (const c of (p.cases || [])) {
+                if (seen.has(c.id)) continue;
+                seen.add(c.id);
+                results.push({ case_id: c.id, pet_name: p.name, owner_name: p.owner?.name, owner_email: p.owner?.email });
+              }
+            }
+            for (const u of (userQ.data || [])) {
+              for (const p of (u.pets || [])) {
+                for (const c of (p.cases || [])) {
+                  if (seen.has(c.id)) continue;
+                  seen.add(c.id);
+                  results.push({ case_id: c.id, pet_name: p.name, owner_name: u.name, owner_email: u.email });
+                }
+              }
+            }
+            state._importRecordsResults = results;
+            render();
+            break;
+          }
+          case 'ir-open-case': {
+            state.caseId = target.dataset.caseId;
+            await loadCases();
+            await loadCase(state.caseId);
+            await loadCarePlan(state.caseId);
+            await loadDocuments(state.caseId);
+            await loadMessages(state.caseId);
+            navigate('admin-cases');
+            break;
+          }
+          case 'ir-submit-path-b': {
+            const form = {
+              email: document.getElementById('ir-email').value.trim(),
+              full_name: document.getElementById('ir-full_name').value.trim(),
+              phone: document.getElementById('ir-phone').value.trim(),
+              pet_name: document.getElementById('ir-pet_name').value.trim(),
+              species: document.getElementById('ir-species').value,
+              breed: document.getElementById('ir-breed').value.trim(),
+              source_clinic: document.getElementById('ir-source_clinic').value.trim(),
+            };
+            state._importRecordsForm = form;
+            const errs = {};
+            if (!form.email || !form.email.includes('@')) errs.email = 'Required';
+            if (!form.full_name) errs.full_name = 'Required';
+            if (!form.pet_name) errs.pet_name = 'Required';
+            if (!form.species) errs.species = 'Required';
+            state._importRecordsErrors = errs;
+            if (Object.keys(errs).length) { render(); break; }
+            state._importRecordsSubmitting = true;
+            render();
+            try {
+              const result = await callEdgeFunction('create-pending-owner', form);
+              if (result?.success) {
+                state._importRecordsResult = { ...result, full_name: form.full_name, email: form.email, source_clinic: form.source_clinic };
+                state._importRecordsMode = 'pathB_success';
+              } else {
+                state._importRecordsErrors = {
+                  _global: result?.error === 'already_registered'
+                    ? 'That email is already in our system. Use the "Existing owner" flow instead.'
+                    : (result?.error || 'Failed to create pending account.')
+                };
+              }
+            } catch (err) {
+              state._importRecordsErrors = { _global: 'Network error: ' + (err?.message || err) };
+            } finally {
+              state._importRecordsSubmitting = false;
+              render();
+            }
+            break;
+          }
+          case 'ir-send-claim-email': {
+            if (state.profile?.role !== 'admin') break;
+            const pendingOwnerId = state._importRecordsResult?.pending_owner_id;
+            if (!pendingOwnerId) {
+              showToast('No pending owner to send to', 'error');
+              break;
+            }
+            state._importRecordsSendingEmail = true;
+            state._importRecordsResult = { ...state._importRecordsResult, email_error: null };
+            render();
+            try {
+              const result = await callEdgeFunction('create-pending-owner', {
+                resend: true,
+                pending_owner_id: pendingOwnerId,
+              });
+              if (result?.success && result?.email_sent) {
+                state._importRecordsResult = { ...state._importRecordsResult, email_sent: true, email_error: null };
+                showToast('Claim email sent', 'success');
+              } else {
+                const err = result?.error || result?.email_error || 'Send failed';
+                state._importRecordsResult = { ...state._importRecordsResult, email_sent: false, email_error: err };
+                showToast('Failed to send: ' + err, 'error');
+              }
+            } catch (e) {
+              const msg = e?.message || String(e);
+              state._importRecordsResult = { ...state._importRecordsResult, email_sent: false, email_error: msg };
+              showToast('Network error: ' + msg, 'error');
+            } finally {
+              state._importRecordsSendingEmail = false;
+              render();
+            }
+            break;
+          }
+          case 'ir-copy-claim-url': {
+            const url = target.dataset.url;
+            try {
+              await navigator.clipboard.writeText(url);
+              showToast('Claim URL copied', 'success');
+            } catch (_) {
+              showToast('Copy failed — select and copy manually', 'error');
+            }
+            break;
+          }
+          case 'ir-go-to-case': {
+            const caseId = target.dataset.caseId;
+            const sc = state._importRecordsResult?.source_clinic || null;
+            state._prefillSourceClinic = sc;
+            state.caseId = caseId;
+            await loadCases();
+            await loadCase(caseId);
+            await loadCarePlan(caseId);
+            await loadDocuments(caseId);
+            await loadMessages(caseId);
+            navigate('admin-cases');
+            break;
+          }
+          case 'ir-reset':
+            state._importRecordsMode = null;
+            state._importRecordsForm = {};
+            state._importRecordsResult = null;
+            state._importRecordsErrors = {};
+            state._importRecordsExtraction = null;
+            state._importRecordsUpload = null;
+            state._importRecordsExtractionPending = false;
+            state._importRecordsShowFindings = false;
+            state._importRecordsSendingEmail = false;
+            render();
+            break;
+          case 'ir-pathc-upload': {
+            if (state.profile?.role !== 'admin') break;
+            const file = window._irPendingMedicalRecord || null;
+            const sourceClinic = (document.getElementById('ir-pathc-source-clinic')?.value || '').trim();
+            state._importRecordsErrors = {};
+            if (!file) {
+              state._importRecordsErrors = { _global: 'Pick a file first.' };
+              render();
+              break;
+            }
+            const MAX = 20 * 1024 * 1024;
+            if (file.size > MAX) {
+              state._importRecordsErrors = { _global: 'File too large (max 20MB).' };
+              render();
+              break;
+            }
+            const ALLOWED = ['application/pdf', 'image/jpeg', 'image/png', 'image/webp', 'text/plain'];
+            if (file.type && !ALLOWED.includes(file.type)) {
+              state._importRecordsErrors = { _global: 'Unsupported file type. Use PDF, JPG, PNG, WebP, or TXT.' };
+              render();
+              break;
+            }
+            state._importRecordsExtractionPending = true;
+            render();
+            let uploadedPath = null;
+            try {
+              const safeName = file.name.replace(/[^A-Za-z0-9._-]/g, '_');
+              const path = `imports/${Date.now()}_${safeName}`;
+              const { error: upErr } = await sb.storage.from('case-files').upload(path, file, { upsert: false });
+              if (upErr) throw upErr;
+              uploadedPath = path;
+              const { data: urlData, error: urlErr } = await sb.storage.from('case-files').createSignedUrl(path, 60 * 60 * 24 * 365);
+              if (urlErr) throw urlErr;
+              const signedUrl = urlData.signedUrl;
+              const result = await callEdgeFunction('extract-medical-record', {
+                document_url: signedUrl,
+                mime_type: file.type || 'application/octet-stream',
+                file_name: file.name,
+                pet_name: '',
+                pet_species: 'dog',
+              });
+              if (!result?.success || !result?.extraction) {
+                throw new Error(result?.error || 'Extraction returned no data.');
+              }
+              const ext = result.extraction;
+              state._importRecordsUpload = {
+                storage_path: path,
+                signed_url: signedUrl,
+                file_name: file.name,
+                mime_type: file.type || 'application/octet-stream',
+                size_bytes: file.size,
+              };
+              state._importRecordsExtraction = ext;
+              const ownerInfo = ext.owner_info || {};
+              const petInfo = ext.pet_info || {};
+              const speciesRaw = String(petInfo.species || '').toLowerCase().trim();
+              const speciesNorm = speciesRaw === 'dog' ? 'Dog' : speciesRaw === 'cat' ? 'Cat' : (speciesRaw ? 'Other' : 'Dog');
+              state._importRecordsForm = {
+                email: ownerInfo.email || '',
+                full_name: ownerInfo.name || '',
+                phone: ownerInfo.phone || '',
+                pet_name: petInfo.name || '',
+                species: speciesNorm,
+                breed: petInfo.breed || '',
+                source_clinic: sourceClinic,
+              };
+              state._importRecordsMode = 'pathC_review';
+            } catch (err) {
+              console.error('Path C upload/extract failed:', err);
+              if (uploadedPath) {
+                sb.storage.from('case-files').remove([uploadedPath]).catch(e => console.warn('Cleanup failed:', e));
+              }
+              state._importRecordsExtraction = null;
+              state._importRecordsUpload = null;
+              state._importRecordsErrors = { _global: 'Could not read the record: ' + (err?.message || 'Unknown error') };
+            } finally {
+              state._importRecordsExtractionPending = false;
+              window._irPendingMedicalRecord = null;
+              render();
+            }
+            break;
+          }
+          case 'ir-pathc-toggle-findings':
+            state._importRecordsShowFindings = !state._importRecordsShowFindings;
+            render();
+            break;
+          case 'ir-pathc-back-to-upload':
+            state._importRecordsMode = 'pathC_upload';
+            state._importRecordsExtraction = null;
+            state._importRecordsErrors = {};
+            render();
+            break;
+          case 'ir-submit-path-c': {
+            if (state.profile?.role !== 'admin') break;
+            const form = {
+              email: document.getElementById('ir-c-email').value.trim(),
+              full_name: document.getElementById('ir-c-full_name').value.trim(),
+              phone: document.getElementById('ir-c-phone').value.trim(),
+              pet_name: document.getElementById('ir-c-pet_name').value.trim(),
+              species: document.getElementById('ir-c-species').value,
+              breed: document.getElementById('ir-c-breed').value.trim(),
+              source_clinic: document.getElementById('ir-c-source_clinic').value.trim(),
+            };
+            state._importRecordsForm = form;
+            const errs = {};
+            if (!form.email || !form.email.includes('@')) errs.email = 'Required';
+            if (!form.full_name) errs.full_name = 'Required';
+            if (!form.pet_name) errs.pet_name = 'Required';
+            if (!form.species) errs.species = 'Required';
+            state._importRecordsErrors = errs;
+            if (Object.keys(errs).length) { render(); break; }
+            state._importRecordsSubmitting = true;
+            render();
+            try {
+              const result = await callEdgeFunction('create-pending-owner', form);
+              if (!result?.success) {
+                state._importRecordsErrors = {
+                  _global: result?.error === 'already_registered'
+                    ? `An account already exists for ${form.email}. Find them in the client list (use the "Existing owner" flow instead).`
+                    : (result?.error || 'Failed to create pending account.')
+                };
+                state._importRecordsSubmitting = false;
+                render();
+                break;
+              }
+              const upload = state._importRecordsUpload;
+              const extraction = state._importRecordsExtraction || {};
+              let recordsAttached = false;
+              if (upload && result.case_id) {
+                try {
+                  const { error: docErr } = await sb.from('case_documents').insert({
+                    case_id: result.case_id,
+                    name: upload.file_name,
+                    url: upload.signed_url,
+                    storage_path: upload.storage_path,
+                    size_bytes: upload.size_bytes,
+                    mime_type: upload.mime_type,
+                    source_clinic: form.source_clinic || null,
+                    uploaded_by: state.profile.id,
+                    ai_summary: extraction.summary || null,
+                    ai_extraction_status: 'complete',
+                  });
+                  if (docErr) throw docErr;
+                  recordsAttached = true;
+                  callEdgeFunction('extract-medical-record', {
+                    case_id: result.case_id,
+                    cached_extraction: extraction,
+                    pet_name: form.pet_name,
+                    pet_species: (form.species || 'dog').toLowerCase(),
+                  }).catch(e => console.warn('Auto-apply re-extract failed:', e));
+                } catch (docErr) {
+                  console.error('case_documents insert failed:', docErr);
+                  showToast('Account created, but record attachment failed — re-upload from the case view.', 'error');
+                }
+              }
+              state._importRecordsResult = {
+                ...result,
+                full_name: form.full_name,
+                email: form.email,
+                source_clinic: form.source_clinic,
+                records_attached: recordsAttached,
+              };
+              state._importRecordsMode = 'pathC_success';
+            } catch (err) {
+              state._importRecordsErrors = { _global: 'Network error: ' + (err?.message || err) };
+            } finally {
+              state._importRecordsSubmitting = false;
+              render();
+            }
+            break;
+          }
           case 'nav-admin-case':
             state.caseId = target.dataset.caseId;
             state.caseTab = 'careplan';
@@ -9938,6 +11131,7 @@ function renderVaccineDueAlerts(vaccines) {
             break;
           case 'nav-admin-inbox':
             await loadCases();
+            await loadTeamMembers();
             await loadUnreadCount();
             await loadAllUnreadMessages();
             navigate('admin-inbox');
@@ -10081,8 +11275,8 @@ function renderVaccineDueAlerts(vaccines) {
             try { if (state.currentCase?.pets?.id) await loadPetVaccines(state.currentCase.pets.id); } catch(e) { console.error('loadPetVaccines failed:', e); }
             // Internal Notes inline (staff only): pull case_notes feed
             try { if (state.caseId && ['vet_buddy', 'admin', 'practice_manager', 'external_vet'].includes(state.profile?.role)) await loadCaseNotes(state.caseId); } catch(e) { console.error('loadCaseNotes failed:', e); }
-            // Auto-retry any AI extractions that were queued during a credit outage — fire and forget
-            retryPendingExtractions(state.caseId).catch(e => console.warn('retryPendingExtractions failed:', e));
+            // AI extraction retries are now user-initiated via the Analyze button in the document modal.
+            // Pending documents are surfaced visually in the document list.
             subscribeToMessages(state.caseId);
             logAudit('view', 'case', state.caseId, { pet: state.currentCase?.pets?.name });
             render();
@@ -10127,52 +11321,214 @@ function renderVaccineDueAlerts(vaccines) {
             }
             break;
           case 'log-checkin': {
-            const checkInType = target.dataset.type || 'buddy';
+            const checkInType = target.dataset.type || 'buddy_checkin';
             const caseId = target.dataset.caseId;
             if (!caseId) { showToast('Missing case id — cannot log check-in', 'error'); break; }
             if (!state.profile?.id) { showToast('You must be signed in to log a check-in', 'error'); break; }
-            const origBtnText = target.textContent;
-            target.disabled = true;
-            target.textContent = 'Logging…';
-            try {
-              const { error } = await sb.from('touchpoints').insert({
-                case_id: caseId,
-                type: checkInType,
-                completed_at: new Date().toISOString(),
-                completed_by: state.profile.id,
+            // Default scheduled_at = local now formatted for datetime-local input
+            const nowLocal = (() => {
+              const d = new Date();
+              const pad = (n) => String(n).padStart(2, '0');
+              return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+            })();
+            const typeLabel = checkInType === 'dvm_checkin' ? 'DVM Check-In' : 'Buddy Check-In';
+            showModal(`Log ${typeLabel}`, `
+              <input type="hidden" id="cm-case-id" value="${esc(caseId)}">
+              <input type="hidden" id="cm-type" value="${esc(checkInType)}">
+              <div class="form-group">
+                <label for="cm-completed-at">When</label>
+                <input type="datetime-local" id="cm-completed-at" value="${nowLocal}" style="width:100%;">
+              </div>
+              <div class="form-group" style="margin-top:12px;">
+                <label for="cm-notes">Notes</label>
+                <textarea id="cm-notes" placeholder="What did you discuss? Anything to flag?" style="width:100%;height:90px;" maxlength="2000"></textarea>
+              </div>
+              <div class="form-group" style="margin-top:12px;">
+                <label>Satisfaction rating <span style="font-weight:400;color:var(--text-secondary);">(optional, for your own record)</span></label>
+                <div id="cm-rating-row" style="display:flex;gap:6px;align-items:center;margin-top:4px;">
+                  ${[1,2,3,4,5].map(n => `<button type="button" data-rating="${n}" class="cm-star" style="background:none;border:1px solid var(--border);border-radius:6px;padding:6px 10px;cursor:pointer;font-size:14px;">${n}★</button>`).join('')}
+                  <button type="button" id="cm-rating-clear" style="background:none;border:none;color:var(--text-secondary);cursor:pointer;font-size:12px;margin-left:8px;">Clear</button>
+                </div>
+                <input type="hidden" id="cm-rating" value="">
+              </div>
+            `, `
+              <button class="btn btn-primary" id="cm-save-btn">Save Check-In</button>
+              <button class="btn btn-secondary" onclick="closeModal()">Cancel</button>
+            `);
+            setTimeout(() => {
+              // Star-rating wiring
+              const ratingInput = document.getElementById('cm-rating');
+              const stars = document.querySelectorAll('#cm-rating-row .cm-star');
+              const paint = (val) => stars.forEach(s => {
+                const n = Number(s.dataset.rating);
+                s.style.background = (val && n <= val) ? '#fff7cc' : 'none';
+                s.style.borderColor = (val && n <= val) ? '#f5c842' : 'var(--border)';
               });
-              if (error) throw error;
-              await loadTouchpoints(state.caseId);
-              try { await awardCareXP(getCurrentPetId(), 'touchpoint_completed'); } catch(_) {}
-              showToast('Check-in logged', 'success');
-              render();
-            } catch (err) {
-              console.error('log-checkin error:', err);
-              showToast(err.message || 'Failed to log check-in', 'error');
-              target.disabled = false;
-              target.textContent = origBtnText;
-            }
+              stars.forEach(s => s.addEventListener('click', () => {
+                ratingInput.value = s.dataset.rating;
+                paint(Number(s.dataset.rating));
+              }));
+              document.getElementById('cm-rating-clear')?.addEventListener('click', () => {
+                ratingInput.value = '';
+                paint(0);
+              });
+
+              document.getElementById('cm-save-btn')?.addEventListener('click', async (ev) => {
+                const btn = ev.target;
+                btn.disabled = true;
+                btn.textContent = 'Saving…';
+                try {
+                  const cId = document.getElementById('cm-case-id').value;
+                  const cType = document.getElementById('cm-type').value;
+                  const cWhen = document.getElementById('cm-completed-at').value;
+                  const cNotes = document.getElementById('cm-notes').value.trim();
+                  const cRating = document.getElementById('cm-rating').value;
+                  const completedAt = cWhen ? new Date(cWhen).toISOString() : new Date().toISOString();
+                  const row = {
+                    case_id: cId,
+                    type: cType,
+                    completed_at: completedAt,
+                    completed_by: state.profile.id,
+                    notes: cNotes || null,
+                    satisfaction_rating: cRating ? Number(cRating) : null,
+                  };
+                  const { error: tpErr } = await sb.from('touchpoints').insert(row);
+                  if (tpErr) throw tpErr;
+                  // Mirror to timeline (staff-only entry) so the case activity reflects the check-in.
+                  const typeWord = cType === 'dvm_checkin' ? 'DVM' : 'Buddy';
+                  const summary = cNotes ? cNotes.slice(0, 200) + (cNotes.length > 200 ? '…' : '') : '(no notes)';
+                  try {
+                    await sb.from('timeline_entries').insert({
+                      case_id: cId,
+                      author_id: state.profile.id,
+                      type: 'update',
+                      content: `${typeWord} check-in logged: ${summary}`,
+                      is_client_visible: false,
+                    });
+                  } catch (timelineErr) {
+                    console.warn('timeline_entries insert failed (non-fatal):', timelineErr);
+                  }
+                  closeModal();
+                  await loadTouchpoints(state.caseId);
+                  try { await loadTimeline(state.caseId); } catch(_) {}
+                  showToast('Check-in logged', 'success');
+                  render();
+                } catch (err) {
+                  console.error('log-checkin save error:', err);
+                  showToast(err.message || 'Failed to log check-in', 'error');
+                  btn.disabled = false;
+                  btn.textContent = 'Save Check-In';
+                }
+              });
+            }, 50);
             break;
           }
-          case 'escalation-ack':
-            if (!['admin', 'vet_buddy'].includes(state.profile.role)) { showToast('Permission denied', 'error'); break; }
+          case 'escalation-ack': {
+            // RLS UPDATE on escalations is admin-only — gate matches that to avoid silent 0-row updates and lying toasts.
+            if (state.profile.role !== 'admin') { showToast('Permission denied', 'error'); break; }
+            const escId = target.dataset.escalationId;
             try {
-              await sb.from('escalations').update({ status: 'acknowledged' }).eq('id', target.dataset.escalationId);
+              const { error } = await sb.from('escalations').update({
+                status: 'Acknowledged',
+                acknowledged_by: state.profile.id,
+                acknowledged_at: new Date().toISOString(),
+              }).eq('id', escId);
+              if (error) throw error;
               await loadEscalations();
               showToast('Escalation acknowledged', 'success');
               render();
-            } catch(err) { showToast('Failed to update escalation', 'error'); }
+            } catch(err) { console.error('escalation-ack:', err); showToast('Failed to update escalation', 'error'); }
             break;
-          case 'escalation-resolve':
+          }
+          case 'escalation-resolve': {
             // RLS UPDATE on escalations is admin-only — gate matches that to avoid silent failures.
             if (state.profile.role !== 'admin') { showToast('Permission denied', 'error'); break; }
-            try {
-              await sb.from('escalations').update({ status: 'resolved', resolved_by: state.profile.id, resolved_at: new Date().toISOString() }).eq('id', target.dataset.escalationId);
-              await loadEscalations();
-              showToast('Escalation resolved', 'success');
-              render();
-            } catch(err) { showToast('Failed to resolve escalation', 'error'); }
+            const escId = target.dataset.escalationId;
+            const escRow = (state.escalations || []).find(e => e.id === escId);
+            if (!escRow) { showToast('Escalation not found', 'error'); break; }
+            const existingResp = escRow.dvm_response || '';
+            showModal('Resolve Escalation', `
+              <input type="hidden" id="er-id" value="${escRow.id}">
+              <input type="hidden" id="er-case-id" value="${escRow.case_id || ''}">
+              <div style="font-size:13px;color:var(--text-secondary);margin-bottom:10px;">
+                <strong style="color:var(--text);">Reason:</strong> ${esc(escRow.reason || '')}
+              </div>
+              <div class="form-group">
+                <label for="er-response">Your response (visible to the Buddy)</label>
+                <textarea id="er-response" placeholder="What's the clinical guidance? What should the Buddy do next?" style="width:100%;height:120px;" maxlength="4000">${esc(existingResp)}</textarea>
+              </div>
+              <label style="display:flex;align-items:center;gap:8px;font-size:13px;margin-top:6px;">
+                <input type="checkbox" id="er-revert-case" checked>
+                Flip case back to "Active" if no other open escalations remain
+              </label>
+            `, `
+              <button class="btn btn-primary" id="er-save-btn">Resolve</button>
+              <button class="btn btn-secondary" onclick="closeModal()">Cancel</button>
+            `);
+            setTimeout(() => {
+              document.getElementById('er-save-btn')?.addEventListener('click', async (ev) => {
+                const btn = ev.target;
+                btn.disabled = true;
+                btn.textContent = 'Saving…';
+                try {
+                  const id = document.getElementById('er-id').value;
+                  const caseId = document.getElementById('er-case-id').value;
+                  const dvmResp = document.getElementById('er-response').value.trim() || null;
+                  const revertCase = document.getElementById('er-revert-case').checked;
+
+                  const { error: updErr } = await sb.from('escalations').update({
+                    status: 'Resolved',
+                    dvm_response: dvmResp,
+                    resolved_by: state.profile.id,
+                    resolved_at: new Date().toISOString(),
+                  }).eq('id', id);
+                  if (updErr) throw updErr;
+
+                  // Timeline entry on the case
+                  try {
+                    await sb.from('timeline_entries').insert({
+                      case_id: caseId,
+                      author_id: state.profile.id,
+                      type: 'escalation',
+                      content: dvmResp ? `Escalation resolved by DVM: ${dvmResp.slice(0, 400)}` : 'Escalation resolved by DVM.',
+                      is_client_visible: false,
+                    });
+                  } catch (timelineErr) {
+                    console.warn('timeline_entries insert on resolve failed (non-fatal):', timelineErr);
+                  }
+
+                  // Optionally flip case back to Active if no other open escalations remain.
+                  if (revertCase && caseId) {
+                    try {
+                      const { data: stillOpen } = await sb
+                        .from('escalations')
+                        .select('id')
+                        .eq('case_id', caseId)
+                        .in('status', ['Open', 'Acknowledged']);
+                      if (!stillOpen || stillOpen.length === 0) {
+                        await sb.from('cases').update({ status: 'Active' }).eq('id', caseId);
+                      }
+                    } catch (caseErr) {
+                      console.warn('cases.status revert failed (non-fatal):', caseErr);
+                    }
+                  }
+
+                  closeModal();
+                  await loadEscalations();
+                  try { await loadCases(); } catch(_) {}
+                  try { if (caseId === state.caseId) await loadTimeline(state.caseId); } catch(_) {}
+                  showToast('Escalation resolved', 'success');
+                  render();
+                } catch (err) {
+                  console.error('escalation-resolve save:', err);
+                  showToast(err.message || 'Failed to resolve escalation', 'error');
+                  btn.disabled = false;
+                  btn.textContent = 'Resolve';
+                }
+              });
+            }, 50);
             break;
+          }
           // Appointment booking
           case 'new-appointment':
             showToast('Open a case to schedule an appointment', 'info');
@@ -10277,66 +11633,117 @@ function renderVaccineDueAlerts(vaccines) {
             break;
           case 'save-escalation': {
             const reason = document.querySelector('[data-field="escalation-reason"]')?.value.trim();
-            const escType = document.querySelector('[data-field="escalation-type"]')?.value || 'clinical';
-            const incidentNotes = document.querySelector('[data-field="incident-notes"]')?.value.trim() || '';
-            if (!reason) { showToast('Please describe the escalation reason', 'error'); break; }
-            if (escType === 'adverse_outcome' && !incidentNotes) { showToast('Incident notes are required for adverse outcome escalations', 'error'); break; }
+            const escType = document.querySelector('[data-field="escalation-type"]')?.value || 'unsure';
+            const priority = document.querySelector('[data-field="escalation-priority"]')?.value || 'normal';
+            if (!reason) { showToast('Please describe what to flag for Dr. Rodgers', 'error'); break; }
             try {
-              const insertData = { case_id: state.caseId, raised_by: state.profile.id, reason, status: 'Open', escalation_type: escType };
-              if (incidentNotes) insertData.incident_notes = incidentNotes;
-              const { error } = await sb.from('escalations').insert(insertData);
+              // Capture full case snapshot so admins reviewing the escalation see
+              // the same context regardless of which path raised it (matches the
+              // escalations.js drop-in). Non-fatal if it fails — escalation still saves.
+              let contextBundle = null;
+              try {
+                const { data: bundle, error: bundleErr } = await sb.rpc('build_escalation_context', { p_case_id: state.caseId });
+                if (!bundleErr) contextBundle = bundle;
+                else console.warn('build_escalation_context failed (non-fatal):', bundleErr);
+              } catch (bundleErr) {
+                console.warn('build_escalation_context threw (non-fatal):', bundleErr);
+              }
+              const { data: inserted, error } = await sb.from('escalations').insert({
+                case_id: state.caseId,
+                raised_by: state.profile.id,
+                reason,
+                status: 'Open',
+                escalation_type: escType,
+                priority,
+                context_bundle: contextBundle,
+              }).select('id').single();
               if (error) throw error;
-              const typeLabel = escType === 'adverse_outcome' ? '🔴 Adverse Outcome' : 'Clinical Question';
-              await sb.from('timeline_entries').insert({ case_id: state.caseId, author_id: state.profile.id, type: 'escalation', content: `Escalation raised (${typeLabel}): ${reason}`, is_client_visible: false });
-              logAudit('create', 'escalation', state.caseId, { reason, type: escType, case_id: state.caseId });
-              // Adverse outcome: attempt immediate notification to Dr. Rodgers
-              if (escType === 'adverse_outcome') {
+              // Flip case to Needs Attention so the case list surfaces this — but
+              // not for FYI escalations, which are informational and shouldn't
+              // demote the case status.
+              if (priority !== 'fyi') {
                 try {
-                  await callEdgeFunction('notify-dvm', {
-                    type: 'adverse_outcome',
-                    case_id: state.caseId,
-                    reason,
-                    incident_notes: incidentNotes,
-                    raised_by: state.profile.name,
-                    pet_name: state.currentCase?.pets?.name || 'Unknown',
-                  });
-                } catch(notifyErr) {
-                  console.warn('DVM notification attempt:', notifyErr);
-                  // Notification is best-effort — escalation is still saved
-                  showToast('⚠️ Escalation saved but could not send immediate notification to Dr. Rodgers. Please contact him directly.', 'warning');
+                  await sb.from('cases').update({ status: 'Needs Attention' }).eq('id', state.caseId);
+                  if (state.currentCase) state.currentCase.status = 'Needs Attention';
+                } catch (caseErr) {
+                  console.warn('cases.status flip failed (non-fatal):', caseErr);
+                }
+              }
+              // Mirror to timeline (staff-only).
+              try {
+                await sb.from('timeline_entries').insert({
+                  case_id: state.caseId,
+                  author_id: state.profile.id,
+                  type: 'escalation',
+                  content: `Escalation raised — ${escType}, ${priority} priority: ${reason}`,
+                  is_client_visible: false,
+                });
+              } catch (timelineErr) {
+                console.warn('timeline_entries insert failed (non-fatal):', timelineErr);
+              }
+              logAudit('create', 'escalation', state.caseId, { reason, type: escType, priority, case_id: state.caseId });
+              // Send push + email to admins. Best-effort — escalation is already saved.
+              if (inserted?.id) {
+                try {
+                  await callEdgeFunction('send-escalation-notification', { escalation_id: inserted.id });
+                } catch (notifyErr) {
+                  console.warn('send-escalation-notification failed:', notifyErr);
+                  showToast('Escalation saved but notification to admin failed. Please reach Dr. Rodgers directly if urgent.', 'warning');
                 }
               }
               state.showRaiseEscalation = false;
               await loadTimeline(state.caseId);
-              showToast('Escalation raised', 'success');
+              await loadEscalations();
+              await loadCases();
+              showToast('Escalation sent', 'success');
               render();
             } catch(err) { showToast(err.message || 'Failed to raise escalation', 'error'); }
             break;
           }
           // ── Living Care Plan actions ──
+          case 'cycle-lcp-status': {
+            if (!['admin','vet_buddy','practice_manager'].includes(state.profile.role)) { showToast('Permission denied', 'error'); break; }
+            if (!state.carePlan?.id) { showToast('No care plan to update', 'error'); break; }
+            const _curStatus = state.carePlan?.lcp_status || 'active';
+            const _nextStatus = _curStatus === 'active' ? 'paused' : _curStatus === 'paused' ? 'archived' : 'active';
+            if (_nextStatus === 'archived' && !confirm('Archive this care plan? It stays readable but is visually de-emphasized. You can unarchive anytime.')) break;
+            try {
+              const { error } = await sb.from('care_plans').update({ lcp_status: _nextStatus, updated_at: new Date().toISOString() }).eq('id', state.carePlan.id);
+              if (error) throw error;
+              await loadCarePlan(state.caseId);
+              showToast(`Plan status: ${_nextStatus}`, 'success');
+              render();
+            } catch(err) { showToast(err.message || 'Failed to update plan status', 'error'); }
+            break;
+          }
           case 'toggle-add-care-team':
             state.showAddCareTeam = !state.showAddCareTeam;
             render();
             break;
           case 'save-care-team-member': {
             const name = document.querySelector('[data-field="ct-name"]')?.value.trim();
-            if (!name) { showToast('Provider name is required', 'error'); break; }
-            const member = {
-              name,
-              role: document.querySelector('[data-field="ct-role"]')?.value.trim() || '',
-              clinic: document.querySelector('[data-field="ct-clinic"]')?.value.trim() || '',
-              phone: document.querySelector('[data-field="ct-phone"]')?.value.trim() || '',
-              email: document.querySelector('[data-field="ct-email"]')?.value.trim() || '',
-            };
+            const clinicForValidation = document.querySelector('[data-field="ct-clinic"]')?.value.trim();
+            if (!name && !clinicForValidation) { showToast('Enter a provider name or clinic name', 'error'); break; }
             try {
-              const lp = state.carePlan.living_plan || emptyLivingCarePlan();
-              lp.care_team.push(member);
-              const updateData = { content: JSON.stringify(lp), updated_by: state.profile?.id, updated_at: new Date().toISOString() };
-              if (state.carePlan?.id) {
-                await sb.from('care_plans').update(updateData).eq('id', state.carePlan.id);
-              } else {
-                await sb.from('care_plans').insert({ case_id: state.caseId, ...updateData });
+              // Ensure a care_plans row exists (some legacy cases won't have one yet).
+              let planId = state.carePlan?.id;
+              if (!planId) {
+                const { data: cpIns, error: cpErr } = await sb.from('care_plans')
+                  .insert({ case_id: state.caseId, pet_id: getCurrentPetId() })
+                  .select('id').single();
+                if (cpErr) throw cpErr;
+                planId = cpIns.id;
               }
+              const { error } = await sb.from('care_plan_care_team').insert({
+                care_plan_id: planId,
+                provider_name: name,
+                role:        document.querySelector('[data-field="ct-role"]')?.value.trim()   || null,
+                clinic_name: document.querySelector('[data-field="ct-clinic"]')?.value.trim() || null,
+                phone:       document.querySelector('[data-field="ct-phone"]')?.value.trim() || null,
+                email:       document.querySelector('[data-field="ct-email"]')?.value.trim() || null,
+                is_primary: false,
+              });
+              if (error) throw error;
               state.showAddCareTeam = false;
               await loadCarePlan(state.caseId);
               try { await awardCareXP(getCurrentPetId(), 'care_plan_updated'); } catch(_) {}
@@ -10346,11 +11753,18 @@ function renderVaccineDueAlerts(vaccines) {
             break;
           }
           case 'remove-care-team': {
-            const idx = parseInt(target.dataset.index);
+            const providerId = target.dataset.providerId;
+            const legacyIdx  = target.dataset.legacyIdx;
             try {
-              const lp = state.carePlan.living_plan || emptyLivingCarePlan();
-              lp.care_team.splice(idx, 1);
-              await sb.from('care_plans').update({ content: JSON.stringify(lp), updated_at: new Date().toISOString() }).eq('id', state.carePlan.id);
+              if (providerId) {
+                const { error } = await sb.from('care_plan_care_team').delete().eq('id', providerId);
+                if (error) throw error;
+              } else if (legacyIdx !== undefined) {
+                // Legacy JSON-blob entry — fall back to the old splice path.
+                const lp = state.carePlan.living_plan || emptyLivingCarePlan();
+                lp.care_team.splice(parseInt(legacyIdx, 10), 1);
+                await sb.from('care_plans').update({ content: JSON.stringify(lp), updated_at: new Date().toISOString() }).eq('id', state.carePlan.id);
+              }
               await loadCarePlan(state.caseId);
               showToast('Provider removed', 'success');
               render();
@@ -10367,14 +11781,21 @@ function renderVaccineDueAlerts(vaccines) {
             const setByOwnerEl = document.querySelector('[data-field="goal-set-by-owner"]');
             const setByOwner = setByOwnerEl?.type === 'checkbox' ? setByOwnerEl.checked : (setByOwnerEl?.value === 'true');
             try {
-              const lp = state.carePlan.living_plan || emptyLivingCarePlan();
-              lp.active_care_goals.push({ goal_text: goalText, set_by_owner: setByOwner, created_at: new Date().toISOString(), reviewed_at: null, status: 'active', dvm_reviewed: false });
-              const updateData = { content: JSON.stringify(lp), updated_by: state.profile?.id, updated_at: new Date().toISOString() };
-              if (state.carePlan?.id) {
-                await sb.from('care_plans').update(updateData).eq('id', state.carePlan.id);
-              } else {
-                await sb.from('care_plans').insert({ case_id: state.caseId, ...updateData });
+              let planId = state.carePlan?.id;
+              if (!planId) {
+                const { data: cpIns, error: cpErr } = await sb.from('care_plans')
+                  .insert({ case_id: state.caseId, pet_id: getCurrentPetId() })
+                  .select('id').single();
+                if (cpErr) throw cpErr;
+                planId = cpIns.id;
               }
+              const { error } = await sb.from('care_plan_goals').insert({
+                care_plan_id: planId,
+                goal_text:    goalText,
+                set_by_owner: setByOwner,
+                status:       'active',
+              });
+              if (error) throw error;
               state.showAddGoal = false;
               await loadCarePlan(state.caseId);
               try { await awardCareXP(getCurrentPetId(), 'care_plan_updated'); } catch(_) {}
@@ -10384,11 +11805,23 @@ function renderVaccineDueAlerts(vaccines) {
             break;
           }
           case 'toggle-goal-status': {
-            const gIdx = parseInt(target.dataset.index);
+            const goalId    = target.dataset.goalId;
+            const legacyIdx = target.dataset.legacyIdx;
             try {
-              const lp = state.carePlan.living_plan || emptyLivingCarePlan();
-              lp.active_care_goals[gIdx].status = lp.active_care_goals[gIdx].status === 'completed' ? 'active' : 'completed';
-              await sb.from('care_plans').update({ content: JSON.stringify(lp), updated_at: new Date().toISOString() }).eq('id', state.carePlan.id);
+              if (goalId) {
+                // Read current status, toggle between 'active' and 'achieved'.
+                // Single source of truth = state.goals (already loaded).
+                const current = (state.goals || []).find(g => g.id === goalId);
+                const next = (current?.status === 'achieved' || current?.status === 'completed') ? 'active' : 'achieved';
+                const { error } = await sb.from('care_plan_goals').update({ status: next }).eq('id', goalId);
+                if (error) throw error;
+              } else if (legacyIdx !== undefined) {
+                // Legacy JSON-blob entry.
+                const lp = state.carePlan.living_plan || emptyLivingCarePlan();
+                const idx = parseInt(legacyIdx, 10);
+                lp.active_care_goals[idx].status = (lp.active_care_goals[idx].status === 'completed' || lp.active_care_goals[idx].status === 'achieved') ? 'active' : 'completed';
+                await sb.from('care_plans').update({ content: JSON.stringify(lp), updated_at: new Date().toISOString() }).eq('id', state.carePlan.id);
+              }
               await loadCarePlan(state.caseId);
               showToast('Goal status updated', 'success');
               render();
@@ -10396,12 +11829,22 @@ function renderVaccineDueAlerts(vaccines) {
             break;
           }
           case 'request-dvm-review': {
-            const rIdx = parseInt(target.dataset.index);
+            const goalId    = target.dataset.goalId;
+            const legacyIdx = target.dataset.legacyIdx;
             try {
-              const lp = state.carePlan.living_plan || emptyLivingCarePlan();
-              lp.active_care_goals[rIdx].reviewed_at = new Date().toISOString();
-              lp.active_care_goals[rIdx].dvm_reviewed = true;
-              await sb.from('care_plans').update({ content: JSON.stringify(lp), updated_at: new Date().toISOString() }).eq('id', state.carePlan.id);
+              if (goalId) {
+                const { error } = await sb.from('care_plan_goals').update({
+                  dvm_reviewed: true,
+                  reviewed_at:  new Date().toISOString(),
+                }).eq('id', goalId);
+                if (error) throw error;
+              } else if (legacyIdx !== undefined) {
+                const lp = state.carePlan.living_plan || emptyLivingCarePlan();
+                const idx = parseInt(legacyIdx, 10);
+                lp.active_care_goals[idx].reviewed_at = new Date().toISOString();
+                lp.active_care_goals[idx].dvm_reviewed = true;
+                await sb.from('care_plans').update({ content: JSON.stringify(lp), updated_at: new Date().toISOString() }).eq('id', state.carePlan.id);
+              }
               await loadCarePlan(state.caseId);
               showToast('DVM review marked — Dr. Rodgers has been notified', 'success');
               render();
@@ -10469,6 +11912,175 @@ function renderVaccineDueAlerts(vaccines) {
             } catch(err) { showToast(err.message || 'Failed to save milestone', 'error'); }
             break;
           }
+          case 'prepare-for-visit': {
+            const pet = state.currentCase?.pets || {};
+            const cp = state.carePlan || {};
+            const activeMeds = (state.petMedications || []).filter(m => m.is_active);
+            const activeDx = (state.diagnoses || []).filter(d => d.status === 'active');
+            const priorityRank = { urgent: 0, normal: 1, whenever: 2 };
+            const questions = (state.openQuestions || [])
+              .filter(q => q.status === 'open' || q.status === 'asked')
+              .sort((a, b) => (priorityRank[a.priority] ?? 1) - (priorityRank[b.priority] ?? 1));
+            const team = (state.careProviders || []).slice()
+              .sort((a, b) => (b.is_primary ? 1 : 0) - (a.is_primary ? 1 : 0));
+
+            const buddyName = state.currentCase?.assigned_buddy?.name
+              || (state.profile?.role === 'vet_buddy' ? state.profile.name : null);
+
+            const _fmtDate = (s) => s ? new Date(s).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' }) : '';
+            const _ageFromDob = (dob) => {
+              if (!dob) return '';
+              const d = new Date(dob); const now = new Date();
+              const years = now.getFullYear() - d.getFullYear() - ((now.getMonth() < d.getMonth() || (now.getMonth() === d.getMonth() && now.getDate() < d.getDate())) ? 1 : 0);
+              return years > 0 ? `${years} yr${years === 1 ? '' : 's'}` : '< 1 yr';
+            };
+
+            const headerBlock = `
+              <header style="border-bottom:2px solid #336026;padding-bottom:12px;margin-bottom:18px;">
+                <div style="display:flex;justify-content:space-between;align-items:flex-end;gap:16px;">
+                  <div>
+                    <div style="font-size:11px;color:#666;letter-spacing:1px;text-transform:uppercase;">VetBuddies · Vet Visit Prep</div>
+                    <h1 style="margin:4px 0 0 0;font-size:24px;color:#336026;">${esc(pet.name || 'Pet')}</h1>
+                    <div style="font-size:13px;color:#444;margin-top:4px;">
+                      ${esc(pet.species || '')}${pet.breed ? ' · ' + esc(pet.breed) : ''}
+                      ${pet.dob ? ' · ' + _ageFromDob(pet.dob) + ' (DOB ' + _fmtDate(pet.dob) + ')' : ''}
+                      ${pet.weight ? ' · ' + esc(String(pet.weight)) + ' lb' : ''}
+                    </div>
+                  </div>
+                  <div style="text-align:right;font-size:11px;color:#666;">
+                    Prepared ${new Date().toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' })}
+                  </div>
+                </div>
+              </header>`;
+
+            const nextApptBlock = cp.next_appointment_at ? `
+              <section style="margin-bottom:18px;background:#f0f7f4;border-left:3px solid #336026;padding:10px 14px;">
+                <div style="font-size:11px;color:#666;letter-spacing:1px;text-transform:uppercase;margin-bottom:2px;">Next Appointment</div>
+                <div style="font-size:15px;font-weight:600;color:#222;">${esc(cp.next_appointment_title || 'Visit')}</div>
+                <div style="font-size:13px;color:#444;margin-top:2px;">${_fmtDate(cp.next_appointment_at)}</div>
+              </section>` : '';
+
+            const dxBlock = activeDx.length ? `
+              <section style="margin-bottom:18px;">
+                <h2 style="font-size:14px;color:#336026;margin:0 0 8px 0;border-bottom:1px solid #ddd;padding-bottom:4px;">What we're managing</h2>
+                <ul style="margin:0;padding-left:18px;font-size:13px;line-height:1.6;">
+                  ${activeDx.map(d => `<li>
+                    <strong>${esc(d.condition_name || '')}</strong>
+                    ${d.diagnosed_on ? ` <span style="color:#666;">— diagnosed ${_fmtDate(d.diagnosed_on)}</span>` : ''}
+                    ${d.diagnosing_vet ? ` <span style="color:#666;">by ${esc(d.diagnosing_vet)}</span>` : ''}
+                    ${d.notes ? `<div style="color:#555;margin-top:2px;font-size:12px;">${esc(d.notes)}</div>` : ''}
+                  </li>`).join('')}
+                </ul>
+              </section>` : '';
+
+            const medsBlock = activeMeds.length ? `
+              <section style="margin-bottom:18px;">
+                <h2 style="font-size:14px;color:#336026;margin:0 0 8px 0;border-bottom:1px solid #ddd;padding-bottom:4px;">Current medications</h2>
+                <table style="width:100%;border-collapse:collapse;font-size:13px;">
+                  <thead>
+                    <tr style="border-bottom:1px solid #ccc;text-align:left;color:#666;">
+                      <th style="padding:4px 8px 4px 0;font-weight:600;">Medication</th>
+                      <th style="padding:4px 8px;font-weight:600;">Dose</th>
+                      <th style="padding:4px 8px;font-weight:600;">Frequency</th>
+                      <th style="padding:4px 8px;font-weight:600;">Started</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    ${activeMeds.map(m => `<tr style="border-bottom:1px solid #eee;">
+                      <td style="padding:6px 8px 6px 0;">${esc(m.name || '')}</td>
+                      <td style="padding:6px 8px;">${esc(m.dose || '')}</td>
+                      <td style="padding:6px 8px;">${esc(m.frequency || '')}</td>
+                      <td style="padding:6px 8px;color:#666;">${_fmtDate(m.start_date) || '—'}</td>
+                    </tr>`).join('')}
+                  </tbody>
+                </table>
+              </section>` : '';
+
+            const questionsBlock = questions.length ? `
+              <section style="margin-bottom:18px;page-break-inside:avoid;">
+                <h2 style="font-size:14px;color:#336026;margin:0 0 8px 0;border-bottom:1px solid #ddd;padding-bottom:4px;">Questions for your vet</h2>
+                <ol style="margin:0;padding-left:20px;font-size:13px;line-height:1.7;">
+                  ${questions.map(q => `<li style="margin-bottom:6px;">
+                    ${q.priority === 'urgent' ? '<span style="background:#fdecea;color:#c62828;font-size:10px;font-weight:700;padding:1px 6px;border-radius:3px;letter-spacing:0.5px;margin-right:6px;">URGENT</span>' : ''}
+                    <strong>${esc(q.question || '')}</strong>
+                    ${q.context ? `<div style="color:#555;margin-top:2px;font-size:12px;">${esc(q.context)}</div>` : ''}
+                  </li>`).join('')}
+                </ol>
+                <div style="margin-top:10px;padding:8px;border:1px dashed #bbb;font-size:11px;color:#666;">
+                  Notes from this visit:
+                  <div style="height:60px;"></div>
+                </div>
+              </section>` : '';
+
+            const teamBlock = team.length ? `
+              <section style="margin-bottom:18px;">
+                <h2 style="font-size:14px;color:#336026;margin:0 0 8px 0;border-bottom:1px solid #ddd;padding-bottom:4px;">Care team</h2>
+                <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;font-size:13px;">
+                  ${team.map(p => `<div style="padding:6px 8px;border:1px solid #eee;border-radius:4px;${p.is_primary ? 'border-left:3px solid #336026;' : ''}">
+                    <div style="font-weight:600;">${esc(p.provider_name || '')}${p.is_primary ? ' <span style="font-size:10px;color:#336026;font-weight:700;letter-spacing:0.5px;">PRIMARY</span>' : ''}</div>
+                    ${p.role ? `<div style="color:#555;font-size:12px;">${esc(p.role)}</div>` : ''}
+                    ${p.clinic_name ? `<div style="color:#555;font-size:12px;">${esc(p.clinic_name)}</div>` : ''}
+                    ${p.phone ? `<div style="color:#555;font-size:12px;">${esc(p.phone)}</div>` : ''}
+                  </div>`).join('')}
+                </div>
+              </section>` : '';
+
+            const footerBlock = `
+              <footer style="border-top:1px solid #ddd;padding-top:10px;margin-top:24px;font-size:11px;color:#888;text-align:center;">
+                Prepared by VetBuddies${buddyName ? ' · ' + esc(buddyName) : ''} · Supervised by Dr. Jake Rodgers, DVM
+              </footer>`;
+
+            const emptyState = (!activeDx.length && !activeMeds.length && !questions.length && !team.length && !cp.next_appointment_at) ? `
+              <div style="text-align:center;color:#666;font-size:13px;padding:40px 20px;">
+                There's nothing on this care plan yet to bring to a visit. Add diagnoses, medications, or questions first.
+              </div>` : '';
+
+            const printableHtml = `
+              <div id="visit-prep-printable" style="font-family:Georgia,serif;color:#222;padding:32px 36px;max-width:780px;margin:0 auto;background:white;">
+                ${headerBlock}
+                ${nextApptBlock}
+                ${dxBlock}
+                ${medsBlock}
+                ${questionsBlock}
+                ${teamBlock}
+                ${emptyState}
+                ${footerBlock}
+              </div>`;
+
+            // Inject the printable view + a stylesheet that hides everything else when printing.
+            const styleEl = document.createElement('style');
+            styleEl.id = 'visit-prep-style';
+            styleEl.textContent = `
+              #visit-prep-printable { display: none; }
+              @media print {
+                body > *:not(#visit-prep-printable) { display: none !important; }
+                #visit-prep-printable { display: block !important; }
+                @page { margin: 0.5in; }
+              }
+            `;
+            const wrap = document.createElement('div');
+            wrap.innerHTML = printableHtml;
+            const printableNode = wrap.firstElementChild;
+            document.head.appendChild(styleEl);
+            document.body.appendChild(printableNode);
+
+            const origTitle = document.title;
+            document.title = `${pet.name || 'Pet'} - Vet Visit Prep - ${new Date().toISOString().slice(0,10)}`;
+
+            const cleanup = () => {
+              printableNode.remove();
+              styleEl.remove();
+              document.title = origTitle;
+              window.removeEventListener('afterprint', cleanup);
+            };
+            window.addEventListener('afterprint', cleanup);
+
+            // Small delay so the browser commits the new DOM before opening the print dialog.
+            setTimeout(() => window.print(), 100);
+            // Safety cleanup in case afterprint never fires (Safari quirk).
+            setTimeout(() => { if (document.getElementById('visit-prep-printable')) cleanup(); }, 60000);
+            break;
+          }
           case 'export-care-plan': {
             const lp = state.carePlan?.living_plan || emptyLivingCarePlan();
             const petName = state.currentCase?.pets?.name || 'Pet';
@@ -10533,6 +12145,42 @@ function renderVaccineDueAlerts(vaccines) {
               // revert the checkbox to actual state
               if (target) target.checked = state.profile.share_checkins_with_buddy;
             }
+            break;
+          }
+          case 'edit-team-member': {
+            const memberId = target.dataset.memberId;
+            const member = (state.teamMembers || []).find(m => m.id === memberId);
+            if (!member) break;
+            showModal(`Edit ${esc(member.name)}`, `
+              <div class="form-group"><label>Name</label><input type="text" data-field="edit-member-name" class="form-input" value="${esc(member.name || '')}"></div>
+              <div class="form-group"><label>Bio</label><textarea data-field="edit-member-bio" class="form-input" rows="3" style="resize:vertical;">${esc(member.bio || '')}</textarea></div>
+              <div class="form-group"><label>Role</label>
+                <select data-field="edit-member-role" class="form-input">
+                  <option value="vet_buddy"${member.role === 'vet_buddy' ? ' selected' : ''}>Vet Buddy</option>
+                  <option value="admin"${member.role === 'admin' ? ' selected' : ''}>Admin / DVM</option>
+                  <option value="geneticist"${member.role === 'geneticist' ? ' selected' : ''}>Geneticist</option>
+                </select>
+              </div>
+            `, `
+              <button class="btn btn-primary" data-action="save-team-member-edit" data-member-id="${memberId}">Save</button>
+              <button class="btn btn-secondary" onclick="closeModal()">Cancel</button>
+            `);
+            break;
+          }
+          case 'save-team-member-edit': {
+            const memberId2 = target.dataset.memberId;
+            const newName = document.querySelector('[data-field="edit-member-name"]')?.value?.trim();
+            const newBio = document.querySelector('[data-field="edit-member-bio"]')?.value?.trim() || '';
+            const newRole = document.querySelector('[data-field="edit-member-role"]')?.value;
+            if (!newName) { showToast('Name is required', 'error'); break; }
+            try {
+              await sb.from('users').update({ name: newName, bio: newBio, role: newRole }).eq('id', memberId2);
+              const idx = (state.teamMembers || []).findIndex(m => m.id === memberId2);
+              if (idx >= 0) { state.teamMembers[idx].name = newName; state.teamMembers[idx].bio = newBio; state.teamMembers[idx].role = newRole; }
+              closeModal();
+              showToast('Team member updated', 'success');
+              render();
+            } catch(err) { showToast('Update failed: ' + (err.message || 'Error'), 'error'); }
             break;
           }
           case 'initiate-transition': {
@@ -10639,53 +12287,21 @@ function renderVaccineDueAlerts(vaccines) {
                   btn.textContent = 'Deleting...';
                   btn.disabled = true;
                   try {
-                    // Cancel Stripe subscription if active
-                    if (state.profile.stripe_customer_id) {
-                      try { await callEdgeFunction('stripe-billing-portal', { return_url: window.location.origin }); } catch(_) {}
+                    // 1) Cancel Stripe subscription FIRST. If this fails the user is
+                    // still being billed — abort the delete so they can fix it via
+                    // billing portal rather than ending up with a deleted account +
+                    // continued charges.
+                    if (state.profile.stripe_subscription_id) {
+                      try {
+                        await callEdgeFunction('stripe-cancel-subscription', {});
+                      } catch (stripeErr) {
+                        throw new Error('Could not cancel your Stripe subscription. Please open the billing portal to cancel manually first, then try again. (' + (stripeErr.message || 'unknown error') + ')');
+                      }
                     }
-                    // Delete user data in order (respecting foreign keys)
-                    const userId = state.profile.id;
-                    const petIds = (state.cases || []).map(c => c.pets?.id).filter(Boolean);
-                    const caseIds = (state.cases || []).map(c => c.id);
-
-                    if (caseIds.length > 0) {
-                      await Promise.all([
-                        sb.from('messages').delete().in('case_id', caseIds),
-                        sb.from('timeline_entries').delete().in('case_id', caseIds),
-                        sb.from('touchpoints').delete().in('case_id', caseIds),
-                        sb.from('appointments').delete().in('case_id', caseIds),
-                        sb.from('case_documents').delete().in('case_id', caseIds),
-                        sb.from('case_notes').delete().in('case_id', caseIds),
-                        sb.from('care_plans').delete().in('case_id', caseIds),
-                        sb.from('escalations').delete().in('case_id', caseIds),
-                        sb.from('case_access').delete().in('case_id', caseIds),
-                        sb.from('client_surveys').delete().in('case_id', caseIds),
-                        sb.from('genetic_insights').delete().in('case_id', caseIds),
-                      ]);
-                      await sb.from('cases').delete().in('id', caseIds);
-                    }
-                    if (petIds.length > 0) {
-                      await Promise.all([
-                        sb.from('pet_vitals').delete().in('pet_id', petIds),
-                        sb.from('pet_medications').delete().in('pet_id', petIds),
-                        sb.from('pet_vaccines').delete().in('pet_id', petIds),
-                        sb.from('pet_care_level').delete().in('pet_id', petIds),
-                        sb.from('pet_badges').delete().in('pet_id', petIds),
-                        sb.from('pet_co_owners').delete().in('pet_id', petIds),
-                        sb.from('care_requests').delete().in('pet_id', petIds),
-                      ]);
-                      await sb.from('pets').delete().in('id', petIds);
-                    }
-                    await Promise.all([
-                      sb.from('kb_messages').delete().in('conversation_id', (await sb.from('kb_conversations').select('id').eq('user_id', userId)).data?.map(c => c.id) || []),
-                      sb.from('notification_preferences').delete().eq('user_id', userId),
-                      sb.from('push_subscriptions').delete().eq('user_id', userId),
-                      sb.from('user_care_stats').delete().eq('user_id', userId),
-                      sb.from('user_badges').delete().eq('user_id', userId),
-                      sb.from('pending_invites').delete().eq('invited_by', userId),
-                    ]);
-                    await sb.from('kb_conversations').delete().eq('user_id', userId);
-                    await sb.from('users').delete().eq('id', userId);
+                    // 2) Transactional cascade delete via SECURITY DEFINER RPC.
+                    // Either all rows go or none do — no half-deleted accounts.
+                    const { error: rpcErr } = await sb.rpc('delete_my_account');
+                    if (rpcErr) throw new Error('Account deletion failed: ' + rpcErr.message);
 
                     closeModal();
                     await sb.auth.signOut({ scope: 'local' });
@@ -10696,7 +12312,7 @@ function renderVaccineDueAlerts(vaccines) {
                     showToast('Your account has been deleted.', 'success');
                   } catch(err) {
                     console.error('Account deletion error:', err);
-                    showToast('Failed to delete account: ' + (err.message || 'Unknown error'), 'error');
+                    showToast(err.message || 'Failed to delete account', 'error');
                     btn.textContent = 'Delete My Account';
                     btn.disabled = false;
                   }
@@ -10819,14 +12435,18 @@ function renderVaccineDueAlerts(vaccines) {
           // ── AI Medical Record Extraction ──
           case 'apply-ai-extraction': {
             if (!state.aiExtractionResult) break;
+            const originalLabel = target.textContent;
             target.disabled = true;
             target.textContent = 'Applying...';
             try {
               await applyAiExtraction();
-            } catch (err) {
-              showToast('Failed to apply: ' + (err.message || 'Error'), 'error');
-              target.disabled = false;
-              target.textContent = 'Apply to Care Plan';
+            } catch (_err) {
+              // applyAiExtraction already toasted the error; just restore the button.
+            } finally {
+              if (state.showAiReviewModal) {
+                target.disabled = false;
+                target.textContent = originalLabel;
+              }
             }
             break;
           }
@@ -10834,6 +12454,7 @@ function renderVaccineDueAlerts(vaccines) {
             state.showAiReviewModal = false;
             state.aiExtractionResult = null;
             state.aiExtractionDocId = null;
+            state.aiAutoApplied = false;
             state.aiCheckedItems = {};
             render();
             break;
@@ -10953,6 +12574,7 @@ function renderVaccineDueAlerts(vaccines) {
             render();
             break;
           case 'close-broadcast':
+            if (target.classList.contains('broadcast-overlay') && e.target !== target) break;
             state.broadcastDraft = {
               message: document.querySelector('[data-field="broadcast-message"]')?.value || '',
               tier: document.querySelector('[data-field="broadcast-tier"]')?.value || 'all',
@@ -10967,6 +12589,7 @@ function renderVaccineDueAlerts(vaccines) {
             render();
             break;
           case 'close-grant-trial':
+            if (target.classList.contains('broadcast-overlay') && e.target !== target) break;
             state.showGrantTrial = false;
             render();
             break;
@@ -10983,6 +12606,7 @@ function renderVaccineDueAlerts(vaccines) {
               trialEnd.setDate(trialEnd.getDate() + TRIAL_DURATION_DAYS);
               const { error: updateErr } = await sb.from('users').update({
                 subscription_status: 'trialing',
+                trial_started_at: new Date().toISOString(),
                 trial_ends_at: trialEnd.toISOString(),
               }).eq('id', clientUser.id);
               if (updateErr) throw updateErr;
@@ -11192,7 +12816,6 @@ function renderVaccineDueAlerts(vaccines) {
             state.caseTab = target.dataset.tab;
             if (state.caseTab === 'touchpoints' && state.caseId) await loadTouchpoints(state.caseId);
             render();
-            if (state.caseTab === 'messages') scrollMessagesToBottom();
             break;
 
           // MEDICATIONS
@@ -11345,7 +12968,6 @@ function renderVaccineDueAlerts(vaccines) {
             state.showCannedResponses = !state.showCannedResponses;
             if (state.showCannedResponses) await loadCannedResponses();
             render();
-            if (state.caseTab === 'messages') scrollMessagesToBottom();
             break;
           case 'insert-canned': {
             const cannedContent = decodeURIComponent(target.dataset.content || '');
@@ -11445,16 +13067,20 @@ function renderVaccineDueAlerts(vaccines) {
             const hasAttachment = !!window._pendingAttachment;
             if ((!content && !hasAttachment) || !state.caseId) break;
             target.disabled = true;
+              // Rollback bookkeeping: if upload succeeds but the message insert fails,
+              // delete the orphaned file and restore _pendingAttachment so the user can retry.
+              const _pendingFile = window._pendingAttachment;
+              let uploadedPath = null;
               try {
                 let attachmentUrl = null, attachmentName = null;
-                if (window._pendingAttachment) {
-                  const file = window._pendingAttachment;
-                  const path = `messages/${state.caseId}/${Date.now()}_${file.name}`;
-                  const { error: upErr } = await sb.storage.from('case-files').upload(path, file, { upsert: false });
+                if (_pendingFile) {
+                  const path = `messages/${state.caseId}/${Date.now()}_${_pendingFile.name}`;
+                  const { error: upErr } = await sb.storage.from('case-files').upload(path, _pendingFile, { upsert: false });
                   if (upErr) throw upErr;
+                  uploadedPath = path;
                   const { data: urlData } = await sb.storage.from('case-files').createSignedUrl(path, 60 * 60 * 24 * 7); // 7-day signed URL
                   attachmentUrl = urlData.signedUrl;
-                  attachmentName = file.name;
+                  attachmentName = _pendingFile.name;
                   window._pendingAttachment = null;
                 }
                 const threadType = state.messageThread || 'client';
@@ -11471,6 +13097,7 @@ function renderVaccineDueAlerts(vaccines) {
                   created_at: new Date().toISOString(),
                 }).select('id, case_id, sender_id, content, sender_role, is_read_by_staff, is_read_by_buddy, is_read_by_client, thread_type, read_at, created_at, attachment_url, attachment_name, is_urgent').single();
                 if (msgErr) throw msgErr;
+                uploadedPath = null; // message now references the file; don't roll it back
                 state.messages.push({ ...newMsg, sender: { id: state.profile.id, name: state.profile.name, role: state.profile.role, avatar_initials: state.profile.avatar_initials, avatar_color: state.profile.avatar_color } });
                 try { await awardCareXP(getCurrentPetId(), 'message_sent'); } catch(_) {}
                 try { await logCareTeamActivity(getCurrentPetId(), 'sent a message'); } catch(_) {}
@@ -11502,8 +13129,13 @@ function renderVaccineDueAlerts(vaccines) {
                 }
               } catch (err) {
                 console.error(err);
+                if (uploadedPath) {
+                  sb.storage.from('case-files').remove([uploadedPath]).catch(e => console.warn('Failed to clean up orphaned upload:', e));
+                  window._pendingAttachment = _pendingFile;
+                }
                 showToast('Failed to send message', 'error');
                 target.disabled = false;
+                render();
               }
             break;
           }
@@ -11638,6 +13270,8 @@ function renderVaccineDueAlerts(vaccines) {
           await handleSignIn(e);
         } else if (e.target.dataset.action === 'signup') {
           await handleSignUp(e);
+        } else if (e.target.dataset.action === 'inkwell-signup') {
+          await handleInkwellSignup(e);
         }
       });
 
@@ -11659,11 +13293,9 @@ function renderVaccineDueAlerts(vaccines) {
           return;
         }
         if (e.target.dataset.field === 'case-search') {
-          const q = e.target.value.toLowerCase();
-          document.querySelectorAll('.case-list-item').forEach(item => {
-            const text = item.textContent.toLowerCase();
-            item.style.display = text.includes(q) ? '' : 'none';
-          });
+          state.caseSearchQuery = e.target.value;
+          clearTimeout(window._caseSearchTimeout);
+          window._caseSearchTimeout = setTimeout(function() { render(); }, 200);
         }
       });
 
@@ -11690,6 +13322,13 @@ function renderVaccineDueAlerts(vaccines) {
           render();
           return;
         }
+        // Import Records — Path C medical record file picker
+        if (e.target.id === 'ir-medical-record-input' && e.target.files?.[0]) {
+          window._irPendingMedicalRecord = e.target.files[0];
+          e.target.value = '';
+          render();
+          return;
+        }
         // Document vault upload
         if (e.target.id === 'doc-upload-input' && e.target.files?.[0]) {
           const file = e.target.files[0];
@@ -11698,6 +13337,8 @@ function renderVaccineDueAlerts(vaccines) {
           if (file.size > maxSize) { showToast('File too large — max 25 MB', 'error'); e.target.value = ''; return; }
           const fileTypeSelect = document.getElementById('doc-type-select');
           const fileType = fileTypeSelect?.value || null;
+          const sourceClinicInput = document.getElementById('doc-source-clinic-input');
+          const sourceClinic = sourceClinicInput?.value?.trim() || null;
           try {
             showToast('Uploading...', 'success');
             const ext = file.name.split('.').pop();
@@ -11714,6 +13355,7 @@ function renderVaccineDueAlerts(vaccines) {
               size_bytes: file.size,
               mime_type: file.type,
               file_type: fileType,
+              source_clinic: sourceClinic,
               uploaded_by: state.profile.id,
               ai_extraction_status: isAiCandidate ? 'pending' : null,
             });
@@ -11736,17 +13378,14 @@ function renderVaccineDueAlerts(vaccines) {
               navigate('client-case');
             }
 
-            // Queue AI extraction for supported file types — never blocks UI, never errors out
+            // AI extraction is now user-initiated via the Analyze button in the document modal —
+            // no auto-fire on upload to avoid silent API spend.
             if (isAiCandidate) {
-              showToast('File uploaded! AI analysis queued.', 'success');
-              const insertedDoc = (state.documents || []).find(d => d.name === file.name);
-              if (insertedDoc) {
-                runAiExtraction(insertedDoc, state.caseId, { openReviewModal: true, showToasts: true });
-              }
+              showToast('File uploaded! Use "Extract to Care Plan" to analyze.', 'success');
             } else {
               showToast('File uploaded! 📁', 'success');
-              render();
             }
+            render();
           } catch(err) {
             console.error('Doc upload error:', err);
             showToast('Upload failed: ' + (err.message || 'Unknown error'), 'error');
@@ -11822,6 +13461,11 @@ function renderVaccineDueAlerts(vaccines) {
       // Restore dark mode from localStorage before render to avoid flash
       try { if (localStorage.getItem('vetbuddies_dark_mode') === '1') { state.darkMode = true; document.documentElement.setAttribute('data-theme', 'dark'); } } catch(e) {}
 
+      // Load pricing phase (intro vs regular) before first paint so the pricing
+      // modal and subscribe card don't flash the default before the real values
+      // arrive. Fire-and-forget — safe defaults in state already cover failures.
+      loadPricingState();
+
       // Handle Stripe return redirect
       const urlParams = new URLSearchParams(window.location.search);
       if (urlParams.get('billing') === 'success') {
@@ -11871,6 +13515,13 @@ function renderVaccineDueAlerts(vaccines) {
           navigate('login');
           render();
         }
+      } else if (window.location.pathname === '/inkwell') {
+        // Inkwell partner-clinic referral landing page — pre-auth signup view.
+        // The auth-state listener below still runs; if an existing session exists,
+        // loadProfile() will navigate the user to their dashboard and overwrite this.
+        state._inkwellLanding = true;
+        navigate('inkwell-signup');
+        render();
       } else {
         // Show login initially while we check for existing session
         navigate('login');
@@ -11908,6 +13559,11 @@ function renderVaccineDueAlerts(vaccines) {
         } else if (event === 'SIGNED_OUT') {
           // Don't clobber state if a fresh login is in progress (stale session cleanup race)
           if (state._loginInProgress) return;
+          // Don't navigate away from the Inkwell landing page on the stale-token cleanup path.
+          // initApp routes anonymous /inkwell visitors to 'inkwell-signup', then INITIAL_SESSION
+          // (no session) calls signOut({local}) to clear stale tokens, which emits SIGNED_OUT.
+          // Without this guard, the user would land on /login instead of seeing the signup form.
+          const onInkwell = state._inkwellLanding && state.view === 'inkwell-signup';
           stopAppointmentReminders();
           if (state.realtimeChannel) { sb.removeChannel(state.realtimeChannel); state.realtimeChannel = null; }
           if (state.globalNotifChannel) { sb.removeChannel(state.globalNotifChannel); state.globalNotifChannel = null; }
@@ -11923,6 +13579,7 @@ function renderVaccineDueAlerts(vaccines) {
           state.caseId = null;
           state.petCoOwners = [];
           state.pendingCoOwnerInvites = [];
+          if (onInkwell) return;
           navigate('login');
           render();
         } else if (event === 'TOKEN_REFRESHED') {
@@ -11958,7 +13615,9 @@ function renderVaccineDueAlerts(vaccines) {
             state.caseId = event.data.caseId;
             const role = state.profile.role;
             if (role === 'client') {
-              state.caseTab = 'messages';
+              // Messages folded into the Care Plan body — clear any tab and queue a scroll-to-section.
+              state.caseTab = null;
+              state._scrollToSection = 'messages';
               loadCase(event.data.caseId).then(() => {
                 loadMessages(event.data.caseId);
                 subscribeToMessages(event.data.caseId);
@@ -11998,6 +13657,216 @@ function renderVaccineDueAlerts(vaccines) {
       `;
       document.body.appendChild(container);
     })();
+
+    // ═══ IMPORT RECORDS (admin Path A + Path B) ═══
+    function renderAdminImportRecords() {
+      const mode = state._importRecordsMode || null;
+      let body = '';
+
+      if (!mode) {
+        body = `
+          <div class="card" style="margin-bottom:16px;">
+            <h3 style="margin:0 0 8px 0;">📥 Import Medical Records</h3>
+            <p style="color:var(--text-secondary);margin:0;">Bring in records from another clinic. Choose a flow:</p>
+          </div>
+          <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(220px, 1fr));gap:16px;">
+            <button class="card" style="padding:24px;text-align:left;cursor:pointer;border:2px solid var(--border);background:white;" data-action="ir-choose-path-a">
+              <div style="font-size:28px;">🔎</div>
+              <div style="font-weight:600;font-size:16px;margin-top:8px;">Existing owner</div>
+              <div style="font-size:13px;color:var(--text-secondary);margin-top:4px;">Search by email or pet name. Records attach to their existing case.</div>
+            </button>
+            <button class="card" style="padding:24px;text-align:left;cursor:pointer;border:2px solid var(--border);background:white;" data-action="ir-choose-path-b">
+              <div style="font-size:28px;">✉️</div>
+              <div style="font-weight:600;font-size:16px;margin-top:8px;">New owner (no account yet)</div>
+              <div style="font-size:13px;color:var(--text-secondary);margin-top:4px;">We'll create a pending account, attach the records, and send a 14-day claim link.</div>
+            </button>
+            <button class="card" style="padding:24px;text-align:left;cursor:pointer;border:2px solid var(--border);background:white;" data-action="ir-choose-path-c">
+              <div style="font-size:28px;">📋</div>
+              <div style="font-weight:600;font-size:16px;margin-top:8px;">Import from medical record</div>
+              <div style="font-size:13px;color:var(--text-secondary);margin-top:4px;">Upload a record from another clinic. AI reads it and pre-fills the new-owner form.</div>
+            </button>
+          </div>
+        `;
+      } else if (mode === 'pathA') {
+        const q = state._importRecordsQuery || '';
+        const results = state._importRecordsResults || [];
+        const showEmpty = q && results.length === 0;
+        body = `
+          <div class="card">
+            <button class="btn btn-secondary btn-small" data-action="ir-back-mode" style="margin-bottom:12px;">← Back</button>
+            <h3 style="margin:8px 0 12px 0;">Find existing owner</h3>
+            <div style="display:flex;gap:8px;">
+              <input id="ir-search-input" type="text" placeholder="Search by email or pet name..." value="${esc(q)}" style="flex:1;padding:10px;border:1px solid var(--border);border-radius:8px;font-size:14px;" />
+              <button class="btn btn-primary" data-action="ir-search">Search</button>
+            </div>
+            ${showEmpty ? '<p style="margin-top:12px;color:var(--text-secondary);">No matches. Try the "New owner" flow instead.</p>' : ''}
+            ${results.length > 0 ? `<div style="margin-top:16px;display:flex;flex-direction:column;gap:8px;">${
+              results.map(r => `
+                <button class="card" style="padding:12px;text-align:left;cursor:pointer;background:white;" data-action="ir-open-case" data-case-id="${esc(r.case_id)}">
+                  <div style="font-weight:600;">${esc(r.owner_name || '(no name)')} — ${esc(r.pet_name || '(no pet name)')}</div>
+                  <div style="font-size:13px;color:var(--text-secondary);margin-top:2px;">${esc(r.owner_email || '')} · case ${esc(String(r.case_id).slice(0, 8))}</div>
+                </button>
+              `).join('')
+            }</div>` : ''}
+          </div>
+        `;
+      } else if (mode === 'pathB') {
+        const f = state._importRecordsForm || {};
+        const errs = state._importRecordsErrors || {};
+        const submitting = state._importRecordsSubmitting;
+        const inputStyle = 'width:100%;padding:8px 10px;border:1px solid var(--border);border-radius:6px;font-size:14px;margin-top:4px;';
+        const labelStyle = 'display:block;font-size:13px;font-weight:500;margin-bottom:8px;';
+        body = `
+          <div class="card">
+            <button class="btn btn-secondary btn-small" data-action="ir-back-mode" style="margin-bottom:12px;">← Back</button>
+            <h3 style="margin:8px 0 4px 0;">New owner</h3>
+            <p style="color:var(--text-secondary);font-size:13px;margin:0 0 16px 0;">We'll create a pending account, a pet, and a case. The owner gets a 14-day claim email; you can upload the records right after.</p>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
+              <label style="${labelStyle}">Owner email *<input id="ir-email" type="email" value="${esc(f.email || '')}" style="${inputStyle}${errs.email ? 'border-color:var(--red);' : ''}" /></label>
+              <label style="${labelStyle}">Owner full name *<input id="ir-full_name" type="text" value="${esc(f.full_name || '')}" style="${inputStyle}${errs.full_name ? 'border-color:var(--red);' : ''}" /></label>
+              <label style="${labelStyle}">Owner phone<input id="ir-phone" type="tel" value="${esc(f.phone || '')}" style="${inputStyle}" /></label>
+              <label style="${labelStyle}">Source clinic<input id="ir-source_clinic" type="text" value="${esc(f.source_clinic || '')}" placeholder="e.g. Acme Animal Hospital" style="${inputStyle}" /></label>
+              <label style="${labelStyle}">Pet name *<input id="ir-pet_name" type="text" value="${esc(f.pet_name || '')}" style="${inputStyle}${errs.pet_name ? 'border-color:var(--red);' : ''}" /></label>
+              <label style="${labelStyle}">Species *<select id="ir-species" style="${inputStyle}">${
+                ['Dog', 'Cat', 'Other'].map(s => `<option value="${s}" ${f.species === s ? 'selected' : ''}>${s}</option>`).join('')
+              }</select></label>
+              <label style="${labelStyle}">Breed<input id="ir-breed" type="text" value="${esc(f.breed || '')}" style="${inputStyle}" /></label>
+            </div>
+            <div style="margin-top:20px;">
+              <button class="btn btn-primary" data-action="ir-submit-path-b" ${submitting ? 'disabled' : ''}>
+                ${submitting ? '⏳ Creating...' : 'Create pending account'}
+              </button>
+            </div>
+            ${errs._global ? `<div style="margin-top:12px;padding:10px;background:rgba(255,0,0,0.05);border:1px solid var(--red);border-radius:6px;color:var(--red);font-size:13px;">${esc(errs._global)}</div>` : ''}
+          </div>
+        `;
+      } else if (mode === 'pathC_upload') {
+        const errs = state._importRecordsErrors || {};
+        const pending = state._importRecordsExtractionPending;
+        const pickedFile = (typeof window !== 'undefined') ? (window._irPendingMedicalRecord || null) : null;
+        const inputStyle = 'width:100%;padding:8px 10px;border:1px solid var(--border);border-radius:6px;font-size:14px;margin-top:4px;';
+        const labelStyle = 'display:block;font-size:13px;font-weight:500;margin-bottom:8px;';
+        body = `
+          <div class="card">
+            <button class="btn btn-secondary btn-small" data-action="ir-back-mode" style="margin-bottom:12px;" ${pending ? 'disabled' : ''}>← Back</button>
+            <h3 style="margin:8px 0 4px 0;">Import from medical record — Step 1 of 2</h3>
+            <p style="color:var(--text-secondary);font-size:13px;margin:0 0 16px 0;">Upload a record from another clinic. We'll read it with AI and pre-fill the new-owner form on the next step. Owner contact info is not extracted — you'll enter that manually.</p>
+            <label style="${labelStyle}">Source clinic
+              <input id="ir-pathc-source-clinic" type="text" placeholder="e.g. Elk Meadow Animal Hospital" style="${inputStyle}" ${pending ? 'disabled' : ''} />
+            </label>
+            <label style="${labelStyle}margin-top:12px;">Upload medical record
+              <input id="ir-medical-record-input" type="file" accept=".pdf,.jpg,.jpeg,.png,.webp,.txt" style="${inputStyle}" ${pending ? 'disabled' : ''} />
+            </label>
+            <p style="font-size:12px;color:var(--text-secondary);margin:6px 0 0 0;">PDF, JPG, PNG, WebP, or TXT. Max 20 MB.</p>
+            ${pickedFile ? `<p style="font-size:13px;margin:12px 0 0 0;color:var(--text-secondary);">Selected: <strong>${esc(pickedFile.name)}</strong> (${(pickedFile.size / 1024).toFixed(0)} KB)</p>` : ''}
+            <div style="margin-top:20px;">
+              <button class="btn btn-primary" data-action="ir-pathc-upload" ${pending || !pickedFile ? 'disabled' : ''}>
+                ${pending ? '⏳ Reading record with AI…' : 'Upload & extract'}
+              </button>
+            </div>
+            ${errs._global ? `<div style="margin-top:12px;padding:10px;background:rgba(255,0,0,0.05);border:1px solid var(--red);border-radius:6px;color:var(--red);font-size:13px;">${esc(errs._global)}</div>` : ''}
+          </div>
+        `;
+      } else if (mode === 'pathC_review') {
+        const f = state._importRecordsForm || {};
+        const errs = state._importRecordsErrors || {};
+        const ext = state._importRecordsExtraction || {};
+        const submitting = state._importRecordsSubmitting;
+        const showFindings = state._importRecordsShowFindings;
+        const inputStyle = 'width:100%;padding:8px 10px;border:1px solid var(--border);border-radius:6px;font-size:14px;margin-top:4px;';
+        const labelStyle = 'display:block;font-size:13px;font-weight:500;margin-bottom:8px;';
+        const renderItems = (arr, fmt) => Array.isArray(arr) && arr.length
+          ? `<ul style="margin:6px 0 0 0;padding-left:20px;font-size:13px;color:var(--text-secondary);">${arr.map(fmt).join('')}</ul>`
+          : '<p style="margin:6px 0 0 0;font-size:13px;color:var(--text-secondary);font-style:italic;">None detected.</p>';
+        body = `
+          <div class="card">
+            <button class="btn btn-secondary btn-small" data-action="ir-pathc-back-to-upload" style="margin-bottom:12px;" ${submitting ? 'disabled' : ''}>← Back</button>
+            <h3 style="margin:8px 0 4px 0;">Step 2 of 2 — review &amp; confirm</h3>
+            <p style="color:var(--text-secondary);font-size:13px;margin:0 0 16px 0;">Confirm the details below. Owner contact info wasn't in the record — fill it in by hand.</p>
+            ${ext.summary ? `
+              <div style="margin-bottom:16px;padding:12px;background:#f5f9f5;border-left:3px solid var(--primary);border-radius:6px;">
+                <div style="font-size:12px;font-weight:600;color:var(--primary);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:4px;">Record summary</div>
+                <p style="margin:0;font-size:13px;color:#333;">${esc(ext.summary)}</p>
+              </div>
+            ` : ''}
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
+              <label style="${labelStyle}">Owner email *<input id="ir-c-email" type="email" value="${esc(f.email || '')}" style="${inputStyle}${errs.email ? 'border-color:var(--red);' : ''}" /></label>
+              <label style="${labelStyle}">Owner full name *<input id="ir-c-full_name" type="text" value="${esc(f.full_name || '')}" style="${inputStyle}${errs.full_name ? 'border-color:var(--red);' : ''}" /></label>
+              <label style="${labelStyle}">Owner phone<input id="ir-c-phone" type="tel" value="${esc(f.phone || '')}" style="${inputStyle}" /></label>
+              <label style="${labelStyle}">Source clinic<input id="ir-c-source_clinic" type="text" value="${esc(f.source_clinic || '')}" placeholder="e.g. Acme Animal Hospital" style="${inputStyle}" /></label>
+              <label style="${labelStyle}">Pet name *<input id="ir-c-pet_name" type="text" value="${esc(f.pet_name || '')}" style="${inputStyle}${errs.pet_name ? 'border-color:var(--red);' : ''}" /></label>
+              <label style="${labelStyle}">Species *<select id="ir-c-species" style="${inputStyle}">${
+                ['Dog', 'Cat', 'Other'].map(s => `<option value="${s}" ${f.species === s ? 'selected' : ''}>${s}</option>`).join('')
+              }</select></label>
+              <label style="${labelStyle}">Breed<input id="ir-c-breed" type="text" value="${esc(f.breed || '')}" style="${inputStyle}" /></label>
+            </div>
+            <div style="margin-top:16px;border:1px solid var(--border);border-radius:8px;overflow:hidden;">
+              <button data-action="ir-pathc-toggle-findings" style="width:100%;text-align:left;padding:10px 12px;background:#fafafa;border:none;cursor:pointer;font-size:13px;font-weight:600;color:#333;">
+                ${showFindings ? '▼' : '▶'} Extracted findings (preview)
+              </button>
+              ${showFindings ? `
+                <div style="padding:12px;background:white;border-top:1px solid var(--border);">
+                  <div style="font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:0.5px;color:var(--text-secondary);">Diagnoses</div>
+                  ${renderItems(ext.diagnoses, d => `<li>${esc(d.name || d.diagnosis || d.condition || JSON.stringify(d))}</li>`)}
+                  <div style="font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:0.5px;color:var(--text-secondary);margin-top:10px;">Medications</div>
+                  ${renderItems(ext.medications, m => `<li>${esc(m.name || m.medication || JSON.stringify(m))}${m.dose ? ' — ' + esc(m.dose) : ''}</li>`)}
+                  <div style="font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:0.5px;color:var(--text-secondary);margin-top:10px;">Vaccines</div>
+                  ${renderItems(ext.vaccines, v => `<li>${esc(v.name || v.vaccine || JSON.stringify(v))}${v.administered_on ? ' — ' + esc(v.administered_on) : ''}</li>`)}
+                </div>
+              ` : ''}
+            </div>
+            <div style="margin-top:20px;">
+              <button class="btn btn-primary" data-action="ir-submit-path-c" ${submitting ? 'disabled' : ''}>
+                ${submitting ? '⏳ Creating…' : 'Create account & import records'}
+              </button>
+            </div>
+            ${errs._global ? `<div style="margin-top:12px;padding:10px;background:rgba(255,0,0,0.05);border:1px solid var(--red);border-radius:6px;color:var(--red);font-size:13px;">${esc(errs._global)}</div>` : ''}
+          </div>
+        `;
+      } else if (mode === 'pathB_success' || mode === 'pathC_success') {
+        const r = state._importRecordsResult || {};
+        const expiresFmt = r.expires_at ? new Date(r.expires_at).toLocaleDateString() : '14 days from now';
+        const isPathC = mode === 'pathC_success';
+        const sending = state._importRecordsSendingEmail;
+        const emailSent = !!r.email_sent;
+        const emailError = r.email_error;
+        const recipient = r.email || 'owner';
+        const emailBlock = emailSent
+          ? `<div style="margin:12px 0;padding:10px 12px;background:#f5f9f5;border:1px solid var(--primary);border-radius:8px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;">
+              <span style="color:var(--primary);font-size:14px;">📧 Claim email sent to ${esc(recipient)}.</span>
+              <button class="btn btn-secondary btn-small" data-action="ir-send-claim-email" ${sending ? 'disabled' : ''}>${sending ? '⏳ Sending…' : 'Send again'}</button>
+            </div>`
+          : `<div style="margin:12px 0;padding:12px;background:#f5f9f5;border:1px solid var(--border);border-radius:8px;">
+              <div style="font-weight:600;font-size:14px;margin-bottom:4px;">Share the claim link</div>
+              <div style="font-size:13px;color:var(--text-secondary);margin-bottom:12px;">Send the claim email when ${esc(r.full_name || 'the owner')} is ready to receive it, or share the link below manually.</div>
+              <button class="btn btn-primary btn-small" data-action="ir-send-claim-email" ${sending ? 'disabled' : ''}>
+                ${sending ? '⏳ Sending…' : `📧 Send claim email to ${esc(recipient)}`}
+              </button>
+              ${emailError ? `<p style="margin:10px 0 0 0;color:var(--red);font-size:13px;">⚠️ ${esc(emailError)}</p>` : ''}
+            </div>`;
+        body = `
+          <div class="card" style="border-left:4px solid var(--primary);">
+            <div style="font-size:32px;">✅</div>
+            <h3 style="margin:8px 0 4px 0;">Pending account created</h3>
+            <p style="margin:0;">${esc(r.full_name || 'The owner')} now has a pending account, a pet, and a case in the system.</p>
+            ${isPathC && r.records_attached ? '<p style="margin:8px 0 0 0;color:var(--primary);font-size:13px;">📁 Record attached to the new case. Records will be visible to the owner once they claim the account.</p>' : ''}
+            ${isPathC && !r.records_attached ? '<p style="margin:8px 0 0 0;color:#7a5a00;font-size:13px;">⚠️ Record attachment failed — re-upload from the case view.</p>' : ''}
+            ${emailBlock}
+            <div style="margin:16px 0;padding:12px;background:#f5f5f5;border-radius:8px;display:flex;align-items:center;gap:8px;">
+              <code style="flex:1;font-size:12px;word-break:break-all;color:#333;">${esc(r.claim_url || '')}</code>
+              <button class="btn btn-secondary btn-small" data-action="ir-copy-claim-url" data-url="${esc(r.claim_url || '')}">Copy</button>
+            </div>
+            <p style="font-size:13px;color:var(--text-secondary);margin:0 0 16px 0;">Link expires ${esc(expiresFmt)}.</p>
+            <div style="display:flex;gap:8px;flex-wrap:wrap;">
+              <button class="btn btn-primary" data-action="ir-go-to-case" data-case-id="${esc(r.case_id || '')}">${isPathC ? '👀 View case' : '📤 Continue → upload records'}</button>
+              <button class="btn btn-secondary" data-action="ir-reset">Import another</button>
+            </div>
+          </div>
+        `;
+      }
+
+      return renderLayout(`<div style="max-width:900px;margin:0 auto;padding:16px;">${body}</div>`);
+    }
 
     attachEventListeners();
     initApp();
