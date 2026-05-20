@@ -184,7 +184,7 @@ Deno.serve(async (req: Request) => {
       });
     }
 
-    const recipientIds: string[] = [];
+    let recipientIds: string[] = [];
     const petName = (caseData as any).pets?.name || "your pet";
 
     if (sender_role === "client") {
@@ -194,7 +194,10 @@ Deno.serve(async (req: Request) => {
       if (ownerId) recipientIds.push(ownerId);
     }
 
-    console.log(`[push] recipients=${JSON.stringify(recipientIds)} petName=${petName}`);
+    // Don't push to the sender themselves.
+    recipientIds = recipientIds.filter((id) => id !== sender_id);
+
+    console.log(`[push] recipients(pre-filter)=${JSON.stringify(recipientIds)} petName=${petName}`);
 
     if (recipientIds.length === 0) {
       console.log("[push] no recipients for case");
@@ -203,12 +206,44 @@ Deno.serve(async (req: Request) => {
       });
     }
 
+    // Filter by notification_preferences: push_enabled=true and case_id not muted.
+    // Users with no preference row are treated as opted-in (matches the
+    // post-2026-05-20 default).
+    const { data: prefs } = await sb
+      .from("notification_preferences")
+      .select("user_id, push_enabled, muted_case_ids")
+      .in("user_id", recipientIds);
+
+    const prefByUser = new Map<string, { push_enabled: boolean; muted_case_ids: string[] }>();
+    for (const p of (prefs || [])) {
+      prefByUser.set(p.user_id, {
+        push_enabled: p.push_enabled,
+        muted_case_ids: Array.isArray(p.muted_case_ids) ? p.muted_case_ids : [],
+      });
+    }
+
+    const allowedIds = recipientIds.filter((uid) => {
+      const p = prefByUser.get(uid);
+      if (!p) return true;
+      if (!p.push_enabled) return false;
+      if (p.muted_case_ids.includes(case_id)) return false;
+      return true;
+    });
+
+    console.log(`[push] recipients(post-pref-filter)=${JSON.stringify(allowedIds)}`);
+
+    if (allowedIds.length === 0) {
+      return new Response(JSON.stringify({ sent: 0, total: 0, message: "All recipients opted out or muted" }), {
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
+    }
+
     const { data: subscriptions } = await sb
       .from("push_subscriptions")
       .select("endpoint, p256dh, auth")
-      .in("user_id", recipientIds);
+      .in("user_id", allowedIds);
 
-    console.log(`[push] found ${subscriptions?.length || 0} subscription(s) for recipients`);
+    console.log(`[push] found ${subscriptions?.length || 0} subscription(s) for allowed recipients`);
 
     if (!subscriptions || subscriptions.length === 0) {
       return new Response(JSON.stringify({ sent: 0, message: "No push subscriptions for recipients" }), {

@@ -1435,6 +1435,22 @@ Your free 30-day trial is active. No credit card on file. We'll be in touch.
           state.notificationPermission = Notification.permission;
           // Auto-subscribe to push if permission already granted
           if (Notification.permission === 'granted') subscribeToPush();
+          // Auto-prompt for permission once per session if the user has push
+          // enabled in their prefs (default true post-2026-05-20) but hasn't
+          // granted browser permission yet. Don't badger — sessionStorage flag.
+          else if (Notification.permission === 'default'
+              && state.notificationSettings?.push_enabled
+              && !sessionStorage.getItem('vb_push_prompted')) {
+            try { sessionStorage.setItem('vb_push_prompted', '1'); } catch (_) {}
+            setTimeout(() => {
+              try {
+                Notification.requestPermission().then((p) => {
+                  state.notificationPermission = p;
+                  if (p === 'granted') subscribeToPush();
+                });
+              } catch (_) {}
+            }, 1500);
+          }
         }
 
         if (data.role === 'client') {
@@ -7015,14 +7031,20 @@ async function calculateBuddyScorecard(buddyId) {
           ${atRisk.length === 0 ? '<div class="empty-state"><div class="empty-state-text">✅ No at-risk clients right now</div></div>' :
             atRisk.map(c => {
               const daysSince = Math.floor((now - new Date(c.updated_at)) / (1000 * 60 * 60 * 24));
-              return `<div class="card" style="margin-bottom:10px;display:flex;align-items:center;gap:12px;">
+              const ownerName = c.pets?.owner?.name || '';
+              const ownerFirst = (ownerName.split(' ')[0] || '').trim();
+              const petName = c.pets?.name || '';
+              return `<div class="card" style="margin-bottom:10px;display:flex;align-items:center;gap:12px;flex-wrap:wrap;">
                 ${renderPetPhoto(c.pets, 'card')}
-                <div style="flex:1;">
-                  <div style="font-weight:600;">${esc(c.pets?.name)} – ${esc(c.pets?.owner?.name)}</div>
+                <div style="flex:1;min-width:160px;">
+                  <div style="font-weight:600;">${esc(petName)} – ${esc(ownerName)}</div>
                   <div style="font-size:12px;color:var(--red);">No activity for ${daysSince} days</div>
                   <div style="font-size:12px;color:var(--text-secondary);">Buddy: ${esc(c.assigned_buddy?.name) || 'Unassigned'}</div>
                 </div>
-                <button class="btn btn-primary btn-small" data-action="nav-buddy-case" data-case-id="${c.id}">View Case</button>
+                <div style="display:flex;gap:6px;flex-wrap:wrap;">
+                  <button class="btn btn-primary btn-small" data-action="open-reengagement-modal" data-case-id="${c.id}" data-pet-name="${esc(petName)}" data-owner-first="${esc(ownerFirst)}" data-owner-name="${esc(ownerName)}">📢 Send Message</button>
+                  <button class="btn btn-secondary btn-small" data-action="nav-buddy-case" data-case-id="${c.id}">View Case</button>
+                </div>
               </div>`;
             }).join('')
           }
@@ -9680,6 +9702,7 @@ function renderVaccineDueAlerts(vaccines) {
         if(state.showPushPromptBanner)mh+=`<div style="position:fixed;top:16px;left:50%;transform:translateX(-50%);z-index:1100;background:linear-gradient(135deg,#336026,#689562);color:white;border-radius:12px;padding:14px 20px;box-shadow:0 8px 32px rgba(0,0,0,0.2);display:flex;align-items:center;gap:12px;max-width:480px;width:90%;animation:notifSlideIn 0.3s ease-out;"><span style="font-size:20px;">🔔</span><div style="flex:1;"><div style="font-weight:600;font-size:14px;">Your Buddy just sent a message!</div><div style="font-size:12px;opacity:0.9;margin-top:2px;">Enable notifications so you never miss one.</div></div><button data-action="enable-push-from-toast" style="background:white;color:#336026;border:none;border-radius:6px;padding:6px 14px;font-size:12px;font-weight:700;cursor:pointer;white-space:nowrap;">Enable</button><button data-action="dismiss-push-toast" style="background:none;border:none;color:rgba(255,255,255,0.7);font-size:18px;cursor:pointer;padding:0 4px;">×</button></div>`;
         if(state._showChangePassword)mh+=`<div class="broadcast-overlay" data-action="close-change-password"><div class="broadcast-card" style="max-width:420px;"><div style="font-family:'Fraunces',serif;font-size:20px;font-weight:600;margin-bottom:6px;">Change password</div><div style="font-size:13px;color:var(--text-secondary);margin-bottom:20px;">Enter your current password and choose a new one.</div><div class="form-group"><label>Current Password</label><input type="password" data-field="change-current-password" placeholder="Current password" style="width:100%;" autocomplete="current-password"></div><div class="form-group"><label>New Password</label><input type="password" data-field="change-new-password" placeholder="At least 8 characters" style="width:100%;" autocomplete="new-password"></div><div class="form-group"><label>Confirm New Password</label><input type="password" data-field="change-confirm-password" placeholder="Confirm new password" style="width:100%;" autocomplete="new-password"></div><div style="display:flex;gap:10px;margin-top:8px;"><button class="btn btn-primary" data-action="save-change-password" style="flex:1;">Update Password</button><button class="btn btn-secondary" data-action="close-change-password">Cancel</button></div></div></div>`;
         if(state._showPasswordReset)mh+=`<div class="broadcast-overlay" data-action="close-password-reset"><div class="broadcast-card" style="max-width:420px;"><div style="font-family:'Fraunces',serif;font-size:20px;font-weight:600;margin-bottom:6px;">Set a password</div><div style="font-size:13px;color:var(--text-secondary);margin-bottom:20px;">You signed in with a magic link. Set a password so you can log in with your email and password next time too.</div><div class="form-group"><label>New Password</label><input type="password" data-field="reset-new-password" placeholder="At least 8 characters" style="width:100%;" autocomplete="new-password"></div><div class="form-group"><label>Confirm Password</label><input type="password" data-field="reset-confirm-password" placeholder="Confirm new password" style="width:100%;" autocomplete="new-password"></div><div style="display:flex;gap:10px;margin-top:8px;"><button class="btn btn-primary" data-action="save-new-password" style="flex:1;">Set Password</button><button class="btn btn-secondary" data-action="close-password-reset">Skip for now</button></div></div></div>`;
+        if(state._reengagementModal){var rm=state._reengagementModal;var draft=esc(rm.draft||'');mh+=`<div class="broadcast-overlay" data-action="close-reengagement-modal"><div class="broadcast-card" style="max-width:480px;"><div style="font-family:'Fraunces',serif;font-size:20px;font-weight:600;margin-bottom:4px;">📢 Send re-engagement message</div><div style="font-size:13px;color:var(--text-secondary);margin-bottom:14px;">To <strong>${esc(rm.ownerName||'')}</strong> about <strong>${esc(rm.petName||'')}</strong>. They'll get an email and (if their app is installed) a push notification.</div><div class="form-group"><textarea data-field="reengagement-message" placeholder="Type your re-engagement message…" style="width:100%;height:120px;">${draft}</textarea></div><div style="display:flex;gap:10px;margin-top:6px;"><button class="btn btn-primary" data-action="send-reengagement-message" data-case-id="${esc(rm.caseId||'')}" style="flex:1;">Send</button><button class="btn btn-secondary" data-action="close-reengagement-modal">Cancel</button></div></div></div>`;}
         var mc=document.getElementById('modal-overlay-container');if(mc)mc.remove();
         if(mh){var c=document.createElement('div');c.id='modal-overlay-container';c.innerHTML=mh;document.body.appendChild(c);}
       },50);
@@ -9766,6 +9789,69 @@ function renderVaccineDueAlerts(vaccines) {
         if (action === 'save-handoff') { var tbid=document.querySelector('[data-field="handoff-to-buddy"]')?.value;if(!tbid){showToast('Select receiving Buddy','error');return;}saveHandoffNote(state.caseId,tbid,{active_issues:document.querySelector('[data-field="handoff-active-issues"]')?.value||'',watch_items:document.querySelector('[data-field="handoff-watch-items"]')?.value||'',client_preferences:document.querySelector('[data-field="handoff-client-prefs"]')?.value||'',additional_notes:document.querySelector('[data-field="handoff-notes"]')?.value||''}).then(function(){state.showHandoffForm=false;showToast('Handoff saved!','success');loadHandoffNotes(state.caseId).then(function(){render();});});return; }
         if (action === 'copy-referral-code') { navigator.clipboard.writeText(state.profile?.referral_code||'').then(function(){showToast('Copied!','success');});return; }
         if (action === 'close-password-reset') { if (target.classList.contains('broadcast-overlay') && e.target !== target) return; state._showPasswordReset=false;render();return; }
+        if (action === 'open-reengagement-modal') {
+          const cid = target.dataset.caseId;
+          const petName = target.dataset.petName || '';
+          const ownerFirst = target.dataset.ownerFirst || '';
+          const ownerName = target.dataset.ownerName || '';
+          const tmpl = `Hi ${ownerFirst || 'there'}, just checking in on ${petName || 'your pet'}. How are things going? Reach out anytime — your Buddy is here.`;
+          state._reengagementModal = { caseId: cid, petName, ownerName, draft: tmpl };
+          render();
+          return;
+        }
+        if (action === 'close-reengagement-modal') {
+          if (target.classList.contains('broadcast-overlay') && e.target !== target) return;
+          state._reengagementModal = null;
+          render();
+          return;
+        }
+        if (action === 'send-reengagement-message') {
+          const cid = target.dataset.caseId;
+          const ta = document.querySelector('[data-field="reengagement-message"]');
+          const content = (ta?.value || '').trim();
+          if (!cid) { showToast('No case selected', 'error'); return; }
+          if (!content) { showToast('Type a message first', 'error'); return; }
+          target.disabled = true;
+          target.textContent = 'Sending…';
+          try {
+            const { data: newMsg, error: msgErr } = await sb.from('messages').insert({
+              case_id: cid,
+              sender_id: state.profile.id,
+              content,
+              sender_role: state.profile.role,
+              thread_type: 'client',
+              created_at: new Date().toISOString(),
+            }).select('id').single();
+            if (msgErr) throw msgErr;
+            // Fan out push + email in parallel (same path as a normal message send)
+            callEdgeFunction('send-push-notification', {
+              sender_id: state.profile.id,
+              sender_role: state.profile.role,
+              case_id: cid,
+              content,
+              sender_name: state.profile.name,
+            }).catch(e => console.warn('Push notification failed:', e));
+            callEdgeFunction('send-email-on-message', {
+              case_id: cid,
+              sender_id: state.profile.id,
+              sender_role: state.profile.role,
+              sender_name: state.profile.name,
+              content_preview: content.slice(0, 280),
+              message_id: newMsg.id,
+            }).catch(e => console.warn('Email notification failed:', e));
+            try { logAudit('create', 're_engagement_message', newMsg.id, { case_id: cid }); } catch(_) {}
+            const ownerName = state._reengagementModal?.ownerName || 'the client';
+            state._reengagementModal = null;
+            showToast(`Re-engagement message sent to ${ownerName} — they'll get an email and push notification.`, 'success');
+            render();
+          } catch (err) {
+            console.error('re-engagement send failed:', err);
+            showToast(err.message || 'Could not send message', 'error');
+            target.disabled = false;
+            target.textContent = 'Send';
+          }
+          return;
+        }
         if (action === 'show-set-password') {
           state._showPasswordReset=true;
           state._passwordPromptShown=true;
@@ -13163,6 +13249,17 @@ function renderVaccineDueAlerts(vaccines) {
                   content: content || '',
                   sender_name: state.profile.name,
                 }).catch(e => console.warn('Push notification failed:', e));
+                // Trigger email notification in parallel (best-effort, don't block).
+                // Edge function resolves recipients, filters by email_messages pref,
+                // and skips the sender — see send-email-on-message/index.ts.
+                callEdgeFunction('send-email-on-message', {
+                  case_id: state.caseId,
+                  sender_id: state.profile.id,
+                  sender_role: state.profile.role,
+                  sender_name: state.profile.name,
+                  content_preview: (content || '').slice(0, 280),
+                  message_id: newMsg.id,
+                }).catch(e => console.warn('Email notification failed:', e));
                 // Mark client messages as read only for the responding role
                 if (state.profile.role === 'admin') {
                   await sb.from('messages').update({ is_read_by_staff: true, read_at: new Date().toISOString() }).eq('case_id', state.caseId).eq('sender_role', 'client').eq('is_read_by_staff', false);
