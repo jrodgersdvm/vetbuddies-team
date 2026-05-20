@@ -1846,6 +1846,44 @@ Your free 30-day trial is active. No credit card on file. We'll be in touch.
       } catch (err) { console.error(err); }
     }
 
+    // Client-side mirror of calculate_lcp_completeness (Postgres SECURITY DEFINER
+    // function in migration 20260421200803). Returns an array of { id, label,
+    // points, sectionId, action, clientActionable } items, one per missing
+    // component. The "Finish" button on the slim completeness card uses this to
+    // surface unfinished sections with a quick-edit link.
+    function getCompletenessBreakdown() {
+      const items = [];
+      const pet = state.currentCase?.pets;
+      const petHasAllProfileFields = !!(pet && pet.name && pet.species && pet.breed && pet.dob && pet.weight && String(pet.weight).length > 0);
+      if (!petHasAllProfileFields) {
+        items.push({ id: 'pet-profile', label: 'Fill in basic pet info (name, species, breed, date of birth, weight)', points: 10, sectionId: 'pet-profile', action: 'completeness-jump-pet-profile', clientActionable: true });
+      }
+      const hasPrimaryProvider = (state.careProviders || []).some(p => p.is_primary);
+      if (!hasPrimaryProvider) {
+        items.push({ id: 'primary-provider', label: 'Add your primary vet under External Providers', points: 10, sectionId: 'providers', action: 'completeness-jump-providers', clientActionable: true });
+      }
+      const ownerContextLen = String(state.carePlan?.owner_context || '').length;
+      if (ownerContextLen <= 100) {
+        items.push({ id: 'owner-context', label: 'Owner Context note (staff only)', points: 15, sectionId: 'owner-context', action: 'completeness-jump-owner-context', clientActionable: false });
+      }
+      if ((state.diagnoses || []).length === 0) {
+        items.push({ id: 'diagnoses', label: 'Record at least one diagnosis (staff adds these)', points: 10, sectionId: 'diagnoses', action: 'completeness-jump-diagnoses', clientActionable: false });
+      }
+      const hasActiveMed = (state.petMedications || []).some(m => m.is_active);
+      if (!hasActiveMed) {
+        items.push({ id: 'active-med', label: 'Log an active medication (staff adds these)', points: 10, sectionId: 'health-record', action: 'completeness-jump-health-record', clientActionable: false });
+      }
+      // 14-day touchpoint freshness — system-driven by buddy activity; not user-actionable.
+      if ((state.openQuestions || []).length === 0) {
+        items.push({ id: 'open-question', label: 'Add a question to ask your vet', points: 10, sectionId: 'open-questions', action: 'completeness-jump-questions', clientActionable: true });
+      }
+      const hasActiveGoal = (state.goals || []).some(g => g.status === 'active');
+      if (!hasActiveGoal) {
+        items.push({ id: 'active-goal', label: 'Set an active care goal', points: 10, sectionId: 'goals', action: 'completeness-jump-goals', clientActionable: true });
+      }
+      return items;
+    }
+
     // Default empty Living Care Plan JSON structure
     function emptyLivingCarePlan() {
       return {
@@ -5425,17 +5463,21 @@ async function calculateBuddyScorecard(buddyId) {
         html += `</div></div>`;
       }
 
-      // ── Section: Open Questions for Vet (read-only in slice 2; staff edit lands in slice 4) ──
+      // ── Section: Open Questions for Vet (clients + staff can add; resolution still staff-only) ──
       {
         const openQs = state.openQuestions || [];
         const oqLabel = isClient ? '❓ Questions to ask your vet' : '❓ Open Questions for Vet';
         const priIcon = (p) => ({ urgent: '🔥', normal: '·', whenever: '🌱' })[p] || '·';
+        const canAddQuestion = canEdit || isClient;
         html += `<div id="section-open-questions" class="care-plan-section" style="border-left:4px solid #3498db;margin-bottom:16px;">
-          <div class="section-title"><span>${oqLabel}</span></div>
+          <div class="section-title" style="display:flex;justify-content:space-between;align-items:center;">
+            <span>${oqLabel}</span>
+            ${canAddQuestion ? `<button class="section-edit-btn" data-action="toggle-add-question">+ Add Question</button>` : ''}
+          </div>
           <div class="section-content">`;
         if (openQs.length === 0) {
           html += `<div style="font-size:14px;color:var(--text-secondary);">${isClient
-            ? 'Your Buddy will list questions here for you to bring to your vet — anything that comes up between visits.'
+            ? 'Anything you want to ask your vet next visit? Tap "+ Add Question" — your Buddy sees it too.'
             : 'No open questions yet — log them as they come up so you and the owner have a running list for the next vet visit.'}</div>`;
         } else {
           for (const q of openQs) {
@@ -5453,7 +5495,24 @@ async function calculateBuddyScorecard(buddyId) {
             </div>`;
           }
         }
-        html += `</div></div>`;
+        html += `</div>
+          ${state.showAddQuestion && canAddQuestion ? `<div style="background:#f0faf8;border-radius:8px;padding:14px;margin-top:8px;">
+            <div class="form-group"><label>Question</label><textarea data-field="question-text" placeholder="e.g. Is it OK to give Percy human-grade salmon as a treat?" style="width:100%;height:60px;"></textarea></div>
+            <div class="form-group"><label>Context <span style="font-weight:400;color:var(--text-secondary);font-size:12px;">(optional)</span></label><textarea data-field="question-context" placeholder="Anything that helps your vet answer — what brought it up, what you've tried…" style="width:100%;height:60px;"></textarea></div>
+            <div class="form-group" style="display:flex;align-items:center;gap:10px;">
+              <label style="margin:0;">Priority</label>
+              <select data-field="question-priority" style="flex:1;">
+                <option value="normal" selected>Normal · ask at next visit</option>
+                <option value="urgent">🔥 Urgent · don't wait for the visit</option>
+                <option value="whenever">🌱 Whenever · low priority</option>
+              </select>
+            </div>
+            <div style="display:flex;gap:8px;">
+              <button class="btn btn-primary btn-small" data-action="save-new-question">Save Question</button>
+              <button class="btn btn-secondary btn-small" data-action="toggle-add-question">Cancel</button>
+            </div>
+          </div>` : ''}
+        </div>`;
       }
 
       // ── Section: People (Owner + Buddy + Co-owners + Helpers) ──
@@ -5793,12 +5852,16 @@ async function calculateBuddyScorecard(buddyId) {
         const barColor = completenessScore >= 80 ? 'var(--green)'
           : completenessScore >= 50 ? 'var(--primary)'
           : 'var(--amber)';
-        html += `<div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:10px 14px;margin-bottom:12px;display:flex;align-items:center;gap:12px;font-size:13px;">
+        const breakdown = (typeof getCompletenessBreakdown === 'function') ? getCompletenessBreakdown() : [];
+        const actionableForUser = breakdown.filter(b => isClient ? b.clientActionable : true);
+        const showFinish = actionableForUser.length > 0 && completenessScore < 100;
+        html += `<div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:10px 14px;margin-bottom:12px;display:flex;align-items:center;gap:12px;font-size:13px;flex-wrap:wrap;">
           <span style="font-weight:600;color:var(--text);">🐾 Profile ${completenessScore}% complete</span>
           <div style="flex:1;background:var(--bg);border-radius:6px;height:6px;overflow:hidden;min-width:80px;max-width:200px;">
             <div style="width:${completenessScore}%;height:100%;background:${barColor};transition:width .3s ease;"></div>
           </div>
-          ${completenessScore < 80 ? `<span style="color:var(--text-secondary);font-size:12px;">Upload more records to fill in ${esc(petName)}'s profile.</span>` : ''}
+          ${showFinish ? `<button class="btn btn-primary btn-small" data-action="open-completeness-modal" style="font-size:12px;padding:4px 12px;">✏️ Finish</button>` : ''}
+          ${completenessScore < 80 && !showFinish ? `<span style="color:var(--text-secondary);font-size:12px;">Upload more records to fill in ${esc(petName)}'s profile.</span>` : ''}
         </div>`;
       }
 
@@ -9754,6 +9817,26 @@ function renderVaccineDueAlerts(vaccines) {
         if(state._showChangePassword)mh+=`<div class="broadcast-overlay" data-action="close-change-password"><div class="broadcast-card" style="max-width:420px;"><div style="font-family:'Fraunces',serif;font-size:20px;font-weight:600;margin-bottom:6px;">Change password</div><div style="font-size:13px;color:var(--text-secondary);margin-bottom:20px;">Enter your current password and choose a new one.</div><div class="form-group"><label>Current Password</label><input type="password" data-field="change-current-password" placeholder="Current password" style="width:100%;" autocomplete="current-password"></div><div class="form-group"><label>New Password</label><input type="password" data-field="change-new-password" placeholder="At least 8 characters" style="width:100%;" autocomplete="new-password"></div><div class="form-group"><label>Confirm New Password</label><input type="password" data-field="change-confirm-password" placeholder="Confirm new password" style="width:100%;" autocomplete="new-password"></div><div style="display:flex;gap:10px;margin-top:8px;"><button class="btn btn-primary" data-action="save-change-password" style="flex:1;">Update Password</button><button class="btn btn-secondary" data-action="close-change-password">Cancel</button></div></div></div>`;
         if(state._showPasswordReset)mh+=`<div class="broadcast-overlay" data-action="close-password-reset"><div class="broadcast-card" style="max-width:420px;"><div style="font-family:'Fraunces',serif;font-size:20px;font-weight:600;margin-bottom:6px;">Set a password</div><div style="font-size:13px;color:var(--text-secondary);margin-bottom:20px;">You signed in with a magic link. Set a password so you can log in with your email and password next time too.</div><div class="form-group"><label>New Password</label><input type="password" data-field="reset-new-password" placeholder="At least 8 characters" style="width:100%;" autocomplete="new-password"></div><div class="form-group"><label>Confirm Password</label><input type="password" data-field="reset-confirm-password" placeholder="Confirm new password" style="width:100%;" autocomplete="new-password"></div><div style="display:flex;gap:10px;margin-top:8px;"><button class="btn btn-primary" data-action="save-new-password" style="flex:1;">Set Password</button><button class="btn btn-secondary" data-action="close-password-reset">Skip for now</button></div></div></div>`;
         if(state._reengagementModal){var rm=state._reengagementModal;var draft=esc(rm.draft||'');mh+=`<div class="broadcast-overlay" data-action="close-reengagement-modal"><div class="broadcast-card" style="max-width:480px;"><div style="font-family:'Fraunces',serif;font-size:20px;font-weight:600;margin-bottom:4px;">📢 Send re-engagement message</div><div style="font-size:13px;color:var(--text-secondary);margin-bottom:14px;">To <strong>${esc(rm.ownerName||'')}</strong> about <strong>${esc(rm.petName||'')}</strong>. They'll get an email and (if their app is installed) a push notification.</div><div class="form-group"><textarea data-field="reengagement-message" placeholder="Type your re-engagement message…" style="width:100%;height:120px;">${draft}</textarea></div><div style="display:flex;gap:10px;margin-top:6px;"><button class="btn btn-primary" data-action="send-reengagement-message" data-case-id="${esc(rm.caseId||'')}" style="flex:1;">Send</button><button class="btn btn-secondary" data-action="close-reengagement-modal">Cancel</button></div></div></div>`;}
+        if(state._completenessModal){
+          var roleIsClient = state.profile?.role === 'client';
+          var breakdown = (typeof getCompletenessBreakdown === 'function') ? getCompletenessBreakdown() : [];
+          var actionable = breakdown.filter(function(b){ return roleIsClient ? b.clientActionable : true; });
+          var rowsHtml = actionable.length === 0
+            ? '<div style="padding:14px;color:var(--text-secondary);font-size:13px;">Nothing left for you to do here — your Buddy will fill in the rest.</div>'
+            : actionable.map(function(b){
+                return '<div style="display:flex;align-items:center;gap:12px;padding:12px;border-bottom:1px solid var(--border);">' +
+                  '<div style="flex:1;"><div style="font-size:14px;color:var(--text);">' + esc(b.label) + '</div>' +
+                  '<div style="font-size:11px;color:var(--text-secondary);margin-top:2px;">+' + b.points + ' points</div></div>' +
+                  '<button class="btn btn-primary btn-small" data-action="' + esc(b.action) + '" style="font-size:12px;">Go →</button>' +
+                  '</div>';
+              }).join('');
+          mh += '<div class="broadcast-overlay" data-action="close-completeness-modal"><div class="broadcast-card" style="max-width:520px;">' +
+            '<div style="font-family:\'Fraunces\',serif;font-size:20px;font-weight:600;margin-bottom:4px;">✏️ Finish your profile</div>' +
+            '<div style="font-size:13px;color:var(--text-secondary);margin-bottom:14px;">Each item below adds to your completeness score. Tap "Go →" to jump to that section.</div>' +
+            '<div style="border:1px solid var(--border);border-radius:8px;overflow:hidden;">' + rowsHtml + '</div>' +
+            '<div style="display:flex;justify-content:flex-end;margin-top:14px;">' +
+            '<button class="btn btn-secondary" data-action="close-completeness-modal">Close</button></div></div></div>';
+        }
         var mc=document.getElementById('modal-overlay-container');if(mc)mc.remove();
         if(mh){var c=document.createElement('div');c.id='modal-overlay-container';c.innerHTML=mh;document.body.appendChild(c);}
       },50);
@@ -9840,6 +9923,50 @@ function renderVaccineDueAlerts(vaccines) {
         if (action === 'save-handoff') { var tbid=document.querySelector('[data-field="handoff-to-buddy"]')?.value;if(!tbid){showToast('Select receiving Buddy','error');return;}saveHandoffNote(state.caseId,tbid,{active_issues:document.querySelector('[data-field="handoff-active-issues"]')?.value||'',watch_items:document.querySelector('[data-field="handoff-watch-items"]')?.value||'',client_preferences:document.querySelector('[data-field="handoff-client-prefs"]')?.value||'',additional_notes:document.querySelector('[data-field="handoff-notes"]')?.value||''}).then(function(){state.showHandoffForm=false;showToast('Handoff saved!','success');loadHandoffNotes(state.caseId).then(function(){render();});});return; }
         if (action === 'copy-referral-code') { navigator.clipboard.writeText(state.profile?.referral_code||'').then(function(){showToast('Copied!','success');});return; }
         if (action === 'close-password-reset') { if (target.classList.contains('broadcast-overlay') && e.target !== target) return; state._showPasswordReset=false;render();return; }
+        if (action === 'open-completeness-modal') {
+          state._completenessModal = true;
+          render();
+          return;
+        }
+        if (action === 'close-completeness-modal') {
+          if (target.classList.contains('broadcast-overlay') && e.target !== target) return;
+          state._completenessModal = false;
+          render();
+          return;
+        }
+        if (action && action.startsWith('completeness-jump-')) {
+          // Close the modal, scroll to the target section, and trigger its add/edit
+          // flow when appropriate. Section IDs match the data-section attributes.
+          state._completenessModal = false;
+          const jumpTo = action.replace('completeness-jump-', '');
+          const sectionMap = {
+            'pet-profile':    { id: 'pet-profile',    setup: () => { state._editingSection = 'pet_profile'; } },
+            'providers':      { id: 'providers',      setup: () => { state.showAddCareTeam = true; } },
+            'questions':      { id: 'open-questions', setup: () => { state.showAddQuestion = true; } },
+            'goals':          { id: 'goals',          setup: () => { state.showAddGoal = true; } },
+            'owner-context':  { id: 'owner-context',  setup: () => { state._editingSection = 'owner_context'; } },
+            'diagnoses':      { id: 'diagnoses',      setup: () => {} },
+            'health-record':  { id: 'health-record',  setup: () => {} },
+          };
+          const target_section = sectionMap[jumpTo];
+          if (target_section) {
+            try { target_section.setup(); } catch(_) {}
+            state._scrollToSection = target_section.id;
+            render();
+            setTimeout(() => {
+              const el = document.getElementById('section-' + target_section.id);
+              if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+              // For pet-profile / owner-context, also flip the section into edit mode
+              // by toggling the data-section's view-mode CSS class — the existing
+              // edit-careplan-section button handler does this via the section's edit button.
+              if (jumpTo === 'pet-profile' || jumpTo === 'owner-context') {
+                const editBtn = document.querySelector(`[data-action="edit-careplan-section"][data-section="${jumpTo === 'pet-profile' ? 'pet_profile' : 'owner_context'}"]`);
+                if (editBtn) editBtn.click();
+              }
+            }, 60);
+          }
+          return;
+        }
         if (action === 'open-reengagement-modal') {
           const cid = target.dataset.caseId;
           const petName = target.dataset.petName || '';
@@ -11975,6 +12102,41 @@ function renderVaccineDueAlerts(vaccines) {
             state.showAddGoal = !state.showAddGoal;
             render();
             break;
+          case 'toggle-add-question':
+            state.showAddQuestion = !state.showAddQuestion;
+            render();
+            break;
+          case 'save-new-question': {
+            const qText = document.querySelector('[data-field="question-text"]')?.value.trim();
+            if (!qText) { showToast('Please enter a question', 'error'); break; }
+            const qContext = document.querySelector('[data-field="question-context"]')?.value.trim() || null;
+            const qPriority = document.querySelector('[data-field="question-priority"]')?.value || 'normal';
+            try {
+              let planId = state.carePlan?.id;
+              if (!planId) {
+                const { data: cpIns, error: cpErr } = await sb.from('care_plans')
+                  .insert({ case_id: state.caseId, pet_id: getCurrentPetId() })
+                  .select('id').single();
+                if (cpErr) throw cpErr;
+                planId = cpIns.id;
+              }
+              const { error } = await sb.from('care_plan_open_questions').insert({
+                care_plan_id: planId,
+                question: qText,
+                context: qContext,
+                priority: qPriority,
+                status: 'open',
+                created_by: state.profile.id,
+              });
+              if (error) throw error;
+              state.showAddQuestion = false;
+              await loadCarePlan(state.caseId);
+              try { await awardCareXP(getCurrentPetId(), 'care_plan_updated'); } catch(_) {}
+              showToast('Question added — your Buddy will see it too', 'success');
+              render();
+            } catch(err) { showToast(err.message || 'Failed to save question', 'error'); }
+            break;
+          }
           case 'save-new-goal': {
             const goalText = document.querySelector('[data-field="goal-text"]')?.value.trim();
             if (!goalText) { showToast('Please enter a goal', 'error'); break; }
