@@ -3445,6 +3445,38 @@ async function calculateBuddyScorecard(buddyId) {
       return html;
     }
 
+    // Chat-only view for the client "Messages" nav. Renders just the conversation
+    // for the active pet/case — no care-plan sections, no other content. The
+    // current case must already be loaded (the nav handler does this).
+    function renderClientMessagesOnly() {
+      if (!state.cases || state.cases.length === 0) {
+        return renderLayout(`
+          <div class="empty-state">
+            <div class="empty-state-icon">💬</div>
+            <div class="empty-state-title">No conversation yet</div>
+            <div class="empty-state-text">Add a pet to start a conversation with your Vet Buddy.</div>
+            <button class="btn btn-primary" data-action="nav-add-pet" style="margin-top:16px;">Add Your Pet</button>
+          </div>
+        `);
+      }
+      const petCase = state.currentCase || state.cases[state.activePetIndex || 0] || state.cases[0];
+      const pet = petCase?.pets;
+      const buddy = petCase?.assigned_buddy;
+      const buddyName = buddy?.name || 'your Vet Buddy';
+      const petName = pet?.name || 'your pet';
+      return renderLayout(`
+        <div style="max-width:760px;margin:0 auto;">
+          <div style="margin-bottom:14px;display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;">
+            <h2 style="font-family:'Fraunces',serif;font-size:22px;font-weight:700;color:#336026;margin:0;">💬 Messages</h2>
+            <div style="font-size:13px;color:var(--text-secondary);">Conversation about ${esc(petName)} with ${esc(buddyName)}.</div>
+          </div>
+          <div class="card" style="border-left:4px solid var(--primary);">
+            ${renderMessagesTab()}
+          </div>
+        </div>
+      `);
+    }
+
     function renderClientDashboard() {
       if (state.cases.length === 0) {
         const subStatus = state.profile?.subscription_status;
@@ -7925,8 +7957,8 @@ async function calculateBuddyScorecard(buddyId) {
 
       const navsByRole = {
         client: [
-          { label: 'Care Plan', icon: '📋', action: 'nav-client-dashboard' },
-          { label: 'Messages', icon: '💬', action: 'nav-client-case', tab: 'messages' },
+          { label: 'Care Plan', icon: '📋', action: 'nav-client-case' },
+          { label: 'Messages', icon: '💬', action: 'nav-client-messages', badge: state.clientUnreadCount || 0 },
           { label: 'Knowledge Base', icon: '📚', action: 'nav-knowledge-base' },
           { label: 'Health Timeline', icon: '📊', action: 'nav-health-timeline' },
           { label: 'Referrals', icon: '🎁', action: 'nav-referral-dashboard' },
@@ -8016,8 +8048,8 @@ async function calculateBuddyScorecard(buddyId) {
       // Bottom nav items per role (mobile only — max 5)
       const bottomNavByRole = {
         client: [
-          { label: 'Care Plan', icon: '📋', action: 'nav-client-dashboard' },
-          { label: 'Messages', icon: '💬', action: 'nav-client-case', tab: 'messages', badge: state.clientUnreadCount || state.unreadCount },
+          { label: 'Care Plan', icon: '📋', action: 'nav-client-case' },
+          { label: 'Messages', icon: '💬', action: 'nav-client-messages', badge: state.clientUnreadCount || state.unreadCount },
           { label: 'Knowledge Base', icon: '📚', action: 'nav-knowledge-base' },
           { label: 'Health Timeline', icon: '📊', action: 'nav-health-timeline' },
           { label: 'Referrals', icon: '🎁', action: 'nav-referral-dashboard' },
@@ -9442,6 +9474,9 @@ function renderVaccineDueAlerts(vaccines) {
           case 'client-case':
             html = renderBuddyCase();
             break;
+          case 'client-messages':
+            html = renderClientMessagesOnly();
+            break;
           case 'buddy-dashboard':
             html = renderBuddyDashboard();
             break;
@@ -10508,6 +10543,26 @@ function renderVaccineDueAlerts(vaccines) {
             state.showPricingModal = true;
             render();
             break;
+          case 'nav-client-messages': {
+            if (state.cases.length === 0) {
+              navigate('client-messages');
+              break;
+            }
+            const targetCaseId = target.dataset.caseId
+              || state.cases[state.activePetIndex || 0]?.id
+              || state.cases[0].id;
+            state.caseId = targetCaseId;
+            try {
+              await loadCase(targetCaseId);
+              await loadMessages(targetCaseId);
+              subscribeToMessages(targetCaseId);
+            } catch (e) {
+              console.warn('nav-client-messages load failed:', e);
+            }
+            navigate('client-messages');
+            setTimeout(scrollMessagesToBottom, 60);
+            break;
+          }
           case 'nav-client-case':
             if (state.cases.length > 0) {
               // Support explicit case-id from dashboard quick-nav buttons
