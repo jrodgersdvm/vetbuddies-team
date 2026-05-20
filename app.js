@@ -1124,12 +1124,23 @@
         if (error) throw error;
 
         // Check if admin pre-created a user record for this email (staff/specialist accounts)
-        const { data: existingUser } = await sb.from('users').select('id, role, name').eq('email', email).maybeSingle();
+        const { data: existingUser } = await sb.from('users').select('id, role, name, subscription_status').eq('email', email).maybeSingle();
+        // Auto-start a free trial for brand-new clients so the onboarding flow can
+        // route them straight to the pet-profile form (no "Start Free Trial"
+        // interstitial). Skip for staff/specialist roles and don't clobber an
+        // existing subscription_status on a pre-created row.
+        const trialEndsAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString();
         if (existingUser) {
-          // Link the new auth account to the pre-existing user record
-          const { error: linkError } = await sb.from('users').update({
-            auth_id: data.user.id,
-          }).eq('email', email);
+          // Link the new auth account to the pre-existing user record.
+          // If the pre-created row has no subscription_status yet AND it's a client,
+          // seed the trial so they land on the pet-profile form.
+          const updates = { auth_id: data.user.id };
+          const isClientRow = !existingUser.role || existingUser.role === 'client';
+          if (isClientRow && (!existingUser.subscription_status || existingUser.subscription_status === 'none')) {
+            updates.subscription_status = 'trialing';
+            updates.trial_ends_at = trialEndsAt;
+          }
+          const { error: linkError } = await sb.from('users').update(updates).eq('email', email);
           if (linkError) throw linkError;
         } else {
           const initials = getFirstInitials(name);
@@ -1141,6 +1152,8 @@
             role,
             avatar_initials: initials,
             avatar_color: color,
+            subscription_status: 'trialing',
+            trial_ends_at: trialEndsAt,
           });
           if (insertError) throw insertError;
         }
@@ -7463,13 +7476,19 @@ async function calculateBuddyScorecard(buddyId) {
     }
 
     function renderOnboarding() {
-      const step = state.onboardingStep || 1;
-      // Simplified 2-step onboarding: Subscribe → Add Pet (then straight to dashboard)
-      const steps = ['Start Free Trial', 'Add Your Pet'];
+      // Trialing/active users skip the "Start Free Trial" step (it was seeded on signup)
+      // and go straight to the pet-profile form. Only legacy users with no
+      // subscription_status still see the trial-start interstitial.
+      const subStatus = state.profile?.subscription_status;
+      const alreadyOnboardedToTrial = subStatus === 'trialing' || subStatus === 'active';
+      const step = state.onboardingStep || (alreadyOnboardedToTrial ? 2 : 1);
+      const steps = alreadyOnboardedToTrial ? ['Add Your Pet'] : ['Start Free Trial', 'Add Your Pet'];
+      // Map the global step number (1 or 2) to a local indicator index.
+      const localStep = alreadyOnboardedToTrial ? 1 : step;
       const stepsHtml = steps.map((s, i) => `
-        <div style="display:flex;align-items:center;gap:8px;${i+1 < step ? 'opacity:0.5;' : ''}">
-          <div style="width:28px;height:28px;border-radius:50%;background:${i+1 <= step ? 'var(--primary)' : 'var(--border)'};color:${i+1 <= step ? 'white' : 'var(--text-secondary)'};display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:600;">${i+1 < step ? '✓' : i+1}</div>
-          <span style="font-size:14px;font-weight:${i+1===step ? '600' : '400'};color:${i+1===step ? 'var(--text)' : 'var(--text-secondary)'};">${s}</span>
+        <div style="display:flex;align-items:center;gap:8px;${i+1 < localStep ? 'opacity:0.5;' : ''}">
+          <div style="width:28px;height:28px;border-radius:50%;background:${i+1 <= localStep ? 'var(--primary)' : 'var(--border)'};color:${i+1 <= localStep ? 'white' : 'var(--text-secondary)'};display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:600;">${i+1 < localStep ? '✓' : i+1}</div>
+          <span style="font-size:14px;font-weight:${i+1===localStep ? '600' : '400'};color:${i+1===localStep ? 'var(--text)' : 'var(--text-secondary)'};">${s}</span>
         </div>
         ${i < steps.length-1 ? '<div style="width:2px;height:20px;background:var(--border);margin-left:14px;"></div>' : ''}
       `).join('');
@@ -9324,9 +9343,32 @@ function renderVaccineDueAlerts(vaccines) {
       return html;
     }
 
+    function renderAuthBootstrapSplash() {
+      // Quiet splash shown for the brief window between page load and INITIAL_SESSION
+      // resolving. Avoids the login-form flash for returning users with a live session.
+      return `
+        <div style="min-height:100vh;display:flex;align-items:center;justify-content:center;background:#fff;">
+          <div style="text-align:center;">
+            <svg width="220" height="50" viewBox="0 0 280 60" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+              <text x="140" y="28" text-anchor="middle" fill="#336026" font-size="28" font-weight="700" font-family="Georgia,serif">Vet Buddies</text>
+              <text x="140" y="48" text-anchor="middle" fill="#689562" font-size="13" font-family="DM Sans,sans-serif">Loading…</text>
+            </svg>
+            <div style="margin:18px auto 0;width:22px;height:22px;border:2px solid #e0e0e0;border-top-color:#689562;border-radius:50%;animation:spin 1s linear infinite;"></div>
+          </div>
+        </div>
+      `;
+    }
+
     function render() {
       const app = document.getElementById('app');
       let html = '';
+
+      // Quiet splash while INITIAL_SESSION is resolving — prevents a login-screen
+      // flash for returning users whose session will be restored in a few ms.
+      if (state._authBootstrapping) {
+        app.innerHTML = renderAuthBootstrapSplash();
+        return;
+      }
 
       // Auth screens always take priority regardless of user state
       if (state.view === 'signup') {
@@ -13523,9 +13565,23 @@ function renderVaccineDueAlerts(vaccines) {
         navigate('inkwell-signup');
         render();
       } else {
-        // Show login initially while we check for existing session
-        navigate('login');
+        // Show a quiet splash while INITIAL_SESSION resolves. If a session exists
+        // we'll restore the user silently; if not we drop to the login form.
+        // This avoids the login-screen flash returning users used to see.
+        state._authBootstrapping = true;
         render();
+        // Safety net: if INITIAL_SESSION never fires (network hang, broken SDK),
+        // give up after 1.5s and show the login form so users aren't stuck.
+        setTimeout(() => {
+          if (state._authBootstrapping) {
+            state._authBootstrapping = false;
+            if (!state.user) {
+              navigate('login');
+            } else {
+              render();
+            }
+          }
+        }, 1500);
       }
 
       sb.auth.onAuthStateChange((event, session) => {
@@ -13542,16 +13598,30 @@ function renderVaccineDueAlerts(vaccines) {
               if (state._loginInProgress) return;
               try {
                 await loadProfile();
+                // loadProfile already calls render(), but if it failed silently
+                // we still need to clear the bootstrap flag so we don't sit on
+                // the splash forever.
+                state._authBootstrapping = false;
                 render();
-              } catch (err) { console.error('Session restore failed:', err); }
+              } catch (err) {
+                console.error('Session restore failed:', err);
+                state._authBootstrapping = false;
+                navigate('login');
+              }
             }, 0);
           } else {
             // No valid session — clear any stale auth data from localStorage
             // This handles "Refresh Token Not Found" errors from expired/revoked tokens
             setTimeout(() => {
               // Don't sign out if a fresh login is in progress
-              if (state._loginInProgress) return;
+              if (state._loginInProgress) { state._authBootstrapping = false; return; }
               sb.auth.signOut({ scope: 'local' });
+              if (state._authBootstrapping) {
+                state._authBootstrapping = false;
+                // Skip if initApp already routed somewhere else (e.g. care-team-invite, inkwell-signup)
+                if (state.view === 'login' || !state.view) navigate('login');
+                else render();
+              }
             }, 0);
           }
         } else if (event === 'SIGNED_IN') {
