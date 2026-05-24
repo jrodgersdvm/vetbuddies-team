@@ -1085,6 +1085,52 @@
       if (backdrop) backdrop.remove();
     }
 
+    function showResetPasswordModal() {
+      const bodyHTML = `
+        <p style="margin-bottom:16px;">Enter your new password below.</p>
+        <div style="margin-bottom:12px;">
+          <label style="display:block; font-weight:600; margin-bottom:4px;">New Password</label>
+          <input type="password" id="reset-new-password" placeholder="••••••••" style="width:100%; padding:10px; border:1px solid #ccc; border-radius:8px; font-size:15px;" />
+        </div>
+        <div style="margin-bottom:4px;">
+          <label style="display:block; font-weight:600; margin-bottom:4px;">Confirm Password</label>
+          <input type="password" id="reset-confirm-password" placeholder="••••••••" style="width:100%; padding:10px; border:1px solid #ccc; border-radius:8px; font-size:15px;" />
+        </div>
+      `;
+      const actionsHTML = `
+        <button id="reset-pw-submit" class="btn btn-primary" style="width:100%;">Update Password</button>
+      `;
+      showModal('Reset Your Password', bodyHTML, actionsHTML);
+
+      const backdrop = document.querySelector('.modal-backdrop');
+      if (backdrop) {
+        backdrop.addEventListener('click', e => { e.stopPropagation(); }, true);
+      }
+      document.getElementById('reset-pw-submit').addEventListener('click', async () => {
+        const pw = document.getElementById('reset-new-password').value;
+        const confirm = document.getElementById('reset-confirm-password').value;
+        if (!pw || pw.length < 6) {
+          showToast('Password must be at least 6 characters.', 'error');
+          return;
+        }
+        if (pw !== confirm) {
+          showToast('Passwords do not match.', 'error');
+          return;
+        }
+        try {
+          const { error } = await sb.auth.updateUser({ password: pw });
+          if (error) throw error;
+          closeModal();
+          showToast('Password updated successfully! You can now sign in.', 'success');
+          await sb.auth.signOut();
+          navigate('login');
+          render();
+        } catch (err) {
+          showToast(err.message || 'Failed to update password.', 'error');
+        }
+      });
+    }
+
     function getFirstInitials(name) {
       if (!name) return '??';
       return name.split(' ').filter(n => n).map(n => n[0]).join('').toUpperCase().slice(0, 2);
@@ -13992,6 +14038,9 @@ function renderVaccineDueAlerts(vaccines) {
           if (onInkwell) return;
           navigate('login');
           render();
+        } else if (event === 'PASSWORD_RECOVERY') {
+          if (session) state.user = session.user;
+          setTimeout(() => showResetPasswordModal(), 0);
         } else if (event === 'TOKEN_REFRESHED') {
           if (session) state.user = session.user;
         }
