@@ -132,6 +132,7 @@
       // AI Medical Record Extraction
       aiExtractionInProgress: false,
       aiExtractionResult: null,
+      aiExtractionCaseId: null,
       aiExtractionDocId: null,
       aiExtractionDocName: '',
       showAiReviewModal: false,
@@ -583,6 +584,7 @@
       if (result.success && result.extraction) {
         if (openReviewModal) {
           state.aiExtractionResult = result.extraction;
+          state.aiExtractionCaseId = caseId;
           state.aiExtractionDocId = doc.id;
           state.aiExtractionDocName = doc.name;
           // Edge function auto-applies medications/vaccines/diagnoses to the care plan
@@ -700,7 +702,12 @@
     async function applyAiExtraction() {
       const ext = state.aiExtractionResult;
       const checked = state.aiCheckedItems;
-      if (!ext || !state.caseId) return;
+      const caseId = state.caseId || state.aiExtractionCaseId;
+      if (!ext || !caseId) {
+        showToast("Couldn't apply — no case is loaded. Reopen the case and try again.", 'error');
+        return;
+      }
+      state.caseId = caseId;
 
       const petId = state.currentCase?.pets?.id;
       const autoApplied = !!state.aiAutoApplied;
@@ -832,6 +839,7 @@
 
         state.showAiReviewModal = false;
         state.aiExtractionResult = null;
+        state.aiExtractionCaseId = null;
         state.aiExtractionDocId = null;
         state.aiAutoApplied = false;
         state.aiCheckedItems = {};
@@ -978,6 +986,7 @@
 
       if (result.success && result.extraction) {
         state.aiExtractionResult = result.extraction;
+        state.aiExtractionCaseId = caseId;
         state.aiExtractionDocId = null;
         state.aiExtractionDocName = `Case activity digest — ${new Date().toISOString().slice(0, 10)}`;
         state.aiExtractionInProgress = false;
@@ -12861,6 +12870,7 @@ function renderVaccineDueAlerts(vaccines) {
           case 'skip-ai-extraction':
             state.showAiReviewModal = false;
             state.aiExtractionResult = null;
+            state.aiExtractionCaseId = null;
             state.aiExtractionDocId = null;
             state.aiAutoApplied = false;
             state.aiCheckedItems = {};
