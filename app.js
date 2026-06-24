@@ -3661,6 +3661,28 @@ async function calculateBuddyScorecard(buddyId) {
         <div class="calm-soon-sub">${esc(sub)}</div>
       </div>`;
     }
+    function calmDate(d) {
+      if (!d) return '';
+      try { return new Date(d).toLocaleDateString(undefined, { month: 'short', day: 'numeric' }); } catch (e) { return ''; }
+    }
+    // Lazily load the active case's care plan + meds + vaccines, then re-render.
+    // Tracks the loaded case id so it runs once per pet and never loops.
+    function calmEnsureLoaded(petCase) {
+      if (!petCase) return;
+      const key = petCase.id;
+      if (state._calmLoadedFor === key || state._calmLoadingFor === key) return;
+      state._calmLoadingFor = key;
+      const petId = petCase.pets?.id;
+      Promise.all([
+        loadCarePlan(key),
+        petId ? loadPetMedications(petId) : Promise.resolve(),
+        petId ? loadPetVaccines(petId) : Promise.resolve(),
+      ]).then(() => {
+        state._calmLoadedFor = key;
+        state._calmLoadingFor = null;
+        render();
+      }).catch(() => { state._calmLoadingFor = null; });
+    }
 
     function renderCalmClient() {
       const profile = state.profile || {};
@@ -3673,6 +3695,7 @@ async function calculateBuddyScorecard(buddyId) {
       state.caseId = petCase.id;
       state.currentCase = petCase;
       const ctx = { profile, petCase, pet: petCase.pets || null };
+      calmEnsureLoaded(petCase);
 
       const tab = state.calmTab || 'today';
       const sub = state.calmSub || null;
@@ -3780,20 +3803,78 @@ async function calculateBuddyScorecard(buddyId) {
     }
 
     function renderCalmCare(ctx) {
-      const { pet } = ctx;
+      const { pet, petCase } = ctx;
       const petName = pet?.name || 'your pet';
-      return `
+      const cp = (state.carePlan && state.carePlan.case_id === petCase.id) ? state.carePlan : null;
+      const meds = (state.petMedications || []).filter(m => m.is_active !== false);
+      const openQs = (state.openQuestions || []).filter(q => (q.status || 'open') !== 'resolved');
+      const goals = (state.goals || []);
+      const dx = (state.diagnoses || [])[0];
+      const concern = (dx && dx.condition_name) || (cp && cp.diagnoses ? String(cp.diagnoses).split('\n')[0].trim() : '') || pet?.breed || '';
+
+      const header = `
         <button class="calm-care-head" data-action="calm-sub" data-sub="profile">
           ${calmPetAvatar(pet, 'calm-care-avatar')}
           <div class="calm-care-head-text">
             <div class="calm-label">LIVING CARE PLAN</div>
             <div class="calm-care-name">${esc(petName)}</div>
-            ${pet?.breed ? `<div class="calm-care-meta">${esc(pet.breed)}</div>` : ''}
+            ${concern ? `<div class="calm-care-meta">${esc(concern)}</div>` : ''}
           </div>
           <span class="calm-link-chev">›</span>
-        </button>
-        ${calmSoon('Your care plan is being wired in', petName + "'s medications, daily care, follow-ups and open questions will appear here next.")}
-      `;
+        </button>`;
+
+      if (state._calmLoadedFor !== petCase.id && !cp) {
+        return header + `<div class="calm-soon"><div class="calm-soon-sub">Loading ${esc(petName)}'s care plan…</div></div>`;
+      }
+
+      const oqCard = openQs.length ? `
+        <button class="calm-card calm-oq" data-action="calm-tab" data-tab="visits">
+          <div class="calm-label calm-label--sage">A QUESTION FOR YOUR NEXT VISIT</div>
+          <div class="calm-oq-q">"${esc(openQs[0].question)}"</div>
+          <div class="calm-oq-cta">${openQs[0].target_visit_date ? 'Ready for ' + esc(calmDate(openQs[0].target_visit_date)) + ' · ' : ''}tap to prepare ›</div>
+        </button>` : '';
+
+      const medsCard = meds.length ? `
+        <section class="calm-card calm-section">
+          <div class="calm-section-title">Daily care</div>
+          ${meds.map(m => `
+            <div class="calm-row">
+              <div class="calm-row-k">${esc(m.name)}${m.dose ? ' · ' + esc(m.dose) : ''}</div>
+              <div class="calm-row-v">${esc(m.frequency || '')}</div>
+            </div>`).join('')}
+        </section>` : '';
+
+      const dietCard = (cp && (cp.diet_notes || cp.lifestyle_notes)) ? `
+        <section class="calm-card calm-section">
+          <div class="calm-section-title">Diet &amp; lifestyle</div>
+          ${cp.diet_notes ? `<p class="calm-prose">${esc(cp.diet_notes)}</p>` : ''}
+          ${cp.lifestyle_notes ? `<p class="calm-prose">${esc(cp.lifestyle_notes)}</p>` : ''}
+        </section>` : '';
+
+      const followCard = goals.length ? `
+        <section class="calm-card calm-section">
+          <div class="calm-section-title">Following up</div>
+          ${goals.slice(0, 5).map(g => {
+            const st = (g.status || '').toLowerCase();
+            const done = st === 'achieved' || st === 'done' || st === 'resolved' || st === 'complete';
+            return `<div class="calm-follow${done ? ' done' : ''}">
+              <span class="calm-follow-dot"></span>
+              <span class="calm-follow-text">${esc(g.goal_text)}</span>
+              <span class="calm-follow-tag">${done ? 'Done' : esc((g.status || 'active').replace(/_/g, ' '))}</span>
+            </div>`;
+          }).join('')}
+        </section>` : '';
+
+      const summary = (cp && (cp.last_appointment_summary || cp.summary)) || '';
+      const howCard = summary ? `
+        <section class="calm-card calm-section">
+          <div class="calm-section-title">How ${esc(petName)} is doing</div>
+          <p class="calm-prose calm-italic">${esc(summary)}</p>
+        </section>` : '';
+
+      const body = oqCard + medsCard + dietCard + followCard + howCard;
+      const empty = body ? '' : `<div class="calm-soon"><div class="calm-soon-icon">🌱</div><div class="calm-soon-title">Your plan is just beginning</div><div class="calm-soon-sub">${esc(petName)}'s Living Care Plan will fill in as you and your Buddy build it together.</div></div>`;
+      return header + body + empty;
     }
 
     function renderCalmVisits(ctx) {
