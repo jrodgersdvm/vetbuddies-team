@@ -3672,14 +3672,17 @@ async function calculateBuddyScorecard(buddyId) {
       const key = petCase.id;
       if (state._calmLoadedFor === key || state._calmLoadingFor === key) return;
       state._calmLoadingFor = key;
+      state.messageThread = 'client'; // clients only ever load/send the client thread
       const petId = petCase.pets?.id;
       Promise.all([
         loadCarePlan(key),
+        loadMessages(key),
         petId ? loadPetMedications(petId) : Promise.resolve(),
         petId ? loadPetVaccines(petId) : Promise.resolve(),
       ]).then(() => {
         state._calmLoadedFor = key;
         state._calmLoadingFor = null;
+        try { subscribeToMessages(key); } catch (e) { console.warn('calm subscribe failed', e); }
         render();
       }).catch(() => { state._calmLoadingFor = null; });
     }
@@ -3910,6 +3913,25 @@ async function calculateBuddyScorecard(buddyId) {
         </div>`;
     }
 
+    function renderCalmBubble(m, profile) {
+      const own = m.sender_id === profile.id;
+      const isImage = m.attachment_name && /\.(jpg|jpeg|png|gif|webp)$/i.test(m.attachment_name);
+      const isVoice = m.attachment_name && /\.(webm|ogg|mp3|wav)$/i.test(m.attachment_name);
+      if (m.message_type === 'system' || m.message_type === 'care_plan') {
+        return `<div class="calm-bubble-system"><div class="calm-bubble-system-k">SAVED TO CARE PLAN</div>${esc(m.content || '')}</div>`;
+      }
+      const attach = m.attachment_url
+        ? (isVoice ? `<audio controls src="${esc(m.attachment_url)}" style="max-width:210px;"></audio>`
+          : isImage ? `<img class="calm-bubble-img" src="${esc(m.attachment_url)}" alt="${esc(m.attachment_name || 'photo')}">`
+          : `<a href="${esc(m.attachment_url)}" target="_blank" rel="noopener">📎 ${esc(m.attachment_name || 'Attachment')}</a>`)
+        : '';
+      return `<div class="calm-bubble ${own ? 'own' : 'them'}">
+        ${m.is_urgent ? `<span class="calm-bubble-urgent">URGENT</span>` : ''}
+        ${m.content ? `<div class="calm-bubble-text">${esc(m.content)}</div>` : ''}
+        ${attach}
+      </div>`;
+    }
+
     function renderCalmSub(sub, ctx) {
       const { profile, pet } = ctx;
       const tabLabel = (state.calmTab || 'today');
@@ -3935,8 +3957,36 @@ async function calculateBuddyScorecard(buddyId) {
         }
         case 'wellness':
           return `${head('A quiet check-in — for you.')}${calmSoon('Wellness is being wired in', 'A private, prose-first check-in with a gentle AI reflection — no scores, no streaks. Coming in the next step.')}`;
-        case 'message':
-          return `${head('Message your Buddy')}${calmSoon('Messages are being wired in', "Your real conversation with your Buddy lands here next. You'll only ever see your own thread — the staff-internal thread stays private.")}`;
+        case 'message': {
+          const buddy = ctx.petCase?.assigned_buddy || null;
+          const buddyName = buddy?.name || 'Your Vet Buddy';
+          const buddyFirst = buddyName.split(/\s+/)[0];
+          // Security: clients only ever see the client thread, never the staff thread.
+          const msgs = (state.messages || []).filter(m => (m.thread_type || 'client') === 'client');
+          const bubbles = msgs.length
+            ? msgs.map(m => renderCalmBubble(m, profile)).join('')
+            : `<div class="calm-thread-empty">This is where your conversation with ${esc(buddyName)} lives. They'll reach out within 48 hours. 🤍</div>`;
+          const composer = hasWriteAccess(profile)
+            ? `<div class="calm-composer">
+                 <textarea data-field="message-input" class="calm-composer-input" placeholder="Message ${esc(buddyFirst)}…" maxlength="2000" rows="1"></textarea>
+                 <button class="calm-send" data-action="send-message" aria-label="Send">↑</button>
+               </div>`
+            : `<div class="calm-thread-readonly">Your trial has ended — subscribe to keep messaging your Buddy. ${esc(pet?.name || 'Your pet')}'s plan and photos stay safe.</div>`;
+          return `
+            <div class="calm-msg-head">
+              ${calmBack(backTo)}
+              <div class="calm-msg-head-main">
+                <div class="calm-msg-avatar">${esc((buddyName.trim()[0] || 'B').toUpperCase())}<span class="calm-online"></span></div>
+                <div>
+                  <div class="calm-msg-name">${esc(buddyName)}</div>
+                  <div class="calm-msg-sub">Your Vet Buddy · Dr. Rodgers, DVM supervising</div>
+                </div>
+              </div>
+            </div>
+            <div id="messages-list" class="calm-thread">${bubbles}</div>
+            <div id="typing-indicator" class="calm-typing" style="display:none;"></div>
+            ${composer}`;
+        }
         case 'profile':
           return `${head((pet?.name || 'Pet') + "'s profile")}${calmSoon('Pet profile is being wired in', 'Photos, breed, age, weight, active concerns, and the care team will live here.')}`;
         case 'notifs':
@@ -10317,7 +10367,7 @@ function renderVaccineDueAlerts(vaccines) {
         // ═══ NEW FEATURE INLINE ACTIONS (before switch) ═══
         // ── Calm Client experience (feature-flagged) ──
         if (action === 'calm-tab')          { state.calmTab = target.dataset.tab || 'today'; state.calmSub = null; state.calmHeavy = false; render(); return; }
-        if (action === 'calm-sub')          { state.calmSub = target.dataset.sub || null; render(); return; }
+        if (action === 'calm-sub')          { state.calmSub = target.dataset.sub || null; render(); if (state.calmSub === 'message') scrollMessagesToBottom(); return; }
         if (action === 'calm-back')         { state.calmSub = null; render(); return; }
         if (action === 'calm-toggle-heavy') { state.calmHeavy = !state.calmHeavy; render(); return; }
         if (action === 'calm-toggle-meal')  { state.calmLoggedToday = !state.calmLoggedToday; render(); return; }

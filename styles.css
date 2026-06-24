@@ -4715,6 +4715,29 @@
     .calm-follow.done .calm-follow-dot { background: var(--c-tan); }
     .calm-follow.done .calm-follow-tag { color: var(--c-tan); }
 
+    /* Messages thread */
+    .calm-msg-head { display:flex; flex-direction:column; gap:10px; margin-bottom:12px; }
+    .calm-msg-head-main { display:flex; align-items:center; gap:12px; }
+    .calm-msg-avatar { position:relative; width:38px; height:38px; border-radius:50%; background: var(--c-tint); color: var(--c-tint-text); display:flex; align-items:center; justify-content:center; font-weight:600; font-size:16px; flex:0 0 auto; }
+    .calm-msg-name { font-family:'Fraunces', serif; font-size:18px; color: var(--c-forest); }
+    .calm-msg-sub { font-size:12px; color: var(--c-tan); }
+    .calm-thread { display:flex; flex-direction:column; gap:8px; overflow-y:auto; max-height: calc(100dvh - 250px); padding:4px 0; }
+    .calm-thread-empty { text-align:center; color: var(--c-text); font-size:14px; padding:40px 16px; line-height:1.5; }
+    .calm-bubble { max-width:82%; padding:10px 14px; font-size:14.5px; line-height:1.45; word-wrap:break-word; }
+    .calm-bubble.them { align-self:flex-start; background:#fff; color: var(--c-text); border:1px solid var(--c-border); border-radius:16px 16px 16px 5px; }
+    .calm-bubble.own { align-self:flex-end; background: var(--c-sage); color:#fff; border-radius:16px 16px 5px 16px; }
+    .calm-bubble-text { white-space:pre-wrap; }
+    .calm-bubble-img { max-width:100%; border-radius:12px; margin-top:4px; display:block; }
+    .calm-bubble-urgent { display:inline-block; font-size:10px; font-weight:700; letter-spacing:0.04em; color: var(--c-burgundy); margin-bottom:3px; }
+    .calm-bubble.own .calm-bubble-urgent { color:#ffe2ea; }
+    .calm-bubble-system { align-self:center; max-width:92%; background: var(--c-tint); color: var(--c-tint-text); border-radius:12px; padding:10px 14px; font-size:13.5px; text-align:center; }
+    .calm-bubble-system-k { font-size:10px; font-weight:700; letter-spacing:0.05em; color:#4F7048; margin-bottom:3px; }
+    .calm-typing { font-size:12px; color: var(--c-tan); font-style:italic; padding:4px 2px; }
+    .calm-composer { display:flex; gap:8px; align-items:flex-end; margin-top:8px; }
+    .calm-composer-input { flex:1; border:1px solid var(--c-border); border-radius:18px; padding:11px 14px; font-size:14.5px; font-family:'DM Sans', sans-serif; resize:none; max-height:120px; background:#fff; color: var(--c-text); }
+    .calm-send { width:42px; height:42px; flex:0 0 auto; border-radius:50%; border:none; background: var(--c-sage); color:#fff; font-size:18px; cursor:pointer; }
+    .calm-thread-readonly { text-align:center; font-size:13px; color: var(--c-text); background: var(--c-beige); border-radius:12px; padding:14px; margin-top:10px; }
+
     .lto-lock-badge {
       display: inline-flex;
       align-items: center;
