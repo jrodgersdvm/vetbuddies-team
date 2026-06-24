@@ -14,4 +14,17 @@ const CONFIG = Object.freeze({
   BUDDY_PRICE_DISPLAY: '$9.99',
   BUDDY_PRICE_AMOUNT: 9.99,
   TRIAL_DURATION_DAYS: 30,
+  // ── Calm Client experience (feature-flagged, allowlist-gated) ──
+  // New 4-tab pet-owner UI (Today / Care / Visits / Buddy). Only client-role
+  // users whose email is listed below (case-insensitive) see it; every other
+  // user keeps the current client UI, and all other roles are untouched.
+  // Personal testing override (your browser only): set localStorage 'vb_calm'
+  // to '1' to force it on or '0' to force it off — beats the allowlist for you.
+  // Rollout: add yourself first, then a few real clients, then flip ENABLED
+  // for everyone once you're happy.
+  CALM_CLIENT_ENABLED: true,
+  CALM_CLIENT_ALLOWLIST: [
+    'jrodgersdvm@gmail.com',
+    // 'your-trial-test-client@example.com',  // add your seeded client test account
+  ],
 });

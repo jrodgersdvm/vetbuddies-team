@@ -4585,6 +4585,115 @@
       animation: notifSlideIn 0.3s ease-out;
     }
 
+    /* ════════════════════════════════════════════════════════════════════
+       CALM CLIENT EXPERIENCE  (feature-flagged · scoped to .calm-app)
+       Self-contained: local CSS vars hold the calm palette so a client's
+       dark-mode setting can't recolor it. Brand hexes from the design tokens.
+       ════════════════════════════════════════════════════════════════════ */
+    .calm-app {
+      --c-bg:#EDE8E0; --c-card:#FFFFFF; --c-border:#C8BFAF; --c-text:#5A4F3F;
+      --c-sage:#689562; --c-forest:#336026; --c-tan:#A5947E; --c-beige:#DDD0C0;
+      --c-burgundy:#4F152F; --c-tint:#E4ECDF; --c-tint-text:#2F4A2A; --c-empty:#D8CFC0;
+      max-width: 480px; margin: 0 auto; min-height: 100vh; min-height: 100dvh;
+      background: var(--c-bg); color: var(--c-text); position: relative;
+      padding-bottom: 84px; font-family: 'DM Sans', sans-serif;
+    }
+    .calm-app *, .calm-app *::before, .calm-app *::after { box-sizing: border-box; }
+    .calm-scroll { padding: 16px 20px 8px; }
+    .calm-avatar-ph { display:flex; align-items:center; justify-content:center; background: var(--c-tint); }
+
+    .calm-top { display:flex; align-items:center; justify-content:space-between; margin-bottom:18px; }
+    .calm-brand { display:flex; align-items:center; gap:8px; font-weight:600; color: var(--c-forest); }
+    .calm-logo { font-size:22px; }
+    .calm-bell { position:relative; width:38px; height:38px; border-radius:50%; border:1px solid var(--c-border); background:#fff; cursor:pointer; font-size:16px; }
+    .calm-bell-dot { position:absolute; top:8px; right:9px; width:8px; height:8px; border-radius:50%; background: var(--c-burgundy); }
+
+    .calm-greet { display:flex; align-items:center; gap:12px; margin-bottom:22px; }
+    .calm-greet-avatar { width:46px; height:46px; border-radius:50%; object-fit:cover; font-size:22px; }
+    .calm-greet-line { font-size:14px; color: var(--c-text); font-weight:500; }
+    .calm-greet-sub { font-size:12.5px; color: var(--c-tan); }
+
+    .calm-h1 { font-family:'Fraunces', serif; font-weight:500; font-size:29px; color: var(--c-forest); line-height:1.2; margin-bottom:18px; }
+    .calm-h2 { font-family:'Fraunces', serif; font-weight:500; font-size:24px; color: var(--c-forest); line-height:1.25; }
+
+    .calm-card { background: var(--c-card); border:1px solid var(--c-border); border-radius:18px; padding:20px; box-shadow:0 1px 4px rgba(0,0,0,0.06); margin-bottom:18px; }
+    .calm-focus { border-radius:20px; padding:22px; }
+    .calm-label { font-size:11.5px; font-weight:700; letter-spacing:0.05em; text-transform:uppercase; color: var(--c-tan); margin-bottom:8px; }
+    .calm-label--sage { color: var(--c-sage); }
+    .calm-focus-line { font-family:'Fraunces', serif; font-size:20px; color: var(--c-forest); line-height:1.3; margin-bottom:8px; }
+    .calm-focus-body { font-size:14px; color: var(--c-text); margin-bottom:16px; }
+    .calm-strip { display:flex; gap:5px; margin-bottom:16px; }
+    .calm-seg { flex:1; height:6px; border-radius:4px; background: var(--c-empty); }
+    .calm-seg.on { background: var(--c-sage); }
+
+    .calm-btn { display:block; width:100%; text-align:center; padding:13px 16px; border-radius:14px; font-size:15px; font-weight:600; cursor:pointer; border:1px solid transparent; margin-top:10px; text-decoration:none; }
+    .calm-btn--sage { background: var(--c-sage); color:#fff; }
+    .calm-btn--ghost { background:transparent; color: var(--c-forest); border-color: var(--c-border); }
+    .calm-chip-confirm { display:block; width:100%; text-align:center; padding:13px 16px; border-radius:14px; font-size:15px; font-weight:600; background: var(--c-tint); color: var(--c-tint-text); border:none; cursor:pointer; }
+
+    .calm-steady { display:flex; align-items:center; gap:8px; font-size:13.5px; color: var(--c-text); margin:4px 2px 22px; }
+    .calm-dot { width:8px; height:8px; border-radius:50%; background: var(--c-sage); flex:0 0 auto; }
+
+    .calm-links { background: var(--c-card); border:1px solid var(--c-border); border-radius:16px; overflow:hidden; margin-bottom:22px; }
+    .calm-link { display:flex; width:100%; align-items:center; justify-content:space-between; gap:10px; padding:15px 18px; background:none; border:none; border-top:1px solid var(--c-border); cursor:pointer; font-size:14px; color: var(--c-forest); text-align:left; }
+    .calm-link:first-child { border-top:none; }
+    .calm-link-chev { color: var(--c-tan); font-size:18px; }
+
+    .calm-heavy-link { display:block; width:100%; text-align:center; background:none; border:none; color: var(--c-tan); font-size:14px; padding:6px; cursor:pointer; margin-bottom:18px; }
+
+    .calm-quiet { background: var(--c-beige); border-color:transparent; cursor:pointer; }
+    .calm-quiet-title { font-family:'Fraunces', serif; font-size:17px; color: var(--c-forest); margin-bottom:4px; }
+    .calm-quiet-sub { font-size:13px; color: var(--c-text); }
+
+    .calm-classic-link { display:block; margin:6px auto 0; background:none; border:none; color: var(--c-tan); font-size:12.5px; text-decoration:underline; cursor:pointer; }
+
+    .calm-heavy { text-align:center; padding:60px 24px; }
+    .calm-heavy-avatar { width:84px; height:84px; border-radius:50%; background: var(--c-tint); color: var(--c-tint-text); display:flex; align-items:center; justify-content:center; font-size:34px; font-weight:600; margin:0 auto 22px; }
+    .calm-heavy-title { font-family:'Fraunces', serif; font-weight:500; font-size:25px; color: var(--c-forest); margin-bottom:14px; }
+    .calm-heavy-body { font-size:15px; color: var(--c-text); max-width:320px; margin:0 auto 8px; }
+    .calm-heavy-sign { font-size:14px; color: var(--c-tan); margin-bottom:26px; }
+    .calm-heavy .calm-btn { max-width:300px; margin-left:auto; margin-right:auto; }
+
+    .calm-nav { position:fixed; bottom:0; left:50%; transform:translateX(-50%); width:100%; max-width:480px; display:flex; background:#fff; border-top:1px solid var(--c-border); padding:8px 0 calc(8px + env(safe-area-inset-bottom)); z-index:40; }
+    .calm-nav-item { flex:1; display:flex; flex-direction:column; align-items:center; gap:3px; background:none; border:none; cursor:pointer; color: var(--c-tan); padding:4px; }
+    .calm-nav-item.active { color: var(--c-forest); }
+    .calm-nav-icon { font-size:20px; }
+    .calm-nav-label { font-size:11px; font-weight:600; }
+
+    .calm-sub-head { margin-bottom:18px; }
+    .calm-back { background:none; border:none; color: var(--c-sage); font-size:15px; cursor:pointer; padding:0 0 12px; display:block; }
+
+    .calm-care-head { display:flex; width:100%; align-items:center; gap:14px; background: var(--c-card); border:1px solid var(--c-border); border-radius:16px; padding:16px; cursor:pointer; margin-bottom:18px; text-align:left; }
+    .calm-care-avatar { width:56px; height:56px; border-radius:50%; object-fit:cover; font-size:26px; flex:0 0 auto; }
+    .calm-care-name { font-family:'Fraunces', serif; font-size:22px; color: var(--c-forest); }
+    .calm-care-meta { font-size:13px; color: var(--c-text); }
+    .calm-care-head-text { flex:1; min-width:0; }
+
+    .calm-buddy { text-align:center; padding-top:10px; }
+    .calm-buddy-avatar { position:relative; width:84px; height:84px; border-radius:50%; background: var(--c-tint); color: var(--c-tint-text); display:flex; align-items:center; justify-content:center; font-size:34px; font-weight:600; margin:8px auto 16px; }
+    .calm-online { position:absolute; bottom:6px; right:6px; width:14px; height:14px; border-radius:50%; background: var(--c-sage); border:2px solid #fff; }
+    .calm-buddy-name { font-family:'Fraunces', serif; font-weight:500; font-size:22px; color: var(--c-forest); }
+    .calm-buddy-role { font-size:13.5px; color: var(--c-text); margin-top:4px; }
+    .calm-buddy-sup { font-size:13px; color: var(--c-tan); margin-bottom:18px; }
+    .calm-buddy-bio { text-align:left; font-family:'Fraunces', serif; font-size:15px; color: var(--c-text); }
+    .calm-chips { display:flex; gap:10px; margin:18px 0; }
+    .calm-chip { flex:1; background: var(--c-beige); border-radius:12px; padding:12px 8px; font-size:12px; color: var(--c-text); }
+    .calm-chip-k { font-size:10.5px; font-weight:700; letter-spacing:0.05em; color: var(--c-forest); margin-bottom:4px; }
+    .calm-escalate { display:block; width:100%; text-align:center; background:none; border:none; color: var(--c-burgundy); font-size:13px; cursor:pointer; margin-top:16px; }
+
+    .calm-soon { text-align:center; padding:40px 24px; }
+    .calm-soon-icon { font-size:34px; margin-bottom:12px; }
+    .calm-soon-title { font-family:'Fraunces', serif; font-size:19px; color: var(--c-forest); margin-bottom:8px; }
+    .calm-soon-sub { font-size:14px; color: var(--c-text); max-width:320px; margin:0 auto; }
+
+    .calm-bill-price { font-family:'Fraunces', serif; font-size:34px; color: var(--c-forest); }
+    .calm-bill-price span { font-size:15px; color: var(--c-tan); font-family:'DM Sans', sans-serif; }
+    .calm-bill-trial { display:inline-block; background: var(--c-tint); color: var(--c-tint-text); font-size:12.5px; font-weight:600; padding:5px 12px; border-radius:20px; margin:10px 0; }
+    .calm-bill-list { list-style:none; padding:0; margin:12px 0; }
+    .calm-bill-list li { font-size:14px; color: var(--c-text); padding:6px 0 6px 22px; position:relative; }
+    .calm-bill-list li::before { content:'✓'; position:absolute; left:0; color: var(--c-sage); font-weight:700; }
+    .calm-bill-fine { font-size:12.5px; color: var(--c-tan); margin:6px 0 4px; }
+
     .lto-lock-badge {
       display: inline-flex;
       align-items: center;

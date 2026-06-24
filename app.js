@@ -3614,6 +3614,257 @@ async function calculateBuddyScorecard(buddyId) {
       `);
     }
 
+    // ════════════════════════════════════════════════════════════════════
+    // CALM CLIENT EXPERIENCE  (feature-flagged · allowlist-gated)
+    // ────────────────────────────────────────────────────────────────────
+    // A separate 4-tab pet-owner render path: Today / Care / Visits / Buddy.
+    // It binds to the SAME `sb` client, the SAME loaders, and the SAME
+    // CLIENT_SAFE data the classic client dashboard already uses — RLS and the
+    // client-vs-staff message split are unchanged. Internal navigation is
+    // client-only UI state (state.calm*), never the global router, so every
+    // other role and view is untouched. Off by default; see isCalmClientEnabled.
+    // Build status: SHELL (nav + Today greeting + heavy mode). Care / Messages /
+    // Visits / Wellness / Story are wired screen-by-screen next.
+    // ════════════════════════════════════════════════════════════════════
+    function isCalmClientEnabled(profile) {
+      if (!profile || profile.role !== 'client') return false;
+      // Personal testing override (this browser only), beats the allowlist.
+      try {
+        const forced = localStorage.getItem('vb_calm');
+        if (forced === '1') return true;
+        if (forced === '0') return false;
+      } catch (e) {}
+      if (!CONFIG.CALM_CLIENT_ENABLED) return false;
+      const list = (CONFIG.CALM_CLIENT_ALLOWLIST || []).map(s => String(s).toLowerCase());
+      return list.includes(String(profile.email || '').toLowerCase());
+    }
+
+    const CALM_TABS = [
+      { id: 'today',  label: 'Today',  icon: '☀️' },
+      { id: 'care',   label: 'Care',   icon: '📋' },
+      { id: 'visits', label: 'Visits', icon: '📅' },
+      { id: 'buddy',  label: 'Buddy',  icon: '💚' },
+    ];
+
+    function calmPetAvatar(pet, cls) {
+      const name = pet?.name || 'your pet';
+      if (pet?.photo_url) return `<img class="${cls}" src="${esc(pet.photo_url)}" alt="${esc(name)}">`;
+      return `<div class="${cls} calm-avatar-ph">${SPECIES_EMOJI[pet?.species?.toLowerCase()] || '🐾'}</div>`;
+    }
+    function calmBack(label) {
+      return `<button class="calm-back" data-action="calm-back">‹ ${esc(label || 'Back')}</button>`;
+    }
+    function calmSoon(title, sub) {
+      return `<div class="calm-soon">
+        <div class="calm-soon-icon">🌱</div>
+        <div class="calm-soon-title">${esc(title)}</div>
+        <div class="calm-soon-sub">${esc(sub)}</div>
+      </div>`;
+    }
+
+    function renderCalmClient() {
+      const profile = state.profile || {};
+      const cases = state.cases || [];
+      if (!cases.length) return renderCalmShell(renderCalmNoPet(profile), 'today', { hideNav: true });
+
+      const idx = Math.min(state.activePetIndex || 0, cases.length - 1);
+      const petCase = cases[idx];
+      // Keep caseId/currentCase in sync so message/care writes target this case.
+      state.caseId = petCase.id;
+      state.currentCase = petCase;
+      const ctx = { profile, petCase, pet: petCase.pets || null };
+
+      const tab = state.calmTab || 'today';
+      const sub = state.calmSub || null;
+      let body;
+      if (sub) body = renderCalmSub(sub, ctx);
+      else if (tab === 'care')   body = renderCalmCare(ctx);
+      else if (tab === 'visits') body = renderCalmVisits(ctx);
+      else if (tab === 'buddy')  body = renderCalmBuddy(ctx);
+      else body = state.calmHeavy ? renderCalmHeavy(ctx) : renderCalmToday(ctx);
+
+      const hideNav = !sub && tab === 'today' && state.calmHeavy;
+      return renderCalmShell(body, tab, { hideNav });
+    }
+
+    function renderCalmShell(bodyHtml, activeTab, opts = {}) {
+      const nav = opts.hideNav ? '' : `
+        <nav class="calm-nav" role="navigation" aria-label="Main">
+          ${CALM_TABS.map(t => `
+            <button class="calm-nav-item ${t.id === activeTab ? 'active' : ''}" data-action="calm-tab" data-tab="${t.id}">
+              <span class="calm-nav-icon" aria-hidden="true">${t.icon}</span>
+              <span class="calm-nav-label">${t.label}</span>
+            </button>`).join('')}
+        </nav>`;
+      return `<div class="calm-app"><div class="calm-scroll">${bodyHtml}</div>${nav}</div>`;
+    }
+
+    function renderCalmNoPet(profile) {
+      const first = (profile.name || '').trim().split(/\s+/)[0] || 'there';
+      return `<div class="calm-soon" style="padding-top:64px;">
+        <div class="calm-soon-icon">🐾</div>
+        <div class="calm-soon-title">Welcome, ${esc(first)}.</div>
+        <div class="calm-soon-sub">Let's add your pet so you and your Vet Buddy can begin.</div>
+        <button class="calm-btn calm-btn--sage" data-action="nav-add-pet" style="margin-top:18px;max-width:260px;">Add your pet</button>
+        <button class="calm-classic-link" data-action="calm-classic" style="margin-top:20px;">Switch to classic view</button>
+      </div>`;
+    }
+
+    function renderCalmToday(ctx) {
+      const { profile, pet, petCase } = ctx;
+      const first = (profile.name || '').trim().split(/\s+/)[0] || 'there';
+      const h = new Date().getHours();
+      const greet = h < 12 ? 'Good morning' : h < 18 ? 'Good afternoon' : 'Good evening';
+      const petName = pet?.name || 'your pet';
+      const buddy = petCase?.assigned_buddy || null;
+      const buddyFirst = buddy?.name ? buddy.name.split(/\s+/)[0] : 'your Buddy';
+      const trialActive = isTrialActive(profile);
+      const trialDays = getTrialDaysRemaining(profile);
+      const meal = !!state.calmLoggedToday;
+      const filled = meal ? 4 : 3;
+      const strip = Array.from({ length: 7 }, (_, i) => `<span class="calm-seg ${i < filled ? 'on' : ''}"></span>`).join('');
+      const focusAction = meal
+        ? `<button class="calm-chip-confirm" data-action="calm-toggle-meal">✓ Logged for today 🤍</button>`
+        : `<button class="calm-btn calm-btn--sage" data-action="calm-toggle-meal">Mark today's meal logged</button>`;
+
+      return `
+        <header class="calm-top">
+          <div class="calm-brand"><span class="calm-logo">🐾</span><span>Vet Buddies</span></div>
+          <button class="calm-bell" data-action="calm-sub" data-sub="notifs" aria-label="Notifications">🔔<span class="calm-bell-dot"></span></button>
+        </header>
+        <div class="calm-greet">
+          ${calmPetAvatar(pet, 'calm-greet-avatar')}
+          <div>
+            <div class="calm-greet-line">${greet}, ${esc(first)}</div>
+            <div class="calm-greet-sub">${esc(petName)} is comfortable and cared for.</div>
+          </div>
+        </div>
+        <h1 class="calm-h1">One thing to hold today.</h1>
+        <section class="calm-card calm-focus">
+          <div class="calm-label calm-label--sage">RIGHT NOW</div>
+          <div class="calm-focus-line">Give ${esc(petName)} this morning's meal with their medication.</div>
+          <p class="calm-focus-body">A calm, normal start to the day — that's all that's needed right now.</p>
+          <div class="calm-strip">${strip}</div>
+          ${focusAction}
+        </section>
+        <div class="calm-steady"><span class="calm-dot"></span>Everything else is steady. Nothing else needs you today.</div>
+        <section class="calm-links">
+          <button class="calm-link" data-action="calm-tab" data-tab="visits"><span>Your next vet visit</span><span class="calm-link-chev">›</span></button>
+          <button class="calm-link" data-action="calm-tab" data-tab="buddy"><span>${esc(buddyFirst)}, your Vet Buddy</span><span class="calm-link-chev">›</span></button>
+          <button class="calm-link" data-action="calm-sub" data-sub="billing"><span>Your Buddy plan${trialActive && trialDays != null ? ` · ${trialDays} day${trialDays === 1 ? '' : 's'} left in trial` : ''}</span><span class="calm-link-chev">›</span></button>
+        </section>
+        <button class="calm-heavy-link" data-action="calm-toggle-heavy">Today feels heavy →</button>
+        <section class="calm-card calm-quiet" data-action="calm-sub" data-sub="wellness">
+          <div class="calm-quiet-title">A quiet moment for you</div>
+          <div class="calm-quiet-sub">A private check-in — just for you, whenever you'd like.</div>
+        </section>
+        <button class="calm-classic-link" data-action="calm-classic">Switch to classic view</button>
+      `;
+    }
+
+    function renderCalmHeavy(ctx) {
+      const { pet, petCase } = ctx;
+      const petName = pet?.name || 'your pet';
+      const buddy = petCase?.assigned_buddy || null;
+      const buddyFirst = buddy?.name ? buddy.name.split(/\s+/)[0] : 'Your Buddy';
+      const initial = (buddyFirst[0] || 'B').toUpperCase();
+      return `
+        <div class="calm-heavy">
+          <div class="calm-heavy-avatar">${esc(initial)}</div>
+          <h2 class="calm-heavy-title">Then let's set it all down.</h2>
+          <p class="calm-heavy-body">You don't need to log or check anything today. I'm keeping ${esc(petName)}'s plan steady. Rest — I've got this part.</p>
+          <p class="calm-heavy-sign">— ${esc(buddyFirst)}, your Vet Buddy</p>
+          <button class="calm-btn calm-btn--sage" data-action="calm-sub" data-sub="message">Talk to ${esc(buddyFirst)}</button>
+          <button class="calm-btn calm-btn--ghost" data-action="calm-toggle-heavy">I'm back to steady</button>
+        </div>`;
+    }
+
+    function renderCalmCare(ctx) {
+      const { pet } = ctx;
+      const petName = pet?.name || 'your pet';
+      return `
+        <button class="calm-care-head" data-action="calm-sub" data-sub="profile">
+          ${calmPetAvatar(pet, 'calm-care-avatar')}
+          <div class="calm-care-head-text">
+            <div class="calm-label">LIVING CARE PLAN</div>
+            <div class="calm-care-name">${esc(petName)}</div>
+            ${pet?.breed ? `<div class="calm-care-meta">${esc(pet.breed)}</div>` : ''}
+          </div>
+          <span class="calm-link-chev">›</span>
+        </button>
+        ${calmSoon('Your care plan is being wired in', petName + "'s medications, daily care, follow-ups and open questions will appear here next.")}
+      `;
+    }
+
+    function renderCalmVisits(ctx) {
+      const { pet } = ctx;
+      return `
+        <div class="calm-sub-head"><div class="calm-label">VISIT PREP</div><h2 class="calm-h2">Preparing for your next visit</h2></div>
+        ${calmSoon('Visit prep is being wired in', "Your next appointment, the questions " + (pet?.name || 'your pet') + "'s Buddy prepped, and what gets shared with Dr. Rodgers will live here.")}
+      `;
+    }
+
+    function renderCalmBuddy(ctx) {
+      const { petCase } = ctx;
+      const buddy = petCase?.assigned_buddy || null;
+      const buddyName = buddy?.name || 'Your Vet Buddy';
+      const buddyFirst = buddyName.split(/\s+/)[0];
+      const initial = (buddyName.trim()[0] || 'B').toUpperCase();
+      const bio = buddy?.bio || ("I'm here to help you carry the weight of " + (petCase?.pets?.name || 'your pet') + "'s care — a steady person between visits, supervised by Dr. Rodgers.");
+      return `
+        <div class="calm-buddy">
+          <div class="calm-buddy-avatar">${esc(initial)}<span class="calm-online"></span></div>
+          <h2 class="calm-buddy-name">${esc(buddyName)}</h2>
+          <div class="calm-buddy-role">Your Vet Buddy · 2nd-year vet student</div>
+          <div class="calm-buddy-sup">Supervised by Dr. Rodgers, DVM</div>
+          <section class="calm-card calm-buddy-bio"><em>${esc(bio)}</em></section>
+          <div class="calm-chips">
+            <div class="calm-chip"><div class="calm-chip-k">SHARE</div>Hold the weight together</div>
+            <div class="calm-chip"><div class="calm-chip-k">SUPPORT</div>Build steady trust</div>
+            <div class="calm-chip"><div class="calm-chip-k">BRIDGE</div>Connect you to the vet</div>
+          </div>
+          <button class="calm-btn calm-btn--sage" data-action="calm-sub" data-sub="message">Message ${esc(buddyFirst)}</button>
+          <button class="calm-btn calm-btn--ghost" data-action="calm-sub" data-sub="wellness">How you're doing</button>
+          <button class="calm-escalate" data-action="calm-sub" data-sub="message">Need the care team urgently? Reach Dr. Rodgers →</button>
+        </div>`;
+    }
+
+    function renderCalmSub(sub, ctx) {
+      const { profile, pet } = ctx;
+      const tabLabel = (state.calmTab || 'today');
+      const backTo = tabLabel.charAt(0).toUpperCase() + tabLabel.slice(1);
+      const head = (title) => `<div class="calm-sub-head">${calmBack(backTo)}<h2 class="calm-h2">${esc(title)}</h2></div>`;
+      switch (sub) {
+        case 'billing': {
+          const trialActive = isTrialActive(profile);
+          const days = getTrialDaysRemaining(profile);
+          return `${head('Your Buddy plan')}
+            <section class="calm-card calm-bill">
+              <div class="calm-bill-price">${esc(CONFIG.BUDDY_PRICE_DISPLAY)}<span>/ month</span></div>
+              ${trialActive && days != null ? `<div class="calm-bill-trial">Free trial · ${days} day${days === 1 ? '' : 's'} left</div>` : ''}
+              <ul class="calm-bill-list">
+                <li>Your named Vet Buddy, supervised by Dr. Rodgers</li>
+                <li>${esc(pet?.name || 'Your pet')}'s Living Care Plan, kept current</li>
+                <li>Messaging, visit prep, and gentle reminders</li>
+              </ul>
+              <p class="calm-bill-fine">Cancel or pause anytime, no penalty.</p>
+              <a class="calm-btn calm-btn--sage" href="${esc(CONFIG.STRIPE_PAYMENT_LINK)}" target="_blank" rel="noopener">Continue my plan</a>
+              <button class="calm-btn calm-btn--ghost" data-action="nav-subscribe">Manage or pause</button>
+            </section>`;
+        }
+        case 'wellness':
+          return `${head('A quiet check-in — for you.')}${calmSoon('Wellness is being wired in', 'A private, prose-first check-in with a gentle AI reflection — no scores, no streaks. Coming in the next step.')}`;
+        case 'message':
+          return `${head('Message your Buddy')}${calmSoon('Messages are being wired in', "Your real conversation with your Buddy lands here next. You'll only ever see your own thread — the staff-internal thread stays private.")}`;
+        case 'profile':
+          return `${head((pet?.name || 'Pet') + "'s profile")}${calmSoon('Pet profile is being wired in', 'Photos, breed, age, weight, active concerns, and the care team will live here.')}`;
+        case 'notifs':
+          return `${head('Gentle nudges')}${calmSoon('Notifications are being wired in', 'Nothing urgent — just a few things, when you have a moment.')}`;
+        default:
+          return `${head('Coming soon')}${calmSoon('Being wired in', 'This screen is on the way.')}`;
+      }
+    }
+
     function renderClientDashboard() {
       if (state.cases.length === 0) {
         const subStatus = state.profile?.subscription_status;
@@ -9630,7 +9881,14 @@ function renderVaccineDueAlerts(vaccines) {
       const SUBSCRIPTION_GATE_BYPASS_VIEWS = new Set([
         'onboarding', 'add-pet', 'profile-settings', 'subscribe',
       ]);
-      if (role === 'client' && state.profile && !hasActiveAccess(state.profile) && !SUBSCRIPTION_GATE_BYPASS_VIEWS.has(state.view)) {
+      if (role === 'client' && state.view === 'client-dashboard' && !state.calmOptOut && isCalmClientEnabled(state.profile)) {
+        // Calm Client experience (feature-flagged · allowlist-gated). For opted-in
+        // client accounts on their home view this renders the new 4-tab UI in place
+        // of both the classic dashboard and the hard paywall (the calm UI presents
+        // trial/subscription as soft read-only itself). All other views/roles fall
+        // through unchanged. state.calmOptOut is the in-session "switch to classic".
+        html = renderCalmClient();
+      } else if (role === 'client' && state.profile && !hasActiveAccess(state.profile) && !SUBSCRIPTION_GATE_BYPASS_VIEWS.has(state.view)) {
         // Paywall path: set html and fall through so post-render hooks (modal overlay, billing-success toast, etc.) still run.
         html = renderClientPaywall();
       } else {
@@ -9829,13 +10087,21 @@ function renderVaccineDueAlerts(vaccines) {
         }).catch(err => console.warn('Chart.js load failed:', err));
       }
 
-      // Typing indicator — broadcast presence on input in chat
+      // Message compose — restore the in-progress draft for this case so a re-render
+      // (selecting a voice memo or image, toggling urgency, etc. all call render())
+      // doesn't wipe what the user has typed. Also broadcast typing presence in chat.
       const _typingInput = document.querySelector('[data-field="message-input"]');
-      if (_typingInput && state.realtimeChannel) {
+      if (_typingInput) {
+        if (window._composeDraft && window._composeDraft.caseId === state.caseId && !_typingInput.value) {
+          _typingInput.value = window._composeDraft.text;
+        }
         _typingInput.addEventListener('input', () => {
-          sendTypingPresence(true);
-          clearTimeout(state._typingTimeout);
-          state._typingTimeout = setTimeout(() => sendTypingPresence(false), 3000);
+          window._composeDraft = { caseId: state.caseId, text: _typingInput.value };
+          if (state.realtimeChannel) {
+            sendTypingPresence(true);
+            clearTimeout(state._typingTimeout);
+            state._typingTimeout = setTimeout(() => sendTypingPresence(false), 3000);
+          }
         });
       }
 
@@ -9968,6 +10234,13 @@ function renderVaccineDueAlerts(vaccines) {
         }
 
         // ═══ NEW FEATURE INLINE ACTIONS (before switch) ═══
+        // ── Calm Client experience (feature-flagged) ──
+        if (action === 'calm-tab')          { state.calmTab = target.dataset.tab || 'today'; state.calmSub = null; state.calmHeavy = false; render(); return; }
+        if (action === 'calm-sub')          { state.calmSub = target.dataset.sub || null; render(); return; }
+        if (action === 'calm-back')         { state.calmSub = null; render(); return; }
+        if (action === 'calm-toggle-heavy') { state.calmHeavy = !state.calmHeavy; render(); return; }
+        if (action === 'calm-toggle-meal')  { state.calmLoggedToday = !state.calmLoggedToday; render(); return; }
+        if (action === 'calm-classic')      { state.calmOptOut = true; showToast('Switched to classic view — refresh to return', 'info'); render(); return; }
         if (action === 'toggle-dark-mode') { toggleDarkMode(); return; }
         if (action === 'save-bio-prompt') {
           const bio = document.querySelector('[data-field="bio-prompt-text"]')?.value.trim() || '';
@@ -13572,6 +13845,7 @@ function renderVaccineDueAlerts(vaccines) {
                 try { await logCareTeamActivity(getCurrentPetId(), 'sent a message'); } catch(_) {}
                 logAudit('create', 'message', newMsg.id, { case_id: state.caseId, role: state.profile.role });
                 if (msgInput) msgInput.value = '';
+                window._composeDraft = null;
                 state.urgencyToggle = false;
                 state.showCannedResponses = false;
                 sendTypingPresence(false);
