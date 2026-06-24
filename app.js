@@ -1094,6 +1094,42 @@
       if (backdrop) backdrop.remove();
     }
 
+    // Step-by-step install instructions for browsers without a programmatic install
+    // prompt (iOS Safari, macOS Safari, Firefox/other). Opened from the PWA banner.
+    function showPwaInstructions(platform) {
+      const shareIcon = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;"><path d="M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8"/><polyline points="16 6 12 2 8 6"/><line x1="12" y1="2" x2="12" y2="15"/></svg>`;
+      let body;
+      if (platform === 'ios') {
+        body = `
+          <p style="margin-bottom:12px;font-size:14px;">Add Vet Buddies to your home screen so it opens like a regular app:</p>
+          <ol style="margin:0 0 8px 18px;padding:0;font-size:14px;line-height:1.7;">
+            <li>In <strong>Safari</strong>, tap the <strong>Share</strong> button ${shareIcon} in the toolbar.</li>
+            <li>Scroll down and tap <strong>Add to Home Screen</strong>.</li>
+            <li>Tap <strong>Add</strong> in the top corner.</li>
+          </ol>
+          <p style="font-size:12px;color:var(--text-secondary);">Note: this only works in Safari, not other iPhone browsers.</p>`;
+      } else if (platform === 'safari') {
+        body = `
+          <p style="margin-bottom:12px;font-size:14px;">Add Vet Buddies to your Dock so it opens like a regular app (Safari 17 or later):</p>
+          <ol style="margin:0 0 8px 18px;padding:0;font-size:14px;line-height:1.7;">
+            <li>In the menu bar, open the <strong>File</strong> menu.</li>
+            <li>Choose <strong>Add to Dock…</strong></li>
+            <li>Confirm the name and click <strong>Add</strong>.</li>
+          </ol>`;
+      } else {
+        body = `
+          <p style="margin-bottom:12px;font-size:14px;">Add Vet Buddies to your device so it opens like a regular app:</p>
+          <ol style="margin:0 0 8px 18px;padding:0;font-size:14px;line-height:1.7;">
+            <li>Open your browser's menu (<strong>⋮</strong> or <strong>☰</strong>).</li>
+            <li>Look for <strong>Install app</strong> or <strong>Add to Home Screen</strong> and tap it.</li>
+            <li>Confirm to finish.</li>
+          </ol>
+          <p style="font-size:12px;color:var(--text-secondary);">Don't see that option? Your browser may not support installing — Chrome, Edge, or Safari work best.</p>`;
+      }
+      showModal('Install Vet Buddies', body,
+        '<button class="btn btn-primary" onclick="closeModal()">Got it</button>');
+    }
+
     function showResetPasswordModal() {
       const bodyHTML = `
         <p style="margin-bottom:16px;">Enter your new password below.</p>
@@ -9844,6 +9880,21 @@ function renderVaccineDueAlerts(vaccines) {
           b.innerHTML = bannerHTML;
           document.body.appendChild(b);
           document.getElementById('pwa-install-btn')?.addEventListener('click', () => { state.pwaInstallPrompt.prompt(); state.pwaInstallPrompt = null; b.remove(); });
+          // Browsers without a native install prompt (iOS Safari, macOS Safari, Firefox/other)
+          // can't install programmatically — give them a button that opens step-by-step help.
+          if (!hasNativePrompt) {
+            const platform = isIOS ? 'ios' : isSafariDesktop ? 'safari' : 'generic';
+            // Swap the verbose inline instructions for a short prompt — the button now carries the steps.
+            const textEl = b.querySelector('.pwa-banner-text');
+            if (textEl) textEl.innerHTML = '<strong>Install Vet Buddies</strong>Get quick access from your home screen';
+            const howBtn = document.createElement('button');
+            howBtn.className = 'btn btn-primary btn-small';
+            howBtn.id = 'pwa-howto-btn';
+            howBtn.textContent = 'How to install';
+            howBtn.addEventListener('click', () => showPwaInstructions(platform));
+            const dismissBtn = b.querySelector('#pwa-dismiss-btn');
+            if (dismissBtn) b.insertBefore(howBtn, dismissBtn); else b.appendChild(howBtn);
+          }
           document.getElementById('pwa-dismiss-btn')?.addEventListener('click', () => { sessionStorage.setItem('pwa-dismissed','1'); localStorage.setItem('pwa-dismissed-date', Date.now().toString()); b.remove(); });
         }
       }
@@ -14057,10 +14108,14 @@ function renderVaccineDueAlerts(vaccines) {
       });
     }
 
-    // PWA install prompt capture
+    // PWA install prompt capture — Chrome/Edge often fire this AFTER the banner has
+    // already drawn its no-button fallback, so refresh the banner to surface the
+    // native Install button now that we have a prompt to fire.
     window.addEventListener('beforeinstallprompt', e => {
       e.preventDefault();
       state.pwaInstallPrompt = e;
+      document.getElementById('pwa-banner')?.remove();
+      if (typeof render === 'function') render();
     });
 
     // Register service worker — force-update any stale SW first
