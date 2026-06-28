@@ -3744,6 +3744,34 @@ async function calculateBuddyScorecard(buddyId) {
       </div>`;
     }
 
+    // The single "one thing to hold today" — derived, never stored. Priority:
+    // an imminent visit → a med running low → today's meds → nothing pressing.
+    function calmDeriveFocus(ctx) {
+      const { pet, petCase } = ctx;
+      const petName = pet?.name || 'your pet';
+      const DAY = 86400000, now = Date.now();
+      const nextAppt = (state.appointments || [])
+        .filter(a => a.case_id === petCase.id && a.scheduled_at && new Date(a.scheduled_at).getTime() >= now)
+        .sort((a, b) => new Date(a.scheduled_at) - new Date(b.scheduled_at))[0];
+      if (nextAppt) {
+        const days = Math.ceil((new Date(nextAppt.scheduled_at).getTime() - now) / DAY);
+        if (days <= 3) {
+          const when = days <= 0 ? 'today' : days === 1 ? 'tomorrow' : `in ${days} days`;
+          return { label: 'COMING UP', line: `${petName}'s visit with Dr. Rodgers is ${when}.`, body: 'Take a quiet moment to note anything you want to ask.', action: { tab: 'visits', text: 'Prepare for the visit' } };
+        }
+      }
+      const meds = (state.petMedications || []).filter(m => m.is_active !== false);
+      const refill = meds.filter(m => m.refill_date && new Date(m.refill_date).getTime() <= now + 7 * DAY)
+        .sort((a, b) => new Date(a.refill_date) - new Date(b.refill_date))[0];
+      if (refill) {
+        return { label: 'WORTH A MOMENT', line: `${refill.name} is running low — time to refill soon.`, body: `Keeping ${petName}'s medication on hand keeps everything steady.`, action: { tab: 'care', text: 'See the care plan' } };
+      }
+      if (meds.length) {
+        return { label: 'RIGHT NOW', line: `Give ${petName} today's meal with their medication.`, body: `A calm, normal moment together — that's all that's needed right now.`, meal: true };
+      }
+      return { label: 'TODAY', line: `Nothing needs doing for ${petName} today.`, body: `Their plan is steady. If you'd like, just spend a quiet moment together.` };
+    }
+
     function renderCalmToday(ctx) {
       const { profile, pet, petCase } = ctx;
       const first = (profile.name || '').trim().split(/\s+/)[0] || 'there';
@@ -3754,12 +3782,21 @@ async function calculateBuddyScorecard(buddyId) {
       const buddyFirst = buddy?.name ? buddy.name.split(/\s+/)[0] : 'your Buddy';
       const trialActive = isTrialActive(profile);
       const trialDays = getTrialDaysRemaining(profile);
+      const focus = calmDeriveFocus(ctx);
       const meal = !!state.calmLoggedToday;
-      const filled = meal ? 4 : 3;
-      const strip = Array.from({ length: 7 }, (_, i) => `<span class="calm-seg ${i < filled ? 'on' : ''}"></span>`).join('');
-      const focusAction = meal
-        ? `<button class="calm-chip-confirm" data-action="calm-toggle-meal">✓ Logged for today 🤍</button>`
-        : `<button class="calm-btn calm-btn--sage" data-action="calm-toggle-meal">Mark today's meal logged</button>`;
+      let focusInner = '';
+      if (focus.meal) {
+        const filled = meal ? 4 : 3;
+        const strip = Array.from({ length: 7 }, (_, i) => `<span class="calm-seg ${i < filled ? 'on' : ''}"></span>`).join('');
+        focusInner = `<div class="calm-strip">${strip}</div>` + (meal
+          ? `<button class="calm-chip-confirm" data-action="calm-toggle-meal">✓ Logged for today 🤍</button>`
+          : `<button class="calm-btn calm-btn--sage" data-action="calm-toggle-meal">Mark today's meal logged</button>`);
+      } else if (focus.action) {
+        focusInner = `<button class="calm-btn calm-btn--sage" data-action="calm-tab" data-tab="${focus.action.tab}">${esc(focus.action.text)}</button>`;
+      }
+      const _now = Date.now();
+      const _nextAppt = (state.appointments || []).filter(a => a.case_id === petCase.id && a.scheduled_at && new Date(a.scheduled_at).getTime() >= _now).sort((a, b) => new Date(a.scheduled_at) - new Date(b.scheduled_at))[0];
+      const visitLabel = _nextAppt ? `Your next visit · ${calmDate(_nextAppt.scheduled_at)}` : 'Your next vet visit';
 
       return `
         <header class="calm-top">
@@ -3775,15 +3812,14 @@ async function calculateBuddyScorecard(buddyId) {
         </div>
         <h1 class="calm-h1">One thing to hold today.</h1>
         <section class="calm-card calm-focus">
-          <div class="calm-label calm-label--sage">RIGHT NOW</div>
-          <div class="calm-focus-line">Give ${esc(petName)} this morning's meal with their medication.</div>
-          <p class="calm-focus-body">A calm, normal start to the day — that's all that's needed right now.</p>
-          <div class="calm-strip">${strip}</div>
-          ${focusAction}
+          <div class="calm-label calm-label--sage">${esc(focus.label)}</div>
+          <div class="calm-focus-line">${esc(focus.line)}</div>
+          <p class="calm-focus-body">${esc(focus.body)}</p>
+          ${focusInner}
         </section>
         <div class="calm-steady"><span class="calm-dot"></span>Everything else is steady. Nothing else needs you today.</div>
         <section class="calm-links">
-          <button class="calm-link" data-action="calm-tab" data-tab="visits"><span>Your next vet visit</span><span class="calm-link-chev">›</span></button>
+          <button class="calm-link" data-action="calm-tab" data-tab="visits"><span>${esc(visitLabel)}</span><span class="calm-link-chev">›</span></button>
           <button class="calm-link" data-action="calm-tab" data-tab="buddy"><span>${esc(buddyFirst)}, your Vet Buddy</span><span class="calm-link-chev">›</span></button>
           <button class="calm-link" data-action="calm-sub" data-sub="billing"><span>Your Buddy plan${trialActive && trialDays != null ? ` · ${trialDays} day${trialDays === 1 ? '' : 's'} left in trial` : ''}</span><span class="calm-link-chev">›</span></button>
         </section>
