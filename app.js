@@ -3685,6 +3685,7 @@ async function calculateBuddyScorecard(buddyId) {
         loadCarePlan(key),
         loadMessages(key),
         loadAppointments(key),
+        loadOwnerCheckin(),
         petId ? loadPetMedications(petId) : Promise.resolve(),
         petId ? loadPetVaccines(petId) : Promise.resolve(),
       ]).then(() => {
@@ -3693,6 +3694,18 @@ async function calculateBuddyScorecard(buddyId) {
         try { subscribeToMessages(key); } catch (e) { console.warn('calm subscribe failed', e); }
         render();
       }).catch(() => { state._calmLoadingFor = null; });
+    }
+    // Wellness history — the owner's full private reflection list (owner-scoped).
+    async function calmLoadCheckins() {
+      if (!state.profile?.id) return;
+      try {
+        const { data } = await sb.from('owner_checkins')
+          .select('id, submitted_at, reflection, generated_summary')
+          .eq('user_id', state.profile.id)
+          .order('submitted_at', { ascending: false });
+        state.ownerCheckins = data || [];
+      } catch (e) { console.warn('calmLoadCheckins failed', e); state.ownerCheckins = []; }
+      render();
     }
 
     function renderCalmClient() {
@@ -4064,8 +4077,30 @@ async function calculateBuddyScorecard(buddyId) {
               : `<button class="calm-btn calm-btn--sage" data-action="calm-toggle-share">Looks right — share with my vet</button>
                  <button class="calm-btn calm-btn--ghost" data-action="calm-sub" data-sub="message">Add or change something</button>`}`;
         }
-        case 'wellness':
-          return `${head('A quiet check-in — for you.')}${calmSoon('Wellness is being wired in', 'A private, prose-first check-in with a gentle AI reflection — no scores, no streaks. Coming in the next step.')}`;
+        case 'wellness': {
+          const last = state.ownerCheckin;
+          const summary = last && last.generated_summary;
+          const submitting = !!state.ownerCheckinSubmitting;
+          return `
+            ${head('A quiet check-in — for you.')}
+            <p class="calm-prose" style="margin-bottom:16px;">A quiet check-in for you, not your pet. Private to you. There's no score and no streak — just write a little, if you'd like.</p>
+            ${summary ? `<section class="calm-card calm-reflect"><div class="calm-label calm-label--sage">A REFLECTION FOR YOU</div><p class="calm-prose calm-italic">${esc(summary)}</p></section>` : ''}
+            <textarea data-field="owner-checkin-reflection" class="calm-reflect-input" placeholder="How are you holding up?" maxlength="2000" ${submitting ? 'disabled' : ''}></textarea>
+            <button class="calm-btn calm-btn--sage" data-action="submit-owner-checkin" ${submitting ? 'disabled' : ''}>${submitting ? 'Saving…' : 'Keep this for myself'}</button>
+            <button class="calm-classic-link" data-action="calm-sub" data-sub="wellHistory" style="margin-top:14px;">Your past check-ins ›</button>`;
+        }
+        case 'wellHistory': {
+          const list = state.ownerCheckins || [];
+          const items = list.length
+            ? list.map(c => `
+              <section class="calm-card calm-reflect">
+                <div class="calm-reflect-date">${esc(calmDate(c.submitted_at))}</div>
+                ${c.reflection ? `<p class="calm-prose calm-italic">${esc(c.reflection)}</p>` : ''}
+                ${c.generated_summary ? `<p class="calm-prose" style="color:var(--c-tan);margin-top:8px;">${esc(c.generated_summary)}</p>` : ''}
+              </section>`).join('')
+            : `<p class="calm-prose" style="color:var(--c-tan);">No check-ins yet — your private record will appear here.</p>`;
+          return `${head('Your check-ins')}<p class="calm-prose" style="margin-bottom:16px;">Private to you. A quiet record of how you've been.</p>${items}`;
+        }
         case 'message': {
           const buddy = ctx.petCase?.assigned_buddy || null;
           const buddyName = buddy?.name || 'Your Vet Buddy';
@@ -10476,7 +10511,7 @@ function renderVaccineDueAlerts(vaccines) {
         // ═══ NEW FEATURE INLINE ACTIONS (before switch) ═══
         // ── Calm Client experience (feature-flagged) ──
         if (action === 'calm-tab')          { state.calmTab = target.dataset.tab || 'today'; state.calmSub = null; state.calmHeavy = false; render(); return; }
-        if (action === 'calm-sub')          { state.calmSub = target.dataset.sub || null; render(); if (state.calmSub === 'message') scrollMessagesToBottom(); return; }
+        if (action === 'calm-sub')          { state.calmSub = target.dataset.sub || null; render(); if (state.calmSub === 'message') scrollMessagesToBottom(); if (state.calmSub === 'wellHistory') calmLoadCheckins(); return; }
         if (action === 'calm-back')         { state.calmSub = null; render(); return; }
         if (action === 'calm-toggle-heavy') { state.calmHeavy = !state.calmHeavy; render(); return; }
         if (action === 'calm-toggle-meal')  { state.calmLoggedToday = !state.calmLoggedToday; render(); return; }

@@ -4755,6 +4755,10 @@
     .calm-doc-note { font-size:12.5px; color: var(--c-tan); text-align:center; margin:4px 0 14px; }
     .calm-shared-confirm { background: var(--c-tint); color: var(--c-tint-text); border-radius:14px; padding:14px 16px; font-size:14px; text-align:center; }
 
+    /* Wellness */
+    .calm-reflect-input { width:100%; border:1px solid var(--c-border); border-radius:14px; padding:14px; font-size:15px; font-family:'DM Sans', sans-serif; resize:vertical; min-height:120px; background:#fff; color: var(--c-text); margin-bottom:12px; }
+    .calm-reflect-date { font-size:12px; font-weight:600; letter-spacing:0.03em; text-transform:uppercase; color: var(--c-tan); margin-bottom:8px; }
+
     .lto-lock-badge {
       display: inline-flex;
       align-items: center;
