@@ -3665,6 +3665,13 @@ async function calculateBuddyScorecard(buddyId) {
       if (!d) return '';
       try { return new Date(d).toLocaleDateString(undefined, { month: 'short', day: 'numeric' }); } catch (e) { return ''; }
     }
+    function calmDateTime(d) {
+      if (!d) return '';
+      try {
+        const dt = new Date(d);
+        return `${dt.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })} · ${dt.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })}`;
+      } catch (e) { return ''; }
+    }
     // Lazily load the active case's care plan + meds + vaccines, then re-render.
     // Tracks the loaded case id so it runs once per pet and never loops.
     function calmEnsureLoaded(petCase) {
@@ -3677,6 +3684,7 @@ async function calculateBuddyScorecard(buddyId) {
       Promise.all([
         loadCarePlan(key),
         loadMessages(key),
+        loadAppointments(key),
         petId ? loadPetMedications(petId) : Promise.resolve(),
         petId ? loadPetVaccines(petId) : Promise.resolve(),
       ]).then(() => {
@@ -3881,10 +3889,53 @@ async function calculateBuddyScorecard(buddyId) {
     }
 
     function renderCalmVisits(ctx) {
-      const { pet } = ctx;
+      const { pet, petCase, profile } = ctx;
+      const petName = pet?.name || 'your pet';
+      const cp = (state.carePlan && state.carePlan.case_id === petCase.id) ? state.carePlan : null;
+      const now = Date.now();
+      const appts = (state.appointments || []).filter(a => a.case_id === petCase.id);
+      const upcoming = appts.filter(a => a.scheduled_at && new Date(a.scheduled_at).getTime() >= now);
+      const nextAppt = upcoming[0] || null;
+      const apptLabel = nextAppt ? calmDateTime(nextAppt.scheduled_at)
+        : (cp && cp.next_appointment_at ? calmDateTime(cp.next_appointment_at) : '');
+      const apptTitle = (nextAppt && nextAppt.title) || (cp && cp.next_appointment_title) || 'Next visit';
+      const openQs = (state.openQuestions || []).filter(q => (q.status || 'open') !== 'resolved');
+
+      const headBlock = apptLabel ? `
+        <div class="calm-sub-head">
+          <div class="calm-label">VISIT PREP</div>
+          <h2 class="calm-h2">${esc(apptLabel)}</h2>
+          <div class="calm-visit-clinic">${esc(apptTitle)} · Dr. Rodgers, Rodgers Veterinary Care</div>
+        </div>` : `
+        <div class="calm-sub-head">
+          <div class="calm-label">VISIT PREP</div>
+          <h2 class="calm-h2">No visit scheduled yet</h2>
+          <div class="calm-visit-clinic">When your Buddy sets up ${esc(petName)}'s next visit with Dr. Rodgers, it'll appear here.</div>
+        </div>`;
+
+      const qList = openQs.length
+        ? openQs.map(q => `
+          <div class="calm-qcard">
+            <div class="calm-qcard-q">${esc(q.question)}</div>
+            ${q.context ? `<div class="calm-qcard-ctx">${esc(q.context)}</div>` : ''}
+          </div>`).join('')
+        : `<p class="calm-prose" style="color:var(--c-tan);">No questions yet — add anything you'd like to remember to ask.</p>`;
+
+      const addQ = hasWriteAccess(profile) ? `
+        <div class="calm-addq">
+          <textarea data-field="question-text" class="calm-addq-input" placeholder="Add a question for the visit…" rows="1" maxlength="500"></textarea>
+          <button class="calm-addq-btn" data-action="save-new-question">Add</button>
+        </div>` : '';
+
       return `
-        <div class="calm-sub-head"><div class="calm-label">VISIT PREP</div><h2 class="calm-h2">Preparing for your next visit</h2></div>
-        ${calmSoon('Visit prep is being wired in', "Your next appointment, the questions " + (pet?.name || 'your pet') + "'s Buddy prepped, and what gets shared with Dr. Rodgers will live here.")}
+        ${headBlock}
+        <section class="calm-card calm-section">
+          <div class="calm-section-title">Questions to bring</div>
+          ${qList}
+          ${addQ}
+        </section>
+        <section class="calm-card calm-reassure">Your Buddy shares a short summary with Dr. Rodgers beforehand. They help you make the most of the visit — they never replace your vet.</section>
+        <button class="calm-bridge-link" data-action="calm-sub" data-sub="bridge">See what your Buddy shares with your vet ›</button>
       `;
     }
 
@@ -3954,6 +4005,28 @@ async function calculateBuddyScorecard(buddyId) {
               <a class="calm-btn calm-btn--sage" href="${esc(CONFIG.STRIPE_PAYMENT_LINK)}" target="_blank" rel="noopener">Continue my plan</a>
               <button class="calm-btn calm-btn--ghost" data-action="nav-subscribe">Manage or pause</button>
             </section>`;
+        }
+        case 'bridge': {
+          const cp = (state.carePlan && state.carePlan.case_id === ctx.petCase.id) ? state.carePlan : null;
+          const meds = (state.petMedications || []).filter(m => m.is_active !== false);
+          const openQs = (state.openQuestions || []).filter(q => (q.status || 'open') !== 'resolved');
+          const dx = (state.diagnoses || [])[0];
+          const medsLine = meds.length ? meds.map(m => esc(m.name)).join(', ') : 'No active medications recorded';
+          const reason = (dx && dx.condition_name) || (cp && cp.summary) || 'Wellness / follow-up';
+          const shared = !!state.calmShared;
+          return `
+            ${head('What your Buddy shares')}
+            <section class="calm-card calm-doc">
+              <div class="calm-doc-row"><div class="calm-doc-k">Pet</div><div class="calm-doc-v">${esc(pet?.name || '—')}${pet?.species ? ' · ' + esc(pet.species) : ''}</div></div>
+              <div class="calm-doc-row"><div class="calm-doc-k">Reason for visit</div><div class="calm-doc-v">${esc(reason)}</div></div>
+              <div class="calm-doc-row"><div class="calm-doc-k">Current care</div><div class="calm-doc-v">${medsLine}</div></div>
+              <div class="calm-doc-row"><div class="calm-doc-k">Your questions</div><div class="calm-doc-v">${openQs.length ? openQs.map(q => esc(q.question)).join('<br>') : '—'}</div></div>
+            </section>
+            <p class="calm-doc-note">You're always in control. Nothing reaches Dr. Rodgers until you say so.</p>
+            ${shared
+              ? `<div class="calm-shared-confirm">✓ Shared with Dr. Rodgers. Your Buddy will follow up with you after the visit.</div>`
+              : `<button class="calm-btn calm-btn--sage" data-action="calm-toggle-share">Looks right — share with my vet</button>
+                 <button class="calm-btn calm-btn--ghost" data-action="calm-sub" data-sub="message">Add or change something</button>`}`;
         }
         case 'wellness':
           return `${head('A quiet check-in — for you.')}${calmSoon('Wellness is being wired in', 'A private, prose-first check-in with a gentle AI reflection — no scores, no streaks. Coming in the next step.')}`;
@@ -10371,6 +10444,9 @@ function renderVaccineDueAlerts(vaccines) {
         if (action === 'calm-back')         { state.calmSub = null; render(); return; }
         if (action === 'calm-toggle-heavy') { state.calmHeavy = !state.calmHeavy; render(); return; }
         if (action === 'calm-toggle-meal')  { state.calmLoggedToday = !state.calmLoggedToday; render(); return; }
+        // Bridge "share with my vet" — visual confirmation only for now (a real
+        // provider/partner-clinic push is a later enhancement); kept owner-explicit.
+        if (action === 'calm-toggle-share') { state.calmShared = true; showToast('Shared with Dr. Rodgers', 'success'); render(); return; }
         if (action === 'calm-classic')      { state.calmOptOut = true; showToast('Switched to classic view — refresh to return', 'info'); render(); return; }
         if (action === 'toggle-dark-mode') { toggleDarkMode(); return; }
         if (action === 'save-bio-prompt') {
