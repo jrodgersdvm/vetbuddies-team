@@ -3945,7 +3945,8 @@ async function calculateBuddyScorecard(buddyId) {
 
       const body = oqCard + medsCard + dietCard + followCard + howCard;
       const empty = body ? '' : `<div class="calm-soon"><div class="calm-soon-icon">🌱</div><div class="calm-soon-title">Your plan is just beginning</div><div class="calm-soon-sub">${esc(petName)}'s Living Care Plan will fill in as you and your Buddy build it together.</div></div>`;
-      return header + body + empty;
+      const storyLink = `<button class="calm-bridge-link" data-action="calm-sub" data-sub="story">${esc(petName)}'s story ›</button>`;
+      return header + body + empty + storyLink;
     }
 
     function renderCalmVisits(ctx) {
@@ -4165,6 +4166,7 @@ async function calculateBuddyScorecard(buddyId) {
             </div>
             ${concerns ? `<section class="calm-card calm-section"><div class="calm-section-title">Active health concerns</div>${concerns}</section>` : ''}
             <section class="calm-card calm-section"><div class="calm-section-title">${esc(pet?.name || 'Your pet')}'s care team</div>${teamHtml}</section>
+            <button class="calm-bridge-link" data-action="calm-sub" data-sub="story">${esc(pet?.name || 'Your pet')}'s story ›</button>
             <button class="calm-bridge-link" data-action="calm-sub" data-sub="health">Health snapshot ›</button>`;
         }
         case 'health': {
@@ -4182,6 +4184,29 @@ async function calculateBuddyScorecard(buddyId) {
             ${head('Health snapshot')}
             <p class="calm-prose" style="margin-bottom:16px;">A gentle overview — not a medical record. Your vet and Buddy keep the full picture.</p>
             <section class="calm-card calm-section">${rowsHtml || '<p class="calm-prose" style="color:var(--c-tan);">Nothing recorded yet.</p>'}</section>`;
+        }
+        case 'story': {
+          const story = pet?.care_story || '';
+          const legacy = !!pet?.legacy_mode;
+          const editing = !!state.calmStoryEdit;
+          const intro = legacy
+            ? `In loving memory of ${esc(pet?.name || 'your pet')}. A place to hold the moments you shared.`
+            : `${esc(pet?.name || 'Your pet')}'s story — the moments worth remembering, in your words.`;
+          const body = editing
+            ? `<textarea data-field="calm-story-text" class="calm-reflect-input" placeholder="Write a moment, a memory, anything you'd like to keep…">${esc(story)}</textarea>
+               <button class="calm-btn calm-btn--sage" data-action="calm-save-story">Save</button>
+               <button class="calm-classic-link" data-action="calm-cancel-story" style="margin-top:12px;">Cancel</button>`
+            : (story
+              ? `<section class="calm-card"><p class="calm-prose" style="white-space:pre-wrap;">${esc(story)}</p></section>
+                 <button class="calm-btn calm-btn--ghost" data-action="calm-edit-story">Add to the story</button>`
+              : `<div class="calm-soon"><div class="calm-soon-icon">🤍</div><div class="calm-soon-sub">No moments yet. When you're ready, add the first.</div></div>
+                 <button class="calm-btn calm-btn--sage" data-action="calm-edit-story">Begin the story</button>`);
+          return `
+            ${head((pet?.name || 'Pet') + "'s story")}
+            ${legacy ? `<div class="calm-memorial-label">In loving memory</div>` : ''}
+            <p class="calm-prose" style="margin-bottom:16px;">${intro}</p>
+            ${body}
+            <button class="calm-classic-link" data-action="calm-toggle-legacy" style="margin-top:18px;">${legacy ? 'Turn off memorial mode' : 'Turn on memorial mode'}</button>`;
         }
         case 'notifs': {
           const now = Date.now();
@@ -10574,13 +10599,46 @@ function renderVaccineDueAlerts(vaccines) {
         // ═══ NEW FEATURE INLINE ACTIONS (before switch) ═══
         // ── Calm Client experience (feature-flagged) ──
         if (action === 'calm-tab')          { state.calmTab = target.dataset.tab || 'today'; state.calmSub = null; state.calmHeavy = false; render(); return; }
-        if (action === 'calm-sub')          { state.calmSub = target.dataset.sub || null; render(); if (state.calmSub === 'message') scrollMessagesToBottom(); if (state.calmSub === 'wellHistory') calmLoadCheckins(); return; }
+        if (action === 'calm-sub')          { state.calmStoryEdit = false; state.calmSub = target.dataset.sub || null; render(); if (state.calmSub === 'message') scrollMessagesToBottom(); if (state.calmSub === 'wellHistory') calmLoadCheckins(); return; }
         if (action === 'calm-back')         { state.calmSub = null; render(); return; }
         if (action === 'calm-toggle-heavy') { state.calmHeavy = !state.calmHeavy; render(); return; }
         if (action === 'calm-toggle-meal')  { state.calmLoggedToday = !state.calmLoggedToday; render(); return; }
         // Bridge "share with my vet" — visual confirmation only for now (a real
         // provider/partner-clinic push is a later enhancement); kept owner-explicit.
         if (action === 'calm-toggle-share') { state.calmShared = true; showToast('Shared with Dr. Rodgers', 'success'); render(); return; }
+        // Care Story (minimal): prose lives in pets.care_story, memorial in pets.legacy_mode.
+        if (action === 'calm-edit-story')   { state.calmStoryEdit = true; render(); return; }
+        if (action === 'calm-cancel-story') { state.calmStoryEdit = false; render(); return; }
+        if (action === 'calm-save-story') {
+          const el = document.querySelector('[data-field="calm-story-text"]');
+          const text = el ? el.value.trim() : '';
+          const pet = state.currentCase?.pets;
+          if (!pet?.id) return;
+          try {
+            const { error } = await sb.from('pets').update({ care_story: text || null }).eq('id', pet.id);
+            if (error) throw error;
+            (state.cases || []).forEach(c => { if (c.pets && c.pets.id === pet.id) c.pets.care_story = text; });
+            pet.care_story = text;
+            state.calmStoryEdit = false;
+            showToast('Saved to the story', 'success');
+            render();
+          } catch (e) { showToast(e.message || 'Could not save', 'error'); }
+          return;
+        }
+        if (action === 'calm-toggle-legacy') {
+          const pet = state.currentCase?.pets;
+          if (!pet?.id) return;
+          const next = !pet.legacy_mode;
+          try {
+            const { error } = await sb.from('pets').update({ legacy_mode: next }).eq('id', pet.id);
+            if (error) throw error;
+            (state.cases || []).forEach(c => { if (c.pets && c.pets.id === pet.id) c.pets.legacy_mode = next; });
+            pet.legacy_mode = next;
+            showToast(next ? 'Memorial mode on' : 'Memorial mode off', 'success');
+            render();
+          } catch (e) { showToast(e.message || 'Could not update', 'error'); }
+          return;
+        }
         if (action === 'calm-classic')      { state.calmOptOut = true; showToast('Switched to classic view — refresh to return', 'info'); render(); return; }
         if (action === 'toggle-dark-mode') { toggleDarkMode(); return; }
         if (action === 'save-bio-prompt') {

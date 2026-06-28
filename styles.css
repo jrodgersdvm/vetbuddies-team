@@ -4778,6 +4778,9 @@
     .calm-nudge-title { font-size:14px; color: var(--c-forest); line-height:1.4; }
     .calm-nudge-time { font-size:12px; color: var(--c-tan); margin-top:3px; }
 
+    /* Care Story / Legacy */
+    .calm-memorial-label { text-align:center; font-family:'Fraunces', serif; font-style:italic; color: var(--c-tan); font-size:14px; letter-spacing:0.04em; margin-bottom:12px; }
+
     .lto-lock-badge {
       display: inline-flex;
       align-items: center;
