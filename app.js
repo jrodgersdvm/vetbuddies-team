@@ -3672,6 +3672,16 @@ async function calculateBuddyScorecard(buddyId) {
         return `${dt.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })} · ${dt.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })}`;
       } catch (e) { return ''; }
     }
+    function calmAge(dob) {
+      if (!dob) return '';
+      try {
+        const d = new Date(dob), now = new Date();
+        let yrs = now.getFullYear() - d.getFullYear();
+        const m = now.getMonth() - d.getMonth();
+        if (m < 0 || (m === 0 && now.getDate() < d.getDate())) yrs--;
+        return yrs < 1 ? '< 1 yr' : `${yrs} yr${yrs === 1 ? '' : 's'}`;
+      } catch (e) { return ''; }
+    }
     // Lazily load the active case's care plan + meds + vaccines, then re-render.
     // Tracks the loaded case id so it runs once per pet and never loops.
     function calmEnsureLoaded(petCase) {
@@ -3688,6 +3698,7 @@ async function calculateBuddyScorecard(buddyId) {
         loadOwnerCheckin(),
         petId ? loadPetMedications(petId) : Promise.resolve(),
         petId ? loadPetVaccines(petId) : Promise.resolve(),
+        petId ? loadPetVitals(petId) : Promise.resolve(),
       ]).then(() => {
         state._calmLoadedFor = key;
         state._calmLoadingFor = null;
@@ -4131,10 +4142,62 @@ async function calculateBuddyScorecard(buddyId) {
             <div id="typing-indicator" class="calm-typing" style="display:none;"></div>
             ${composer}`;
         }
-        case 'profile':
-          return `${head((pet?.name || 'Pet') + "'s profile")}${calmSoon('Pet profile is being wired in', 'Photos, breed, age, weight, active concerns, and the care team will live here.')}`;
-        case 'notifs':
-          return `${head('Gentle nudges')}${calmSoon('Notifications are being wired in', 'Nothing urgent — just a few things, when you have a moment.')}`;
+        case 'profile': {
+          const cp = (state.carePlan && state.carePlan.case_id === ctx.petCase.id) ? state.carePlan : null;
+          const dx = (state.diagnoses || []);
+          const buddy = ctx.petCase?.assigned_buddy || null;
+          const providers = state.careProviders || [];
+          const metaBits = [pet?.breed, calmAge(pet?.dob), pet?.weight].filter(Boolean);
+          const concerns = dx.length
+            ? dx.map(d => `<div class="calm-concern"><div class="calm-concern-name">${esc(d.condition_name)}</div>${d.diagnosed_on ? `<div class="calm-concern-meta">since ${esc(calmDate(d.diagnosed_on))}</div>` : ''}</div>`).join('')
+            : '';
+          const team = [];
+          if (buddy) team.push({ name: buddy.name, role: 'Your Vet Buddy', initial: (buddy.name || 'B')[0] });
+          team.push({ name: 'Dr. Rodgers', role: 'Supervising DVM', initial: 'R' });
+          providers.forEach(p => team.push({ name: p.provider_name, role: p.role || p.clinic_name || 'Care team', initial: (p.provider_name || '?')[0] }));
+          const teamHtml = team.map(t => `<div class="calm-team-row"><div class="calm-team-av">${esc((t.initial || '?').toUpperCase())}</div><div><div class="calm-team-name">${esc(t.name || '—')}</div><div class="calm-team-role">${esc(t.role)}</div></div></div>`).join('');
+          return `
+            ${head((pet?.name || 'Pet') + "'s profile")}
+            <div class="calm-profile-hero">
+              ${calmPetAvatar(pet, 'calm-profile-photo')}
+              <div class="calm-profile-name">${esc(pet?.name || 'Your pet')}</div>
+              ${metaBits.length ? `<div class="calm-profile-meta">${metaBits.map(esc).join(' · ')}</div>` : ''}
+            </div>
+            ${concerns ? `<section class="calm-card calm-section"><div class="calm-section-title">Active health concerns</div>${concerns}</section>` : ''}
+            <section class="calm-card calm-section"><div class="calm-section-title">${esc(pet?.name || 'Your pet')}'s care team</div>${teamHtml}</section>
+            <button class="calm-bridge-link" data-action="calm-sub" data-sub="health">Health snapshot ›</button>`;
+        }
+        case 'health': {
+          const vitals = state.petVitals || [];
+          const latestWeight = vitals.find(v => v.weight);
+          const now = Date.now();
+          const upcomingVax = (state.petVaccines || []).filter(v => v.due_date).sort((a, b) => new Date(a.due_date) - new Date(b.due_date)).find(v => new Date(v.due_date).getTime() >= now) || (state.petVaccines || []).filter(v => v.due_date).sort((a, b) => new Date(b.due_date) - new Date(a.due_date))[0];
+          const meds = (state.petMedications || []).filter(m => m.is_active !== false);
+          const rows = [];
+          if (latestWeight) rows.push(['Weight', `${esc(latestWeight.weight)}${latestWeight.recorded_at ? ` · ${esc(calmDate(latestWeight.recorded_at))}` : ''}`]);
+          rows.push(['Active medications', meds.length ? String(meds.length) : 'None recorded']);
+          if (upcomingVax) rows.push(['Vaccine', `${esc(upcomingVax.name)}${upcomingVax.due_date ? ` · due ${esc(calmDate(upcomingVax.due_date))}` : ''}`]);
+          const rowsHtml = rows.map(r => `<div class="calm-row"><div class="calm-row-k">${r[0]}</div><div class="calm-row-v">${r[1]}</div></div>`).join('');
+          return `
+            ${head('Health snapshot')}
+            <p class="calm-prose" style="margin-bottom:16px;">A gentle overview — not a medical record. Your vet and Buddy keep the full picture.</p>
+            <section class="calm-card calm-section">${rowsHtml || '<p class="calm-prose" style="color:var(--c-tan);">Nothing recorded yet.</p>'}</section>`;
+        }
+        case 'notifs': {
+          const now = Date.now();
+          const items = [];
+          const buddyMsgs = (state.messages || []).filter(m => (m.thread_type || 'client') === 'client' && m.sender_role && m.sender_role !== 'client');
+          const lastBuddyMsg = buddyMsgs[buddyMsgs.length - 1];
+          if (lastBuddyMsg) items.push({ icon: '💬', title: `${esc((ctx.petCase?.assigned_buddy?.name || 'Your Buddy').split(/\s+/)[0])} sent you a message`, time: esc(calmDate(lastBuddyMsg.created_at)) });
+          const nextAppt = (state.appointments || []).filter(a => a.scheduled_at && new Date(a.scheduled_at).getTime() >= now).sort((a, b) => new Date(a.scheduled_at) - new Date(b.scheduled_at))[0];
+          if (nextAppt) items.push({ icon: '📅', title: `Visit with Dr. Rodgers · ${esc(calmDateTime(nextAppt.scheduled_at))}`, time: '' });
+          const openQs = (state.openQuestions || []).filter(q => (q.status || 'open') !== 'resolved');
+          if (openQs.length) items.push({ icon: '📝', title: `${openQs.length} question${openQs.length === 1 ? '' : 's'} ready for your next visit`, time: '' });
+          const feed = items.length
+            ? items.map(i => `<div class="calm-nudge"><span class="calm-nudge-icon">${i.icon}</span><div class="calm-nudge-body"><div class="calm-nudge-title">${i.title}</div>${i.time ? `<div class="calm-nudge-time">${i.time}</div>` : ''}</div></div>`).join('')
+            : `<div class="calm-thread-empty">Nothing needs your attention right now. 🤍</div>`;
+          return `${head('Gentle nudges')}<p class="calm-prose" style="margin-bottom:16px;">Nothing urgent. Just a few things, when you have a moment.</p>${feed}`;
+        }
         default:
           return `${head('Coming soon')}${calmSoon('Being wired in', 'This screen is on the way.')}`;
       }
