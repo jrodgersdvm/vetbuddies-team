@@ -25,6 +25,6 @@ const CONFIG = Object.freeze({
   CALM_CLIENT_ENABLED: true,
   CALM_CLIENT_ALLOWLIST: [
     'jrodgersdvm@gmail.com',
-    // 'your-trial-test-client@example.com',  // add your seeded client test account
+    'jsrodgers92@gmail.com',  // Percy's owner — client test account
   ],
 });
