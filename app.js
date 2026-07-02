@@ -199,11 +199,36 @@
         try {
           if (!localStorage.getItem('vb_careplan_redesign_seen')) {
             localStorage.setItem('vb_careplan_redesign_seen', '1');
-            setTimeout(() => showToast('Appointments, Medications, Vaccines & Files all live in your Care Plan — scroll down or use the section pills.', 'info'), 600);
+            setTimeout(() => showToast('Appointments, Medications, Vaccines & Files all live in your Care Plan — scroll down or use the section tabs.', 'info'), 600);
           }
         } catch(e) {}
       }
     }
+
+    // ── Care-plan section nav scroll-spy ──
+    // Highlights the active tab among the 4 grouped sections as the staff care plan
+    // is scrolled. Queries the DOM live each time, so it survives re-renders and
+    // no-ops (early return) on every other view.
+    function paintCarePlanNav() {
+      const nav = document.querySelector('.careplan-section-nav');
+      if (!nav) return;
+      const sections = Array.from(document.querySelectorAll('[data-spy-section]'));
+      if (!sections.length) return;
+      const probe = 140; // just below the sticky nav
+      let current = sections[0].getAttribute('data-spy-section');
+      for (const s of sections) {
+        if (s.getBoundingClientRect().top <= probe) current = s.getAttribute('data-spy-section');
+      }
+      // Snap to the last group once scrolled to the very bottom.
+      if (window.innerHeight + window.scrollY >= document.body.scrollHeight - 4) {
+        current = sections[sections.length - 1].getAttribute('data-spy-section');
+      }
+      nav.querySelectorAll('[data-nav-key]').forEach(btn => {
+        btn.classList.toggle('active', btn.getAttribute('data-nav-key') === current);
+      });
+    }
+    window.addEventListener('scroll', paintCarePlanNav, { passive: true });
+    window.addEventListener('resize', paintCarePlanNav, { passive: true });
 
     // ============================================
     // UI HELPERS (renderBadge, renderAvatar, etc. in utils.js)
@@ -5273,30 +5298,19 @@ async function calculateBuddyScorecard(buddyId) {
         }
       }
 
-      // ── Sticky anchor rail (staff only — clients have a shorter page) ──
+      // ── Sticky section nav (staff only — 4 grouped sections + scroll-spy; clients get a shorter page) ──
+      // The 14 flat anchor pills are consolidated into 4 groups; each nav tab scrolls to a
+      // group header (id="section-<key>") and the scroll-spy highlights the active group.
+      const _cpPetFirst = (state.currentCase?.pets?.name || '').trim();
+      const _cpPlanLabel = _cpPetFirst ? `${esc(_cpPetFirst)}'s Plan` : 'The Plan';
       if (canEdit) {
-        const anchors = [
-          { id: 'messages', label: 'Conversation' },
-          { id: 'engagement', label: 'Engagement' },
-          { id: 'appointments', label: 'Appointments' },
-          { id: 'goals', label: 'Goals' },
-          { id: 'wins', label: 'Wins' },
-          { id: 'documents', label: 'Documents' },
-          { id: 'pet-profile', label: 'Profile' },
-          { id: 'health-record', label: 'Health' },
-          { id: 'diagnoses', label: 'Conditions' },
-          { id: 'open-questions', label: 'Questions' },
-          { id: 'people', label: 'People' },
-          { id: 'providers', label: 'Providers' },
-          { id: 'owner-context', label: 'Context' },
-          { id: 'internal-notes', label: 'Internal' },
+        const navItems = [
+          { key: 'conversation', label: 'Conversation' },
+          { key: 'plan', label: _cpPlanLabel },
+          { key: 'records', label: 'Health Records' },
+          { key: 'team', label: 'People &amp; Providers' },
         ];
-        if (state.profile.role === 'admin') {
-          const _internalIdx = anchors.findIndex(a => a.id === 'internal-notes');
-          anchors.splice(_internalIdx, 0, { id: 'dvm-notes', label: 'DVM' });
-        }
-        if ((state.geneticInsights || []).some(g => g.case_id === state.caseId)) anchors.push({ id: 'genetic', label: 'Genetic' });
-        html += `<div class="care-plan-anchor-rail">${anchors.map(a => `<button class="anchor-pill" data-action="scroll-to-section" data-section="${a.id}">${a.label}</button>`).join('')}</div>`;
+        html += `<div class="careplan-section-nav">${navItems.map((n, i) => `<button class="nav-tab${i === 0 ? ' active' : ''}" data-action="scroll-to-section" data-section="${n.key}" data-nav-key="${n.key}">${n.label}</button>`).join('')}</div>`;
       }
 
       // AI refresh in-progress banner (same treatment as the files tab)
@@ -5312,6 +5326,9 @@ async function calculateBuddyScorecard(buddyId) {
 
       // ── Band A — What's new + primary action ──
 
+      // ── Group 1: Conversation ──
+      if (canEdit) html += `<div id="section-conversation" data-spy-section="conversation" class="careplan-group-header" style="scroll-margin-top:96px;">Conversation</div>`;
+
       // ── Section: Conversation (folded in from the old Messages tab — sits between care content and the engagement log) ──
       html += `<div id="section-messages" class="care-plan-section" style="border-left:4px solid var(--primary);margin-bottom:16px;">
         <div class="section-title" style="display:flex;justify-content:space-between;align-items:center;">
@@ -5321,6 +5338,9 @@ async function calculateBuddyScorecard(buddyId) {
           ${renderMessagesTab()}
         </div>
       </div>`;
+
+      // ── Group 2: <Pet>'s Plan ──
+      if (canEdit) html += `<div id="section-plan" data-spy-section="plan" class="careplan-group-header" style="scroll-margin-top:96px;">${_cpPlanLabel}</div>`;
 
       // ── Section: Engagement (merges lp.engagement_log JSON entries with timeline_entries rows) ──
       {
@@ -5490,6 +5510,9 @@ async function calculateBuddyScorecard(buddyId) {
         </div>` : ''}
       </div>`;
 
+      // ── Group 3: Health Records ──
+      if (canEdit) html += `<div id="section-records" data-spy-section="records" class="careplan-group-header" style="scroll-margin-top:96px;">Health Records</div>`;
+
       // ── Section: Documents (uploaded files; was the Files tab) ──
       html += `<div id="section-documents" class="care-plan-section" style="border-left:4px solid var(--blue);margin-bottom:16px;">
         <div class="section-content">
@@ -5625,6 +5648,9 @@ async function calculateBuddyScorecard(buddyId) {
       }
 
       // ── Section: People (Owner + Buddy + Co-owners + Helpers) ──
+      // ── Group 4: People & Providers ──
+      if (canEdit) html += `<div id="section-team" data-spy-section="team" class="careplan-group-header" style="scroll-margin-top:96px;">People &amp; Providers</div>`;
+
       {
         const pet = state.currentCase?.pets;
         const buddy = state.currentCase?.assigned_buddy;

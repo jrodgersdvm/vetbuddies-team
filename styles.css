@@ -1431,6 +1431,58 @@
       }
     }
 
+    /* Redesigned care-plan section nav — 4 grouped tabs + scroll-spy */
+    .careplan-section-nav {
+      position: sticky;
+      top: 0;
+      z-index: 20;
+      display: flex;
+      gap: 4px;
+      padding: 6px;
+      margin-bottom: 20px;
+      background: var(--card-bg);
+      border-radius: 12px;
+      box-shadow: 0 1px 4px rgba(0,0,0,0.08);
+      overflow-x: auto;
+    }
+    .careplan-section-nav .nav-tab {
+      flex: 1 1 0;
+      font-family: inherit;
+      font-size: 15px;
+      font-weight: 500;
+      padding: 10px 16px;
+      border: none;
+      border-radius: 8px;
+      cursor: pointer;
+      white-space: nowrap;
+      background: transparent;
+      color: var(--text-secondary);
+      transition: background 0.2s, color 0.2s;
+    }
+    .careplan-section-nav .nav-tab:hover {
+      background: rgba(104,149,98,0.15);
+      color: var(--forest);
+    }
+    .careplan-section-nav .nav-tab.active {
+      background: var(--forest);
+      color: #fff;
+      font-weight: 600;
+    }
+    .careplan-group-header {
+      font-family: Georgia, 'Fraunces', 'Times New Roman', serif;
+      font-size: 22px;
+      font-weight: 700;
+      color: var(--forest);
+      margin: 8px 0 12px 4px;
+    }
+    @media (max-width: 768px) {
+      .careplan-section-nav .nav-tab {
+        flex: 0 0 auto;
+        font-size: 14px;
+        padding: 9px 12px;
+      }
+    }
+
     /* CASE DETAIL LAYOUT */
     .case-detail-layout {
       display: grid;
