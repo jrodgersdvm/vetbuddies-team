@@ -230,6 +230,32 @@
     window.addEventListener('scroll', paintCarePlanNav, { passive: true });
     window.addEventListener('resize', paintCarePlanNav, { passive: true });
 
+    // ── Care-plan section order (staff 4-group layout) ──
+    // renderCarePlanBody() emits sections in their historical source order. The staff
+    // 4-group layout wants a different reading order (About-first Plan; Appointments,
+    // Genetic under Health Records; Owner check-ins under the Plan). Rather than
+    // physically relocate six large template blocks, we set the visual order here —
+    // once per render, synchronously before paint (no flicker) — by re-sequencing the
+    // sibling section nodes. Staff-only: no-ops when the group headers aren't present
+    // (clients have no headers and a shorter page).
+    function orderCarePlanSections() {
+      const first = document.getElementById('section-conversation');
+      if (!first) return;
+      const order = [
+        'section-conversation', 'section-messages',
+        'section-plan', 'section-pet-profile', 'section-goals', 'section-wins', 'section-owner-checkins', 'section-engagement',
+        'section-records', 'section-appointments', 'section-health-record', 'section-diagnoses', 'section-open-questions', 'section-genetic', 'section-documents',
+        'section-team', 'section-people', 'section-providers', 'section-owner-context', 'section-handoff-notes', 'section-dvm-notes', 'section-internal-notes',
+      ];
+      let ref = first;
+      for (let i = 1; i < order.length; i++) {
+        const el = document.getElementById(order[i]);
+        if (!el) continue;
+        ref.after(el);
+        ref = el;
+      }
+    }
+
     // ============================================
     // UI HELPERS (renderBadge, renderAvatar, etc. in utils.js)
     // ============================================
@@ -9816,6 +9842,9 @@ function renderVaccineDueAlerts(vaccines) {
       app.innerHTML = html;
 
       // ── Post-render hooks ──────────────────────────────────
+      // Care plan: apply the staff 4-group section order + sync the active nav tab
+      orderCarePlanSections();
+      paintCarePlanNav();
       // LTO countdown timer — start ticking if countdown is visible
       if (document.getElementById('lto-countdown-banner')) {
         startLTOCountdownTimer();
