@@ -120,6 +120,7 @@
       auditLog: [], auditLogs: [], auditActionFilter: 'All', auditEntityFilter: 'All',
       handoffNotes: [], showHandoffForm: false,
       referralStats: { total: 0, converted: 0, pending: 0 },
+      careTeamDirectory: null, // client-only: id -> safe {name, avatar, role} for their buddy + message senders (RLS-blocked users embed)
       showPricingModal: false, healthTimelineEntries: [],
       showNotifSettings: false, show2FA: false,
       notificationSettings: { email_messages: true, email_escalations: true, weekly_digest: false, push_enabled: false },
@@ -1755,6 +1756,10 @@ Your free 30-day trial is active. No credit card on file. We'll be in touch.
           }
           state.cases = allCases;
 
+          // Resolve buddy display names the RLS embed couldn't (see loadCareTeamDirectory).
+          await loadCareTeamDirectory();
+          hydrateCaseBuddies(state.cases);
+
           // Also load pending invites for this user's email
           await loadPendingCoOwnerInvites();
         } else {
@@ -1771,6 +1776,45 @@ Your free 30-day trial is active. No credit card on file. We'll be in touch.
         console.error('loadCases error:', err);
         showToast('Could not load cases. Please refresh.', 'error');
       }
+    }
+
+    // Clients can't read staff/buddy rows on public.users under RLS, so the
+    // assigned_buddy / message-sender embeds come back null. This RPC returns ONLY
+    // safe display fields (name/avatar/role) for the caller's own care team; we cache
+    // it and patch it into cases + messages so real names render (never "Unknown"/"No buddy").
+    async function loadCareTeamDirectory() {
+      if (state.profile?.role !== 'client') return;
+      try {
+        const { data, error } = await sb.rpc('get_care_team_directory');
+        if (error) throw error;
+        const map = {};
+        (data || []).forEach(u => { if (u && u.id) map[u.id] = u; });
+        state.careTeamDirectory = map;
+      } catch (err) {
+        console.warn('care team directory load failed:', err);
+        if (!state.careTeamDirectory) state.careTeamDirectory = {};
+      }
+    }
+
+    // Fill in c.assigned_buddy from the directory when the RLS embed was null.
+    // No-op for staff (directory stays null) — safe to call from any role.
+    function hydrateCaseBuddies(cases) {
+      const dir = state.careTeamDirectory;
+      if (!dir) return;
+      (cases || []).forEach(c => {
+        if (c && !c.assigned_buddy && c.assigned_buddy_id && dir[c.assigned_buddy_id]) {
+          c.assigned_buddy = dir[c.assigned_buddy_id];
+        }
+      });
+    }
+
+    // Fill in m.sender from the directory when the RLS embed was null.
+    function hydrateSenders(msgs) {
+      const dir = state.careTeamDirectory;
+      if (!dir) return;
+      (msgs || []).forEach(m => {
+        if (m && !m.sender && m.sender_id && dir[m.sender_id]) m.sender = dir[m.sender_id];
+      });
     }
 
     async function loadPetCareProfile(petId) {
@@ -1798,6 +1842,7 @@ Your free 30-day trial is active. No credit card on file. We'll be in touch.
         `).eq('id', caseId).single();
         if (!error && data) {
           state.currentCase = data;
+          hydrateCaseBuddies([state.currentCase]);
           return;
         }
         // Fallback: simpler query without named FK aliases
@@ -1812,6 +1857,7 @@ Your free 30-day trial is active. No credit card on file. We'll be in touch.
           const cached = (state.cases || []).find(c => c.id === caseId);
           if (cached?.pets?.owner) d2.pets.owner = cached.pets.owner;
           state.currentCase = d2;
+          hydrateCaseBuddies([state.currentCase]);
           return;
         }
         // Last resort: use cached case from the list
@@ -2158,6 +2204,7 @@ Your free 30-day trial is active. No credit card on file. We'll be in touch.
         `).eq('case_id', caseId).order('created_at', { ascending: true });
         if (error) throw error;
         state.messages = data || [];
+        hydrateSenders(state.messages);
         await _refreshMessageAttachments(state.messages);
 
         // Only auto-mark as read for clients viewing staff messages.
@@ -3376,6 +3423,7 @@ async function calculateBuddyScorecard(buddyId) {
             .eq('id', payload.new.id)
             .single();
           if (!data) return;
+          hydrateSenders([data]);
           state.messages.push(data);
 
           const isStaff = ['admin', 'vet_buddy'].includes(state.profile?.role);
@@ -4343,7 +4391,7 @@ async function calculateBuddyScorecard(buddyId) {
         <div class="card" style="border-left:4px solid #f39c12;background:linear-gradient(135deg,#fffbf0,#fff);margin-bottom:16px;">
           <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px;">
             <div>
-              <div style="font-size:13px;font-weight:700;color:#e67e22;margin-bottom:2px;">🎉 Free Trial Active</div>
+              <div style="font-size:13px;font-weight:700;color:#8a4b16;margin-bottom:2px;">🎉 Free Trial Active</div>
               <div style="font-size:14px;color:var(--text-secondary);">${_trialDays} day${_trialDays !== 1 ? 's' : ''} remaining — subscribe anytime to keep your access.</div>
             </div>
             <button class="btn btn-primary" data-action="nav-subscribe" style="white-space:nowrap;">Choose a Plan</button>
@@ -4501,7 +4549,11 @@ async function calculateBuddyScorecard(buddyId) {
                   const isVoice = msg.attachment_name && /\.(webm|ogg|mp3|wav)$/i.test(msg.attachment_name);
                   return `<div class="chat-bubble ${isOwn ? 'own' : ''}">
                     <div class="chat-content">
-                      <div class="chat-sender">${esc(msg.sender?.name) || 'Unknown'}</div>
+                      <div class="chat-sender">${esc(msg.sender?.name || (
+                        msg.sender_role === 'client' ? (state.profile?.name || 'You')
+                        : msg.sender_role === 'vet_buddy' ? buddyName
+                        : (msg.sender_role === 'admin' || msg.sender_role === 'practice_manager') ? 'Vet Buddies Care Team'
+                        : 'Vet Buddies'))}</div>
                       ${msg.content ? `<div class="chat-text">${esc(msg.content)}</div>` : ''}
                       ${msg.attachment_url ? `<div class="chat-attachment">
                         ${isVoice
@@ -4632,7 +4684,7 @@ async function calculateBuddyScorecard(buddyId) {
             ${fullLog.map(entry => `
               <div style="padding:8px 0;border-bottom:1px solid var(--border);">
                 <div style="font-size:14px;line-height:1.5;">${esc(entry.entry_text)}</div>
-                <div style="font-size:12px;color:var(--text-secondary);margin-top:4px;">— ${esc(entry.created_by) || 'Buddy'} · ${entry.created_at ? formatDate(entry.created_at) : ''}</div>
+                <div style="font-size:12px;color:var(--text-secondary);margin-top:4px;">— ${esc((!entry.created_by || entry.created_by === 'system') ? 'Your care team' : entry.created_by)} · ${entry.created_at ? formatDate(entry.created_at) : ''}</div>
               </div>`).join('')}
           </div>
         </div>` : ''}
@@ -4647,7 +4699,7 @@ async function calculateBuddyScorecard(buddyId) {
             <div style="background:white;border-radius:8px;padding:10px 12px;margin-bottom:6px;border:1px solid #ffe082;">
               <div style="font-weight:600;color:#f57f17;font-size:14px;">🌟 ${esc(m.title)}</div>
               ${m.description ? `<div style="font-size:13px;margin-top:2px;color:var(--text-secondary);">${esc(m.description)}</div>` : ''}
-              <div style="font-size:12px;color:var(--text-secondary);margin-top:4px;">— ${esc(m.created_by) || 'Team'} · ${m.created_at ? formatDate(m.created_at) : ''}</div>
+              <div style="font-size:12px;color:var(--text-secondary);margin-top:4px;">— ${esc((!m.created_by || m.created_by === 'system') ? 'Your care team' : m.created_by)} · ${m.created_at ? formatDate(m.created_at) : ''}</div>
             </div>`).join('')}
         </div>` : ''}
 
@@ -5417,7 +5469,7 @@ async function calculateBuddyScorecard(buddyId) {
             <div class="card" style="border-left: 4px solid #f39c12;">
               <div style="display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px;">
                 <div>
-                  <div style="font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px; color: #e67e22; font-weight: 700; margin-bottom: 4px;">Free Trial</div>
+                  <div style="font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px; color: #8a4b16; font-weight: 700; margin-bottom: 4px;">Free Trial</div>
                   <div style="font-size: 20px; font-weight: 700; color: #336026;">${_days} day${_days !== 1 ? 's' : ''} remaining</div>
                   <div style="font-size:13px;color:var(--text-secondary);margin-top:4px;">Check-ins, Living Care Plan & care coordination</div>
                 </div>
@@ -5760,7 +5812,22 @@ async function calculateBuddyScorecard(buddyId) {
               <button class="btn btn-secondary btn-small" data-action="toggle-mute-case" data-case-id="${state.currentCase.id}" title="${(state.notificationSettings.muted_case_ids || []).includes(state.currentCase.id) ? 'Unmute notifications' : 'Mute notifications'}">${(state.notificationSettings.muted_case_ids || []).includes(state.currentCase.id) ? '🔇 Muted' : '🔔'}</button>
               ${['vet_buddy','admin'].includes(state.profile.role) ? `<button class="btn btn-secondary btn-small" data-action="toggle-raise-escalation" style="border-color:#e74c3c;color:#e74c3c;">${state.showRaiseEscalation ? '✕' : '⚠️ Escalate'}</button>` : ''}
               ${['admin','dvm'].includes(state.profile.role) ? `<button class="btn btn-secondary btn-small" data-action="toggle-legacy-mode" data-pet-id="${pet?.id}" data-current-legacy="${pet?.legacy_mode || false}" style="font-size:11px;">${pet?.legacy_mode ? '🕊 Memorial On' : '🕊 Memorial'}</button>` : ''}
-              ${state.currentCase.assigned_buddy ? renderAvatar(state.currentCase.assigned_buddy.avatar_initials, state.currentCase.assigned_buddy.avatar_color) : '<div style="color: var(--text-secondary);">No buddy</div>'}
+              ${(() => {
+                const _ab = state.currentCase.assigned_buddy;              // profile embed (null for clients under RLS)
+                const _assignedId = state.currentCase.assigned_buddy_id;   // source of truth for "is a buddy assigned"
+                const _clientView = state.profile.role === 'client';
+                if (_ab) {
+                  return `<div style="display:flex;align-items:center;gap:6px;" title="Vet Buddy: ${esc(_ab.name)}">${renderAvatar(_ab.avatar_initials, _ab.avatar_color)}<span style="font-size:13px;font-weight:500;color:var(--text);">${esc(_ab.name)}</span></div>`;
+                }
+                if (_assignedId) {
+                  // A buddy IS assigned — their profile just isn't readable on this surface
+                  // (client RLS). Show a positive indicator; never the false "No buddy".
+                  return `<div style="display:flex;align-items:center;gap:6px;font-size:13px;color:var(--text-secondary);" title="A Vet Buddy is on your care team">🤝 <span style="font-weight:500;">Your Buddy</span></div>`;
+                }
+                return _clientView
+                  ? `<div style="font-size:13px;color:var(--text-secondary);max-width:260px;">We're choosing ${esc(pet?.name || 'your pet')}'s Buddy — you'll hear from them within 48 hours.</div>`
+                  : '<div style="color: var(--text-secondary);">No buddy</div>';
+              })()}
             </div>
           </div>
           ${state.showRaiseEscalation && ['vet_buddy','admin'].includes(state.profile.role) ? `
@@ -5879,14 +5946,24 @@ async function calculateBuddyScorecard(buddyId) {
         const breakdown = (typeof getCompletenessBreakdown === 'function') ? getCompletenessBreakdown() : [];
         const actionableForUser = breakdown.filter(b => isClient ? b.clientActionable : true);
         const showFinish = actionableForUser.length > 0 && completenessScore < 100;
-        html += `<div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:10px 14px;margin-bottom:12px;display:flex;align-items:center;gap:12px;font-size:13px;flex-wrap:wrap;">
-          <span style="font-weight:600;color:var(--text);">🐾 Profile ${completenessScore}% complete</span>
-          <div style="flex:1;background:var(--bg);border-radius:6px;height:6px;overflow:hidden;min-width:80px;max-width:200px;">
-            <div style="width:${completenessScore}%;height:100%;background:${barColor};transition:width .3s ease;"></div>
-          </div>
-          ${showFinish ? `<button class="btn btn-primary btn-small" data-action="open-completeness-modal" style="font-size:12px;padding:4px 12px;">✏️ Finish</button>` : ''}
-          ${completenessScore < 80 && !showFinish ? `<span style="color:var(--text-secondary);font-size:12px;">Upload more records to fill in ${esc(petName)}'s profile.</span>` : ''}
-        </div>`;
+        if (isClient) {
+          // Owner-facing: no score, no progress bar — a warm, optional nudge only.
+          if (showFinish) {
+            html += `<div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:12px 16px;margin-bottom:12px;display:flex;align-items:center;gap:12px;font-size:14px;flex-wrap:wrap;">
+              <span style="flex:1;min-width:200px;color:var(--text);">🐾 A few details would help ${esc(petName)}'s Buddy get to know them better — no rush, we can add them together.</span>
+              <button class="btn btn-primary btn-small" data-action="open-completeness-modal" style="font-size:13px;padding:5px 14px;">Add a detail</button>
+            </div>`;
+          }
+        } else {
+          html += `<div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:10px 14px;margin-bottom:12px;display:flex;align-items:center;gap:12px;font-size:13px;flex-wrap:wrap;">
+            <span style="font-weight:600;color:var(--text);">🐾 Profile ${completenessScore}% complete</span>
+            <div style="flex:1;background:var(--bg);border-radius:6px;height:6px;overflow:hidden;min-width:80px;max-width:200px;">
+              <div style="width:${completenessScore}%;height:100%;background:${barColor};transition:width .3s ease;"></div>
+            </div>
+            ${showFinish ? `<button class="btn btn-primary btn-small" data-action="open-completeness-modal" style="font-size:12px;padding:4px 12px;">✏️ Finish</button>` : ''}
+            ${completenessScore < 80 && !showFinish ? `<span style="color:var(--text-secondary);font-size:12px;">Upload more records to fill in ${esc(petName)}'s profile.</span>` : ''}
+          </div>`;
+        }
       }
 
       // ── Status strip: at-a-glance chips (LCP status, next appt, check-in quota for staff, escalations for staff) ──
@@ -6138,7 +6215,7 @@ async function calculateBuddyScorecard(buddyId) {
           html += `<div style="background:white;border-radius:8px;padding:12px;margin-bottom:8px;border:1px solid #ffe082;">
             <div style="font-weight:600;color:#f57f17;">🌟 ${esc(m.title)}</div>
             ${m.description ? `<div style="font-size:13px;margin-top:4px;">${esc(m.description)}</div>` : ''}
-            <div style="font-size:11px;color:var(--text-secondary);margin-top:4px;">— ${esc(m.created_by) || 'Team'} · ${m.created_at ? formatDate(m.created_at) : ''}</div>
+            <div style="font-size:11px;color:var(--text-secondary);margin-top:4px;">— ${esc((!m.created_by || m.created_by === 'system') ? 'Your care team' : m.created_by)} · ${m.created_at ? formatDate(m.created_at) : ''}</div>
           </div>`;
         }
       }
@@ -6146,7 +6223,7 @@ async function calculateBuddyScorecard(buddyId) {
         ${state.showAddMilestone ? `<div style="background:white;border-radius:8px;padding:14px;margin-top:8px;border:1px solid #ffe082;">
           <div class="form-group"><label>Win Title</label><input type="text" data-field="milestone-title" placeholder="e.g. Percy hit his target weight!" style="width:100%;"></div>
           <div class="form-group"><label>Details (optional)</label><textarea data-field="milestone-desc" placeholder="What happened and why it matters..." style="width:100%;height:50px;"></textarea></div>
-          <button class="btn btn-primary btn-small" data-action="save-milestone" style="background:var(--amber);border-color:var(--amber);">🎉 Save Win</button>
+          <button class="btn btn-primary btn-small" data-action="save-milestone" style="background:#7a5c2e;border-color:#7a5c2e;">🎉 Save Win</button>
         </div>` : ''}
       </div>`;
 
@@ -6214,7 +6291,7 @@ async function calculateBuddyScorecard(buddyId) {
         if (diagnoses.length === 0) {
           html += `<div style="font-size:14px;color:var(--text-secondary);">${isClient
             ? "Your Buddy will add to this as your pet's care journey develops — these are conditions your vet has identified, recorded so we can support you around them."
-            : 'No diagnoses recorded yet — log them as they&rsquo;re shared by the owner&rsquo;s vet (write-in coming next slice).'}</div>`;
+            : 'No diagnoses recorded yet — log them as they&rsquo;re shared by the owner&rsquo;s vet. You&rsquo;ll be able to type these in soon.'}</div>`;
         } else {
           for (const dx of diagnoses) {
             const meta = dx.diagnosing_vet
@@ -6583,7 +6660,7 @@ async function calculateBuddyScorecard(buddyId) {
               <button class="btn btn-primary btn-small" data-action="toggle-add-note">${state.showAddNote ? '✕ Cancel' : '+ Add Note'}</button>
             </div>
             <div style="font-size:11px;color:var(--text-secondary);margin-bottom:10px;">
-              Pinned summary is the running TL;DR. Notes below are dated entries.
+              Pinned summary = the short version at a glance. Notes below are dated entries.
             </div>
             <div class="section-content">
               <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.5px;color:var(--text-secondary);margin-bottom:6px;">Pinned summary</div>
@@ -6658,7 +6735,9 @@ async function calculateBuddyScorecard(buddyId) {
         recipientLabel = `🔒 Internal staff only — <strong>not visible to the client</strong>`;
       } else if (isClient) {
         const parts = [];
-        if (buddyName) parts.push(`<strong>${esc(buddyName)}</strong> (your Vet Buddy)`);
+        if (buddyName) parts.push(buddyForCase?.name
+          ? `<strong>${esc(buddyName)}</strong> (your Vet Buddy)`
+          : `<strong>your Vet Buddy</strong>`);
         parts.push(`<strong>Dr. Rodgers</strong> (DVM)`);
         recipientLabel = `📨 This message goes to: ${parts.join(' + ')}`;
       } else {
@@ -6683,10 +6762,22 @@ async function calculateBuddyScorecard(buddyId) {
           const isVoice = msg.attachment_name && /\.(webm|ogg|mp3|wav)$/i.test(msg.attachment_name);
           const isRead = isOwn && state.profile.role !== 'client' && msg.is_read_by_client;
           const isUrgent = msg.is_urgent;
+          // The sender profile embed (users!sender_id) comes back null whenever the
+          // viewer can't read that user's row under RLS — e.g. a client viewing a
+          // staff message. Fall back to a role-based label (sender_role is always
+          // present on the row) so we never render "Unknown".
+          const senderRoleForBadge = msg.sender?.role || msg.sender_role;
+          const senderLabel = msg.sender?.name || (
+            msg.sender_role === 'client' ? (state.currentCase?.pets?.owner?.name || 'Pet owner')
+            : msg.sender_role === 'vet_buddy' ? (state.currentCase?.assigned_buddy?.name || 'Your Vet Buddy')
+            : (msg.sender_role === 'admin' || msg.sender_role === 'practice_manager') ? 'Vet Buddies Care Team'
+            : msg.sender_role === 'external_vet' ? 'Your Vet'
+            : 'Vet Buddies'
+          );
           html += `
             <div class="chat-bubble ${isOwn ? 'own' : ''}" style="${isUrgent ? 'border-left:3px solid var(--amber);background:#fff8e1;' : ''}">
               <div class="chat-content">
-                <div class="chat-sender">${isUrgent ? '<span style="color:var(--amber);font-weight:700;font-size:11px;margin-right:4px;">🔶 URGENT</span>' : ''}${esc(msg.sender?.name) || 'Unknown'} ${msg.sender?.role ? renderBadge(msg.sender.role) : ''}</div>
+                <div class="chat-sender">${isUrgent ? '<span style="color:var(--amber);font-weight:700;font-size:11px;margin-right:4px;">🔶 URGENT</span>' : ''}${esc(senderLabel)} ${senderRoleForBadge ? renderBadge(senderRoleForBadge) : ''}</div>
                 ${msg.content ? `<div class="chat-text">${esc(msg.content)}</div>` : ''}
                 ${msg.attachment_url ? `<div class="chat-attachment">
                   ${isVoice
@@ -7333,6 +7424,7 @@ async function calculateBuddyScorecard(buddyId) {
 
     function renderVaccinesBody() {
       const canEdit = ['vet_buddy', 'admin', 'client'].includes(state.profile.role);
+      const vaxIsClient = state.profile.role === 'client';
       let html = '';
 
       const pet = state.currentCase?.pets;
@@ -7367,8 +7459,8 @@ async function calculateBuddyScorecard(buddyId) {
           const dueDate = v.due_date ? new Date(v.due_date) : null;
           let statusClass = 'ok', statusLabel = '✅ Up to date';
           if (dueDate) {
-            if (dueDate < today) { statusClass = 'overdue'; statusLabel = '⚠️ Overdue'; }
-            else if (dueDate < thirtyDays) { statusClass = 'due-soon'; statusLabel = '🔔 Due soon'; }
+            if (dueDate < today) { statusClass = 'overdue'; statusLabel = vaxIsClient ? 'Due for a catch-up' : '⚠️ Overdue'; }
+            else if (dueDate < thirtyDays) { statusClass = 'due-soon'; statusLabel = vaxIsClient ? 'Coming up soon' : '🔔 Due soon'; }
           }
           html += `<div class="vaccine-row" role="listitem">
             <div class="vaccine-status ${statusClass}" aria-hidden="true"></div>
@@ -8797,7 +8889,7 @@ async function calculateBuddyScorecard(buddyId) {
           { label: 'Messages', icon: '💬', action: 'nav-client-messages', badge: state.clientUnreadCount || 0 },
           { label: 'Knowledge Base', icon: '📚', action: 'nav-knowledge-base' },
           { label: 'Health Timeline', icon: '📊', action: 'nav-health-timeline' },
-          { label: 'Referrals', icon: '🎁', action: 'nav-referral-dashboard' },
+          { label: 'Share Vet Buddies', icon: '🎁', action: 'nav-referral-dashboard' },
         ],
         vet_buddy: [
           { label: 'Dashboard', icon: '⭐', action: 'nav-buddy-dashboard' },
@@ -8807,7 +8899,7 @@ async function calculateBuddyScorecard(buddyId) {
           { label: 'Canned Replies', icon: '💬', action: 'nav-canned-responses' },
           { label: 'Availability', icon: '🏖️', action: 'nav-buddy-availability' },
           { label: 'Resources', icon: '📚', action: 'nav-admin-resources' },
-          { label: 'Referrals', icon: '🎁', action: 'nav-referral-dashboard' },
+          { label: 'Share Vet Buddies', icon: '🎁', action: 'nav-referral-dashboard' },
         ],
         admin: [
           { label: 'Dashboard', icon: '📊', action: 'nav-admin-dashboard' },
@@ -8888,7 +8980,7 @@ async function calculateBuddyScorecard(buddyId) {
           { label: 'Messages', icon: '💬', action: 'nav-client-messages', badge: state.clientUnreadCount || state.unreadCount },
           { label: 'Knowledge Base', icon: '📚', action: 'nav-knowledge-base' },
           { label: 'Health Timeline', icon: '📊', action: 'nav-health-timeline' },
-          { label: 'Referrals', icon: '🎁', action: 'nav-referral-dashboard' },
+          { label: 'Share Vet Buddies', icon: '🎁', action: 'nav-referral-dashboard' },
         ],
         vet_buddy: [
           { label: 'Dashboard', icon: '⭐', action: 'nav-buddy-dashboard' },
@@ -9149,9 +9241,9 @@ function renderBuddyScorecard() {
             <div style="font-weight: 600; color: #336026;">${esc(buddy.name)}</div>
             <div style="font-size: 12px; color: var(--text-secondary);">${buddy.role.replace('_', ' ')}</div>
           </div>
-          <div style="width: 70px; height: 70px; border-radius: 50%; background: ${gradeColor}; display: flex; align-items: center; justify-content: center; color: white; font-family: 'Fraunces', serif; font-size: 36px; font-weight: 700; box-shadow: 0 2px 8px rgba(0,0,0,0.1);">
-            ${buddy.performance_grade || 'N/A'}
-          </div>
+          ${(buddy.avg_rating && buddy.avg_rating > 0)
+            ? `<div style="width: 70px; height: 70px; border-radius: 50%; background: ${gradeColor}; display: flex; align-items: center; justify-content: center; color: white; font-family: 'Fraunces', serif; font-size: 36px; font-weight: 700; box-shadow: 0 2px 8px rgba(0,0,0,0.1);">${buddy.performance_grade || 'N/A'}</div>`
+            : `<div style="max-width: 110px; text-align: center; font-size: 12px; font-weight: 600; color: var(--text-secondary); background: #f1efe9; border-radius: 10px; padding: 8px 10px; line-height: 1.35;">Not enough activity yet</div>`}
         </div>
 
         <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px; font-size: 12px;">
@@ -9360,7 +9452,7 @@ function renderReferralDashboard() {
           <div style="font-size: 12px; color: var(--text-secondary); margin-top: 2px;">${esc(ref.referred_client?.email || '')}</div>
         </div>
         <div style="text-align: right;">
-          <span style="background: ${statusColor[ref.status] || '#999'}; color: white; font-size: 11px; font-weight: 600; padding: 4px 8px; border-radius: 4px; text-transform: capitalize;">${ref.status}</span>
+          <span style="background: ${statusColor[ref.status] || '#999'}; color: white; font-size: 11px; font-weight: 600; padding: 4px 8px; border-radius: 4px; text-transform: capitalize;">${ ({ converted: 'Joined', pending: 'Invited', expired: 'Expired' })[ref.status] || ref.status }</span>
           <div style="font-size: 11px; color: var(--text-secondary); margin-top: 4px;">${formatDate(ref.created_at)}</div>
         </div>
       </div>
@@ -9368,15 +9460,15 @@ function renderReferralDashboard() {
   }).join('') : `
     <div class="empty-state" style="padding: 32px;">
       <div class="empty-state-icon">🔗</div>
-      <div class="empty-state-title">No referrals yet</div>
-      <div class="empty-state-text">Share your code to start earning rewards!</div>
+      <div class="empty-state-title">No friends have joined yet</div>
+      <div class="empty-state-text">When someone joins with your code, they'll show up here.</div>
     </div>
   `;
 
   return renderLayout(`
     <div style="max-width: 600px; margin: 0 auto; padding: 24px;">
-      <h1 style="font-family: 'Fraunces', serif; font-size: 28px; font-weight: 700; color: var(--dark); margin-bottom: 8px;">Referral Program</h1>
-      <p style="color: var(--text-secondary); margin-bottom: 24px;">Invite friends and earn rewards.</p>
+      <h1 style="font-family: 'Fraunces', serif; font-size: 28px; font-weight: 700; color: var(--dark); margin-bottom: 8px;">Share Vet Buddies</h1>
+      <p style="color: var(--text-secondary); margin-bottom: 24px;">When a friend joins with your code, you both get a month of thanks from us. 💛</p>
 
       <div class="card referral-code-box" style="padding: 20px; background: linear-gradient(135deg, var(--primary), #336026); color: white; text-align: center; margin-bottom: 24px; border: none;">
         <div style="font-size: 12px; opacity: 0.9; margin-bottom: 8px;">Your Referral Code</div>
@@ -9385,27 +9477,8 @@ function renderReferralDashboard() {
         <button style="background: rgba(255,255,255,0.2); color: white; border: 1px solid white; padding: 8px 16px; border-radius: 6px; cursor: pointer; font-weight: 500;">🔗 Share Link</button>
       </div>
 
-      <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; margin-bottom: 24px;">
-        <div class="card" style="padding: 16px; text-align: center;">
-          <div style="font-size: 12px; color: var(--text-secondary); font-weight: 600; margin-bottom: 6px;">Total Referred</div>
-          <div style="font-size: 24px; font-weight: 700; color: #336026;">${stats.total}</div>
-        </div>
-        <div class="card" style="padding: 16px; text-align: center;">
-          <div style="font-size: 12px; color: var(--text-secondary); font-weight: 600; margin-bottom: 6px;">Converted</div>
-          <div style="font-size: 24px; font-weight: 700; color: var(--green);">${stats.converted}</div>
-        </div>
-        <div class="card" style="padding: 16px; text-align: center;">
-          <div style="font-size: 12px; color: var(--text-secondary); font-weight: 600; margin-bottom: 6px;">Pending</div>
-          <div style="font-size: 24px; font-weight: 700; color: var(--amber);">${stats.pending}</div>
-        </div>
-        <div class="card" style="padding: 16px; text-align: center;">
-          <div style="font-size: 12px; color: var(--text-secondary); font-weight: 600; margin-bottom: 6px;">Rewards Earned</div>
-          <div style="font-size: 24px; font-weight: 700; color: var(--primary);">$${stats.rewards}</div>
-        </div>
-      </div>
-
       <div class="card" style="padding: 16px;">
-        <h3 style="font-weight: 600; margin-bottom: 12px; color: #336026;">Referral History</h3>
+        <h3 style="font-weight: 600; margin-bottom: 12px; color: #336026;">Friends who've joined</h3>
         <div style="display: flex; flex-direction: column; gap: 8px;">
           ${referralItemsHtml}
         </div>
@@ -10510,11 +10583,27 @@ function renderVaccineDueAlerts(vaccines) {
       // doesn't wipe what the user has typed. Also broadcast typing presence in chat.
       const _typingInput = document.querySelector('[data-field="message-input"]');
       if (_typingInput) {
-        if (window._composeDraft && window._composeDraft.caseId === state.caseId && !_typingInput.value) {
-          _typingInput.value = window._composeDraft.text;
+        const _draftKey = state.caseId ? `vb_draft_${state.caseId}_${state.messageThread || 'client'}` : null;
+        // Restore an in-progress draft so a re-render (incoming realtime message,
+        // toggling urgency, attaching a file) never wipes what the user typed. Backed
+        // by localStorage so it also survives a reload / accidental tab close / crash.
+        if (_draftKey && !_typingInput.value) {
+          let _saved = '';
+          try { _saved = localStorage.getItem(_draftKey) || ''; } catch (_) {}
+          if (!_saved && window._composeDraft && window._composeDraft.key === _draftKey) _saved = window._composeDraft.text || '';
+          if (_saved) {
+            _typingInput.value = _saved;
+            try { _typingInput.setSelectionRange(_saved.length, _saved.length); } catch (_) {}
+          }
         }
         _typingInput.addEventListener('input', () => {
-          window._composeDraft = { caseId: state.caseId, text: _typingInput.value };
+          window._composeDraft = { key: _draftKey, text: _typingInput.value };
+          if (_draftKey) {
+            try {
+              if (_typingInput.value) localStorage.setItem(_draftKey, _typingInput.value);
+              else localStorage.removeItem(_draftKey);
+            } catch (_) {}
+          }
           if (state.realtimeChannel) {
             sendTypingPresence(true);
             clearTimeout(state._typingTimeout);
@@ -10616,13 +10705,13 @@ function renderVaccineDueAlerts(vaccines) {
             : actionable.map(function(b){
                 return '<div style="display:flex;align-items:center;gap:12px;padding:12px;border-bottom:1px solid var(--border);">' +
                   '<div style="flex:1;"><div style="font-size:14px;color:var(--text);">' + esc(b.label) + '</div>' +
-                  '<div style="font-size:11px;color:var(--text-secondary);margin-top:2px;">+' + b.points + ' points</div></div>' +
+                  (roleIsClient ? '' : '<div style="font-size:11px;color:var(--text-secondary);margin-top:2px;">+' + b.points + ' points</div>') + '</div>' +
                   '<button class="btn btn-primary btn-small" data-action="' + esc(b.action) + '" style="font-size:12px;">Go →</button>' +
                   '</div>';
               }).join('');
           mh += '<div class="broadcast-overlay" data-action="close-completeness-modal"><div class="broadcast-card" style="max-width:520px;">' +
-            '<div style="font-family:\'Fraunces\',serif;font-size:20px;font-weight:600;margin-bottom:4px;">✏️ Finish your profile</div>' +
-            '<div style="font-size:13px;color:var(--text-secondary);margin-bottom:14px;">Each item below adds to your completeness score. Tap "Go →" to jump to that section.</div>' +
+            '<div style="font-family:\'Fraunces\',serif;font-size:20px;font-weight:600;margin-bottom:4px;">' + (roleIsClient ? '🐾 Add to your profile' : '✏️ Finish your profile') + '</div>' +
+            '<div style="font-size:13px;color:var(--text-secondary);margin-bottom:14px;">' + (roleIsClient ? 'Add whatever you like — every detail helps your Buddy care for your pet. Tap "Go →" to jump to a section.' : 'Each item below adds to your completeness score. Tap "Go →" to jump to that section.') + '</div>' +
             '<div style="border:1px solid var(--border);border-radius:8px;overflow:hidden;">' + rowsHtml + '</div>' +
             '<div style="display:flex;justify-content:flex-end;margin-top:14px;">' +
             '<button class="btn btn-secondary" data-action="close-completeness-modal">Close</button></div></div></div>';
@@ -14300,6 +14389,7 @@ function renderVaccineDueAlerts(vaccines) {
                 logAudit('create', 'message', newMsg.id, { case_id: state.caseId, role: state.profile.role });
                 if (msgInput) msgInput.value = '';
                 window._composeDraft = null;
+                try { localStorage.removeItem(`vb_draft_${state.caseId}_${state.messageThread || 'client'}`); } catch (_) {}
                 state.urgencyToggle = false;
                 state.showCannedResponses = false;
                 sendTypingPresence(false);
