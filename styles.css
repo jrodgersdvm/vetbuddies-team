@@ -1469,12 +1469,21 @@
       font-weight: 600;
     }
     .careplan-group-header {
-      font-family: Georgia, 'Fraunces', 'Times New Roman', serif;
+      font-family: 'Fraunces', Georgia, 'Times New Roman', serif;
       font-size: 22px;
       font-weight: 700;
       color: var(--forest);
-      margin: 8px 0 12px 4px;
+      margin: 18px 0 12px 4px;
     }
+    /* First group header sits right under the sticky nav — trim its top gap. */
+    .careplan-section-nav + .careplan-group-header { margin-top: 4px; }
+
+    /* Card polish — match the case-page mockup: clean stripeless white cards +
+       green edit links. Cards already carry the mockup's radius/shadow/padding and
+       Fraunces/DM Sans type; the inline colored left-borders are the only structural
+       delta, so drop them here (one-line reversible). */
+    .care-plan-section { border-left: 0 !important; }
+    .care-plan-section .section-edit-btn { color: var(--primary); font-weight: 500; }
     @media (max-width: 768px) {
       .careplan-section-nav .nav-tab {
         flex: 0 0 auto;
