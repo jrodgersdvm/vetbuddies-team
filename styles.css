@@ -272,17 +272,17 @@
     }
 
     .btn-primary {
-      background: var(--primary);
+      background: var(--forest);
       color: white;
     }
 
     .btn-primary:hover {
-      background: #567d50;
+      background: #26491c;
     }
 
     .btn-secondary {
       background: white;
-      color: var(--primary);
+      color: var(--forest);
       border: 1px solid var(--primary);
     }
 
@@ -385,12 +385,12 @@
 
     .badge-urgent {
       background: rgba(231, 76, 60, 0.2);
-      color: #e74c3c;
+      color: #c0392b;
     }
 
     .badge-active {
       background: rgba(46, 204, 113, 0.2);
-      color: #2ecc71;
+      color: #1a7a43;
     }
 
     /* STATUS DOT */
