@@ -14936,6 +14936,54 @@ function renderVaccineDueAlerts(vaccines) {
       if (typeof render === 'function') render();
     });
 
+    // ── Graceful update banner ──
+    // When a new deploy is detected, the incoming SW waits (sw.js no longer calls
+    // skipWaiting on install). We surface a non-intrusive "Update available" banner
+    // and only activate + reload when the user taps Refresh — so an installed PWA
+    // never has code swapped mid-session. Replaces the old "nuclear cache-bust"
+    // reload for all future updates.
+    function showUpdateBanner(worker) {
+      if (!worker || document.getElementById('sw-update-banner')) return;
+      const b = document.createElement('div');
+      b.id = 'sw-update-banner';
+      b.className = 'sw-update-banner';
+      b.innerHTML = '<span style="font-size:20px;" aria-hidden="true">✨</span>'
+        + '<div class="sw-update-text"><strong>Update available</strong>Refresh to get the latest version.</div>'
+        + '<button class="swu-refresh" id="sw-update-refresh">Refresh</button>'
+        + '<button class="swu-dismiss" id="sw-update-dismiss" aria-label="Dismiss update">✕</button>';
+      document.body.appendChild(b);
+      document.getElementById('sw-update-dismiss')?.addEventListener('click', () => b.remove());
+      document.getElementById('sw-update-refresh')?.addEventListener('click', () => {
+        const btn = document.getElementById('sw-update-refresh');
+        if (btn) { btn.textContent = 'Updating…'; btn.disabled = true; }
+        let reloaded = false;
+        const doReload = () => { if (reloaded) return; reloaded = true; window.location.reload(); };
+        // The new SW calls clients.claim() on activate → controllerchange fires here.
+        navigator.serviceWorker.addEventListener('controllerchange', doReload, { once: true });
+        worker.postMessage({ type: 'SKIP_WAITING' });
+        // Safety net if controllerchange never fires (e.g. worker died).
+        setTimeout(doReload, 3000);
+      });
+    }
+
+    function wireServiceWorkerUpdates(reg) {
+      if (!reg) return;
+      // An update was already downloaded and is waiting from a previous session.
+      if (reg.waiting && navigator.serviceWorker.controller) showUpdateBanner(reg.waiting);
+      // A new worker begins installing while the app is open.
+      reg.addEventListener('updatefound', () => {
+        const nw = reg.installing;
+        if (!nw) return;
+        nw.addEventListener('statechange', () => {
+          // 'installed' + an existing controller == this is an update, not a first install.
+          if (nw.state === 'installed' && navigator.serviceWorker.controller) showUpdateBanner(nw);
+        });
+      });
+      // Installed PWAs can stay open for days without a navigation — poll for a new
+      // deploy every 30 min so the banner can appear without a manual refresh.
+      setInterval(() => reg.update().catch(() => {}), 30 * 60 * 1000);
+    }
+
     // Register service worker — force-update any stale SW first
     if ('serviceWorker' in navigator) {
       navigator.serviceWorker.getRegistrations().then(regs => {
@@ -14945,6 +14993,7 @@ function renderVaccineDueAlerts(vaccines) {
         return navigator.serviceWorker.register('/sw.js');
       }).then(reg => {
         console.log('SW registered:', reg.scope);
+        wireServiceWorkerUpdates(reg);
       }).catch(err => {
         console.warn('SW registration failed:', err);
       });

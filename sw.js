@@ -1,5 +1,5 @@
 // Service Worker for Vet Buddies
-const CACHE_NAME = 'vetbuddies-v4';
+const CACHE_NAME = 'vetbuddies-v5';
 const STATIC_ASSETS = [
   '/',
   '/index.html',
@@ -12,12 +12,24 @@ const STATIC_ASSETS = [
   '/favicon.ico',
 ];
 
-// Install: pre-cache static shell
+// Install: pre-cache static shell.
+// NOTE: we intentionally do NOT call skipWaiting() here. On an update the new
+// worker stays in "waiting" until the page tells it to activate (see the
+// SKIP_WAITING message handler below). That lets the app show an
+// "Update available" banner and only swap in the new code when the user taps
+// Refresh, instead of changing code out from under an active session.
 self.addEventListener('install', event => {
   event.waitUntil(
     caches.open(CACHE_NAME).then(cache => cache.addAll(STATIC_ASSETS))
   );
-  self.skipWaiting();
+});
+
+// Let the page activate a waiting worker on demand. The "Update available"
+// banner posts this message when the user taps Refresh; skipWaiting() then
+// triggers activate → clients.claim() → controllerchange on the page, which
+// reloads it onto the fresh code.
+self.addEventListener('message', event => {
+  if (event.data && event.data.type === 'SKIP_WAITING') self.skipWaiting();
 });
 
 // Activate: clean up old caches
