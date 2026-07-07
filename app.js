@@ -5134,10 +5134,11 @@ async function calculateBuddyScorecard(buddyId) {
       if (!navigator.serviceWorker || !state.profile || VAPID_PUBLIC_KEY === 'YOUR_VAPID_PUBLIC_KEY_HERE') return;
       try {
         const reg = await navigator.serviceWorker.ready;
-        const existing = await reg.pushManager.getSubscription();
-        if (existing) return; // already subscribed
-        const applicationServerKey = urlBase64ToUint8Array(VAPID_PUBLIC_KEY);
-        const subscription = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey });
+        let subscription = await reg.pushManager.getSubscription();
+        if (!subscription) {
+          const applicationServerKey = urlBase64ToUint8Array(VAPID_PUBLIC_KEY);
+          subscription = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey });
+        }
         const subJson = subscription.toJSON();
         await sb.from('push_subscriptions').upsert({
           user_id: state.profile.id,
