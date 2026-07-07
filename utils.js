@@ -230,17 +230,20 @@ function isQuietHoursActive() {
 }
 
 // ── Pricing helper ───────────────────────────────────────
-// Single-tier pricing. getActivePricing() returns the Buddy plan for any key
-// so legacy callers that ask for 'buddy_plus' or 'buddy_vip' get usable data
-// without crashing.
-function getActivePricing(_planKey) {
+// Three-tier pricing. Accepts 'buddy' | 'buddy_plus' | 'buddy_vip' (unknown
+// keys fall back to Buddy so legacy callers get usable data without crashing).
+function getActivePricing(planKey) {
+  const tierByKey = { buddy: 'Buddy', buddy_plus: 'Buddy+', buddy_vip: 'Buddy VIP' };
+  const tier = tierByKey[planKey] || 'Buddy';
+  const pricing = CONFIG.TIER_PRICING[tier];
   return {
     isLTO: false,
-    price: CONFIG.BUDDY_PRICE_DISPLAY,
-    amount: CONFIG.BUDDY_PRICE_AMOUNT,
-    priceId: CONFIG.STRIPE_PLANS.buddy,
-    regularPrice: CONFIG.BUDDY_PRICE_DISPLAY,
-    regularAmount: CONFIG.BUDDY_PRICE_AMOUNT,
+    tier,
+    price: pricing.display,
+    amount: pricing.amount,
+    priceId: CONFIG.STRIPE_PLANS[planKey] || CONFIG.STRIPE_PLANS.buddy,
+    regularPrice: pricing.display,
+    regularAmount: pricing.amount,
   };
 }
 

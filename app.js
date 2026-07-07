@@ -148,11 +148,6 @@
       _loginInProgress: false,
       // First-login bio prompt (vet buddies without a bio)
       showBioPrompt: false,
-      // Live pricing phase (intro vs regular) + remaining founding-member spots.
-      // Loaded from public.pricing_state during initApp(); safe defaults assume
-      // intro phase so the UI never accidentally renders the regular price if
-      // the network call fails on first paint.
-      pricingState: { intro_subscribers_count: 0, intro_subscriber_cap: 40, phase: 'intro' },
     };
 
     // Bridge state.currentCase into the escalations.js drop-in so its floating
@@ -4152,9 +4147,11 @@ async function calculateBuddyScorecard(buddyId) {
         case 'billing': {
           const trialActive = isTrialActive(profile);
           const days = getTrialDaysRemaining(profile);
+          const tierName = PRICE_TO_NAME[profile?.subscription_tier_stripe] || 'Buddy';
+          const tierPricing = CONFIG.TIER_PRICING[tierName] || CONFIG.TIER_PRICING['Buddy'];
           return `${head('Your Buddy plan')}
             <section class="calm-card calm-bill">
-              <div class="calm-bill-price">${esc(CONFIG.BUDDY_PRICE_DISPLAY)}<span>/ month</span></div>
+              <div class="calm-bill-price">${esc(tierPricing.display)}<span>/ month · ${esc(tierName)}</span></div>
               ${trialActive && days != null ? `<div class="calm-bill-trial">Free trial · ${days} day${days === 1 ? '' : 's'} left</div>` : ''}
               <ul class="calm-bill-list">
                 <li>Your named Vet Buddy, supervised by Dr. Rodgers</li>
@@ -4162,8 +4159,8 @@ async function calculateBuddyScorecard(buddyId) {
                 <li>Messaging, visit prep, and gentle reminders</li>
               </ul>
               <p class="calm-bill-fine">Cancel or pause anytime, no penalty.</p>
-              <a class="calm-btn calm-btn--sage" href="${esc(CONFIG.STRIPE_PAYMENT_LINK)}" target="_blank" rel="noopener">Continue my plan</a>
-              <button class="calm-btn calm-btn--ghost" data-action="nav-subscribe">Manage or pause</button>
+              <button class="calm-btn calm-btn--sage" data-action="nav-subscribe">Continue my plan</button>
+              <button class="calm-btn calm-btn--ghost" data-action="${profile?.subscription_status === 'active' ? 'manage-billing' : 'nav-subscribe'}">Manage or pause</button>
             </section>`;
         }
         case 'bridge': {
@@ -4959,41 +4956,56 @@ async function calculateBuddyScorecard(buddyId) {
     }
 
     // ── Stripe plan config ──────────────────────────────────────────────
-    // Active price is phase-driven: intro (first 40 subscribers, $19.99/mo with
-    // $99 strikethrough) flips to regular ($99/mo) after the cap is
-    // reached. Phase comes from public.pricing_state, loaded at initApp().
-    function getPricingPhase() {
-      const ps = state.pricingState || { phase: 'intro', intro_subscribers_count: 0, intro_subscriber_cap: 40 };
-      const isIntro = ps.phase === 'intro';
-      const spotsLeft = Math.max(0, (ps.intro_subscriber_cap || 40) - (ps.intro_subscribers_count || 0));
-      return {
-        phase: ps.phase,
-        isIntro,
-        spotsLeft,
-        priceId: isIntro ? CONFIG.STRIPE_PLANS.buddy_intro : CONFIG.STRIPE_PLANS.buddy_regular,
-        priceDisplay: isIntro ? CONFIG.INTRO_PRICE_DISPLAY : CONFIG.REGULAR_PRICE_DISPLAY,
-        strikethroughDisplay: isIntro ? CONFIG.REGULAR_PRICE_DISPLAY : null,
-      };
-    }
-
+    // Three-tier pricing (2026-07 Colorado launch): Buddy $19.99 / Buddy+
+    // $29.99 / Buddy VIP $279, all month-to-month. Buddy+ is the highlighted
+    // "Most popular" default. Feature copy mirrors the marketing site.
     function getStripePlans() {
-      const p = getPricingPhase();
       return [
         {
-          id: p.priceId,
+          id: CONFIG.STRIPE_PLANS.buddy,
           name: 'Buddy',
-          price: p.priceDisplay,
-          strikethrough: p.strikethroughDisplay,
+          price: CONFIG.TIER_PRICING['Buddy'].display,
           tier: 'Buddy',
           emoji: '🐾',
+          tagline: 'The essentials — someone who knows your pet, between every visit.',
           features: [
-            'Monthly check-ins from your Vet Buddy',
-            'Digital Living Care Plan',
-            'Care coordination between vet visits',
-            'Escalate-to-DVM when you need another set of eyes',
+            'Dedicated Buddy matched to your pet',
+            'Monthly check-ins from your Buddy',
+            'Living Care Plan & vitals tracking',
+            'Unlimited messaging & DVM escalation',
+          ],
+          highlight: false,
+        },
+        {
+          id: CONFIG.STRIPE_PLANS.buddy_plus,
+          name: 'Buddy+',
+          price: CONFIG.TIER_PRICING['Buddy+'].display,
+          tier: 'Buddy+',
+          emoji: '💚',
+          tagline: 'More eyes on your pet — closer check-ins when things are changing.',
+          features: [
+            'Everything in Buddy',
+            'Weekly check-ins from your Buddy',
+            'Priority responses to your messages',
+            'Appointment prep & post-visit debriefs',
           ],
           highlight: true,
-          spotsLeft: p.isIntro ? p.spotsLeft : null,
+          badge: 'Most popular',
+        },
+        {
+          id: CONFIG.STRIPE_PLANS.buddy_vip,
+          name: 'Buddy VIP',
+          price: CONFIG.TIER_PRICING['Buddy VIP'].display,
+          tier: 'Buddy VIP',
+          emoji: '⭐',
+          tagline: 'Concierge-level support, with Dr. Rodgers directly involved.',
+          features: [
+            'Everything in Buddy+',
+            'Direct line to Dr. Rodgers, DVM',
+            'Same-day responses, seven days a week',
+            'Care coordination with your vet & specialists',
+          ],
+          highlight: false,
         },
       ];
     }
@@ -5001,24 +5013,13 @@ async function calculateBuddyScorecard(buddyId) {
     // Map every known price ID (current + legacy) to its display tier name so
     // any historical subscription's badge still resolves after pricing changes.
     const PRICE_TO_NAME = {
-      [CONFIG.STRIPE_PLANS.buddy_intro]: 'Buddy',
-      [CONFIG.STRIPE_PLANS.buddy_regular]: 'Buddy',
       [CONFIG.STRIPE_PLANS.buddy]: 'Buddy',
+      [CONFIG.STRIPE_PLANS.buddy_plus]: 'Buddy+',
+      [CONFIG.STRIPE_PLANS.buddy_vip]: 'Buddy VIP',
       'price_1TP9jhCoogKs3SGPxdI1Sckz': 'Buddy', // legacy $9.99
-      'price_1TLxfzCoogKs3SGPIctkgMhW': 'Buddy',
-      'price_1TLxg0CoogKs3SGPAdQBsb8d': 'Buddy+',
-      'price_1T7VxVCoogKs3SGPwcXrK0kI': 'Buddy VIP',
+      'price_1T7Vw5CoogKs3SGPv92mnQvk': 'Buddy', // retired $99 regular
+      'price_1T7VwjCoogKs3SGPL9GcM0FL': 'Buddy+', // retired $149
     };
-
-    async function loadPricingState() {
-      try {
-        const { data, error } = await sb.from('pricing_state').select('intro_subscribers_count, intro_subscriber_cap, phase').eq('id', 1).single();
-        if (error) throw error;
-        if (data) state.pricingState = data;
-      } catch (err) {
-        console.warn('loadPricingState failed; using safe defaults:', err);
-      }
-    }
 
     // Trial helpers (getTrialDaysRemaining, isTrialActive, etc.) are in utils.js
     // TIER_LEVELS, FEATURE_MIN_TIER, getTierLevel are in utils.js
@@ -5493,35 +5494,37 @@ async function calculateBuddyScorecard(buddyId) {
           </div>`;
       }
 
-      // Not subscribed — show single-tier plan card
-      const plan = getStripePlans()[0];
-      const strikethroughHtml = plan.strikethrough
-        ? `<span style="text-decoration: line-through; color: var(--text-secondary); font-size: 18px; font-weight: 500; margin-right: 6px;">${plan.strikethrough}</span>`
-        : '';
-      const foundingBadgeHtml = (plan.spotsLeft !== null && plan.spotsLeft > 0)
-        ? `<div style="margin-top: 10px; display: inline-block; background: linear-gradient(135deg,#ffd700,#f5c842); color: #5d4e00; font-size: 12px; font-weight: 700; padding: 4px 12px; border-radius: 20px; letter-spacing: 0.3px;">✨ Founding-member rate — ${plan.spotsLeft} of ${CONFIG.INTRO_SUBSCRIBER_CAP} spots left</div>`
-        : '';
+      // Not subscribed (or trial ended) — show the three-tier plan picker
       return `
         <div class="card">
-          <div class="card-title" style="margin-bottom: 4px;">🐾 Get Started with Vet Buddies</div>
-          <div style="color: var(--text-secondary); font-size: 14px; margin-bottom: 8px;">Your pet's own Living Care Plan — built and maintained by a dedicated trained veterinary professional, with Dr. Rodgers as your clinical safety net.</div>
-          <div style="color: var(--text-secondary); font-size: 13px; margin-bottom: 20px;">Everything you need to stop worrying alone.</div>
-          <div style="max-width: 360px; margin: 0 auto;">
-            <div style="border: 2px solid var(--primary); border-radius: 12px; padding: 24px; background: linear-gradient(135deg, #f0faf9 0%, #fff 100%);">
-              <div style="font-size: 22px; margin-bottom: 6px;">${plan.emoji}</div>
-              <div style="font-size: 17px; font-weight: 700; color: #336026;">${plan.name}</div>
-              <div style="display: flex; align-items: baseline; gap: 6px; margin-top: 6px;">
-                ${strikethroughHtml}
-                <span style="font-size: 28px; font-weight: 700; color: #336026;">${plan.price}</span>
-                <span style="color: var(--text-secondary); font-size: 13px;">/mo</span>
+          <div class="card-title" style="margin-bottom: 4px;">🐾 Pick your Vet Buddies plan</div>
+          <div style="color: var(--text-secondary); font-size: 14px; margin-bottom: 20px;">Your pet's own Living Care Plan — built and maintained by a dedicated trained veterinary professional, with Dr. Rodgers as your clinical safety net. Month-to-month, cancel anytime.</div>
+          ${renderPlanPickerCards()}
+        </div>`;
+    }
+
+    // The three plan cards, shared by the subscription card and pricing modal.
+    // Buddy+ renders pre-highlighted as "Most popular" per launch decision.
+    function renderPlanPickerCards() {
+      const plans = getStripePlans();
+      return `
+        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px;">
+          ${plans.map(plan => `
+            <div style="border: 2px solid ${plan.highlight ? 'var(--primary)' : 'var(--border)'}; border-radius: 12px; padding: 20px 16px; background: ${plan.highlight ? 'linear-gradient(135deg, #f0faf9 0%, #fff 100%)' : 'white'}; display: flex; flex-direction: column; position: relative;">
+              ${plan.badge ? `<div style="position: absolute; top: -10px; left: 50%; transform: translateX(-50%); background: var(--primary); color: white; font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; padding: 3px 10px; border-radius: 12px; white-space: nowrap;">${plan.badge}</div>` : ''}
+              <div style="font-size: 20px; margin-bottom: 4px;">${plan.emoji}</div>
+              <div style="font-size: 16px; font-weight: 700; color: #336026;">${plan.name}</div>
+              <div style="display: flex; align-items: baseline; gap: 4px; margin-top: 4px;">
+                <span style="font-size: 24px; font-weight: 700; color: #336026;">${plan.price}</span>
+                <span style="color: var(--text-secondary); font-size: 12px;">/mo</span>
               </div>
-              ${foundingBadgeHtml}
-              <ul style="list-style: none; padding: 0; margin: 16px 0; font-size: 13px; color: var(--text-secondary);">
-                ${plan.features.map(f => `<li style="padding: 3px 0;">✓ ${f}</li>`).join('')}
+              <div style="font-size: 12px; color: var(--text-secondary); font-style: italic; margin: 8px 0 4px; line-height: 1.4;">${plan.tagline}</div>
+              <ul style="list-style: none; padding: 0; margin: 10px 0 14px; font-size: 12px; color: var(--text-secondary); flex: 1;">
+                ${plan.features.map(f => `<li style="padding: 2px 0;">✓ ${f}</li>`).join('')}
               </ul>
-              <button class="btn btn-primary" data-action="subscribe" data-price-id="${plan.id}" style="width: 100%; font-size: 14px;">Get Started</button>
+              <button class="btn ${plan.highlight ? 'btn-primary' : 'btn-secondary'}" data-action="subscribe" data-price-id="${plan.id}" style="width: 100%; font-size: 13px;">Choose ${plan.name}</button>
             </div>
-          </div>
+          `).join('')}
         </div>`;
     }
 
@@ -5650,10 +5653,9 @@ async function calculateBuddyScorecard(buddyId) {
       </div>`;
 
       // ── Earnings Estimate ──
-      // Tiers match the admin MRR table at renderAdminDashboard. Buddy is the
-      // current $9.99 single tier; Buddy+/VIP are legacy values retained so
-      // historical assignments still compute correctly.
-      const earningsByTier = { 'Buddy': 9.99 * 0.40, 'Buddy+': 149 * 0.40, 'Buddy VIP': 279 * 0.40 };
+      // Tiers match the admin MRR table at renderAdminDashboard and the
+      // three-tier launch pricing: Buddy $19.99 / Buddy+ $29.99 / VIP $279.
+      const earningsByTier = { 'Buddy': 19.99 * 0.40, 'Buddy+': 29.99 * 0.40, 'Buddy VIP': 279 * 0.40 };
       const monthlyEstimate = state.cases.reduce((sum, c) => sum + (earningsByTier[c.subscription_tier] || earningsByTier['Buddy']), 0);
       html += `<div class="card" style="margin-bottom:16px;">
         <div style="display:flex;justify-content:space-between;align-items:center;">
@@ -7180,9 +7182,8 @@ async function calculateBuddyScorecard(buddyId) {
           </div>
         </div>
         ${(() => {
-          // Buddy: current $9.99/mo pricing. Buddy+/Buddy VIP values are retained
-          // so historical cases still contribute accurately to MRR.
-          const tierRevenue = { 'Buddy': 9.99, 'Buddy+': 149, 'Buddy VIP': 279 };
+          // Three-tier launch pricing: Buddy $19.99 / Buddy+ $29.99 / VIP $279.
+          const tierRevenue = { 'Buddy': 19.99, 'Buddy+': 29.99, 'Buddy VIP': 279 };
           const activeCases = state.cases.filter(c => c.status === 'Active' || c.status === 'pending_assignment');
           const mrr = activeCases.reduce((sum, c) => sum + (tierRevenue[c.subscription_tier] || 0), 0);
           const arpu = activeCases.length > 0 ? (mrr / activeCases.length) : 0;
@@ -9012,12 +9013,43 @@ async function calculateBuddyScorecard(buddyId) {
       }
       bottomNavHtml += '</nav>';
 
+      // Read-only pause banner: shown to clients whose trial ended or whose
+      // subscription was canceled. They can still view everything (per the
+      // marketing site: "your account simply pauses"), but write actions are
+      // blocked, so the banner is their persistent path back to a plan.
+      let pausedBannerHtml = '';
+      if (state.profile.role === 'client' &&
+          (isTrialExpired(state.profile) || state.profile.subscription_status === 'canceled')) {
+        const isCanceled = state.profile.subscription_status === 'canceled';
+        pausedBannerHtml = `
+          <div style="background:linear-gradient(135deg,#fff8e6,#fdf3d8);border:1px solid #e8c96a;border-radius:10px;padding:12px 16px;margin-bottom:16px;display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;">
+            <div style="font-size:13px;color:#6b5518;line-height:1.5;">
+              <strong>${isCanceled ? 'Your subscription is canceled' : 'Your free trial has ended'} — your account is paused.</strong>
+              You can still view ${isCanceled ? 'everything' : "your pet's records"}, but messaging your Buddy is off until you pick a plan.
+            </div>
+            <button class="btn btn-primary" data-action="nav-subscribe" style="white-space:nowrap;font-size:13px;">Choose a Plan</button>
+          </div>`;
+      } else if (state.profile.role === 'client' && isTrialActive(state.profile)) {
+        // Countdown nudge for the final week of the trial.
+        const daysLeft = getTrialDaysRemaining(state.profile);
+        if (daysLeft <= 7) {
+          pausedBannerHtml = `
+            <div style="background:linear-gradient(135deg,#f0faf9,#fff);border:1px solid var(--primary);border-radius:10px;padding:10px 16px;margin-bottom:16px;display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;">
+              <div style="font-size:13px;color:#336026;line-height:1.5;">
+                <strong>${daysLeft} day${daysLeft === 1 ? '' : 's'} left in your free trial.</strong>
+                Pick a plan now and you won't lose a beat — month-to-month, cancel anytime.
+              </div>
+              <button class="btn btn-primary" data-action="nav-subscribe" style="white-space:nowrap;font-size:13px;">See Plans</button>
+            </div>`;
+        }
+      }
+
       return `
         <header class="topbar" role="banner">${topbarHtml}</header>
         <div class="sidebar-backdrop ${state.sidebarOpen ? 'visible' : ''}" data-action="close-sidebar" aria-hidden="true"></div>
         <div class="app-container">
           <nav class="sidebar ${state.sidebarOpen ? 'open' : ''}" role="navigation" aria-label="Main navigation">${sidebarHtml}</nav>
-          <main class="main-content" role="main">${content}</main>
+          <main class="main-content" role="main">${pausedBannerHtml}${content}</main>
         </div>
         ${bottomNavHtml}
       `;
@@ -9599,54 +9631,40 @@ function startLTOCountdownTimer() {
 }
 
 function renderPricingModal() {
-  const p = getPricingPhase();
-  const priceId = p.priceId;
-  const priceDisplay = p.priceDisplay;
-  const strikethroughHtml = p.strikethroughDisplay
-    ? `<span style="text-decoration: line-through; color: var(--text-secondary); font-size: 20px; font-weight: 500; margin-right: 8px;">${p.strikethroughDisplay}</span>`
-    : '';
-  const foundingBadgeHtml = (p.isIntro && p.spotsLeft > 0)
-    ? `<div style="margin-top: 8px; display: inline-block; background: linear-gradient(135deg,#ffd700,#f5c842); color: #5d4e00; font-size: 12px; font-weight: 700; padding: 4px 12px; border-radius: 20px; letter-spacing: 0.3px;">✨ Founding-member rate — ${p.spotsLeft} of ${CONFIG.INTRO_SUBSCRIBER_CAP} spots left</div>`
-    : '';
+  const plans = getStripePlans();
 
-  const features = [
-    'Monthly check-ins from your Vet Buddy',
-    'Digital Living Care Plan',
-    'Care coordination between vet visits',
-    'Escalate-to-DVM when you need another set of eyes',
-  ];
-
-  const featuresHtml = features.map(feature => `
-    <li style="display: flex; align-items: flex-start; gap: 8px; margin-bottom: 10px; font-size: 13px; color: #336026;">
-      <span style="color: var(--primary); font-weight: 700; margin-top: 2px;">✓</span>
-      <span>${feature}</span>
-    </li>
+  const planCardsHtml = plans.map(plan => `
+    <div class="card" style="padding: 20px; display: flex; flex-direction: column; border: 2px solid ${plan.highlight ? 'var(--primary)' : 'var(--border)'}; ${plan.highlight ? 'box-shadow: 0 8px 24px rgba(104, 149, 98, 0.15);' : ''} position: relative; margin-bottom: 14px;">
+      ${plan.badge ? `<div style="position: absolute; top: -10px; left: 20px; background: var(--primary); color: white; font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; padding: 3px 10px; border-radius: 12px;">${plan.badge}</div>` : ''}
+      <div style="display: flex; align-items: baseline; justify-content: space-between; gap: 8px; flex-wrap: wrap;">
+        <h3 style="font-family: 'Fraunces', serif; font-size: 20px; font-weight: 700; color: #336026; margin: 0;">${plan.emoji} ${plan.name}</h3>
+        <div style="display: flex; align-items: baseline; gap: 4px;">
+          <span style="font-size: 24px; font-weight: 700; color: #336026;">${plan.price}</span>
+          <span style="color: var(--text-secondary); font-size: 12px;">/month</span>
+        </div>
+      </div>
+      <div style="font-size: 12px; color: var(--text-secondary); font-style: italic; margin: 6px 0 10px;">${plan.tagline}</div>
+      <ul style="flex: 1; margin-bottom: 14px; list-style: none; padding: 0;">
+        ${plan.features.map(feature => `
+          <li style="display: flex; align-items: flex-start; gap: 8px; margin-bottom: 6px; font-size: 13px; color: #336026;">
+            <span style="color: var(--primary); font-weight: 700; margin-top: 2px;">✓</span>
+            <span>${feature}</span>
+          </li>`).join('')}
+      </ul>
+      <button class="${plan.highlight ? 'btn-primary' : 'btn btn-secondary'}" data-action="checkout-stripe" data-price-id="${plan.id}" style="width: 100%; padding: 12px;">Choose ${plan.name}</button>
+    </div>
   `).join('');
 
   return `
     <div class="pricing-modal" style="position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.7); display: flex; align-items: center; justify-content: center; z-index: 1000; padding: 20px;">
-      <div style="background: white; border-radius: 16px; max-width: 420px; width: 100%; max-height: 90vh; overflow-y: auto;">
-        <div style="padding: 32px 24px; border-bottom: 1px solid var(--border); position: relative;">
+      <div style="background: white; border-radius: 16px; max-width: 460px; width: 100%; max-height: 90vh; overflow-y: auto;">
+        <div style="padding: 28px 24px 20px; border-bottom: 1px solid var(--border); position: relative;">
           <button data-action="close-pricing" style="position: absolute; top: 16px; right: 16px; background: none; border: none; font-size: 24px; cursor: pointer; color: #336026;">×</button>
-          <h2 style="font-family: 'Fraunces', serif; font-size: 28px; font-weight: 700; color: #336026; margin-bottom: 8px;">Your Vet Buddies plan</h2>
-          <p style="color: var(--text-secondary);">Everything you need to stop worrying alone.</p>
+          <h2 style="font-family: 'Fraunces', serif; font-size: 26px; font-weight: 700; color: #336026; margin-bottom: 6px;">Pick your plan</h2>
+          <p style="color: var(--text-secondary); margin: 0;">Every plan is month-to-month — switch or cancel anytime.</p>
         </div>
-        <div style="padding: 32px 24px;">
-          <div class="card" style="padding: 24px; display: flex; flex-direction: column; border: 2px solid var(--primary); box-shadow: 0 8px 24px rgba(104, 149, 98, 0.15);">
-            <div style="margin-bottom: 20px;">
-              <h3 style="font-family: 'Fraunces', serif; font-size: 24px; font-weight: 700; color: #336026; margin-bottom: 4px;">Buddy</h3>
-              <div style="display: flex; align-items: baseline; gap: 8px; margin-bottom: 4px;">
-                ${strikethroughHtml}
-                <span style="font-size: 32px; font-weight: 700; color: #336026;">${priceDisplay}</span>
-                <span style="color: var(--text-secondary); font-size: 13px;">/month</span>
-              </div>
-              ${foundingBadgeHtml}
-            </div>
-            <ul style="flex: 1; margin-bottom: 20px; list-style: none;">
-              ${featuresHtml}
-            </ul>
-            <button class="btn-primary" data-action="checkout-stripe" data-price-id="${priceId}" style="width: 100%; padding: 12px;">Get Started</button>
-          </div>
+        <div style="padding: 24px;">
+          ${planCardsHtml}
         </div>
       </div>
     </div>
@@ -10369,6 +10387,16 @@ function renderVaccineDueAlerts(vaccines) {
       const SUBSCRIPTION_GATE_BYPASS_VIEWS = new Set([
         'onboarding', 'add-pet', 'profile-settings', 'subscribe',
       ]);
+      // Read-only pause (launch decision 2026-07): owners whose trial ended or
+      // whose subscription was canceled keep VIEWING their pet's records — the
+      // paused banner in renderLayout nudges them to a plan, and write actions
+      // (send-message etc.) are blocked via hasWriteAccess. Only never-started
+      // ('none') and payment-failed ('past_due') accounts get the hard paywall.
+      const READ_ONLY_PAUSE_VIEWS = new Set([
+        'client-dashboard', 'client-case', 'client-messages',
+      ]);
+      const isPausedReadOnly = role === 'client' && state.profile &&
+        (isTrialExpired(state.profile) || state.profile.subscription_status === 'canceled');
       if (role === 'client' && state.view === 'client-dashboard' && !state.calmOptOut && isCalmClientEnabled(state.profile)) {
         // Calm Client experience (feature-flagged · allowlist-gated). For opted-in
         // client accounts on their home view this renders the new 4-tab UI in place
@@ -10376,7 +10404,9 @@ function renderVaccineDueAlerts(vaccines) {
         // trial/subscription as soft read-only itself). All other views/roles fall
         // through unchanged. state.calmOptOut is the in-session "switch to classic".
         html = renderCalmClient();
-      } else if (role === 'client' && state.profile && !hasActiveAccess(state.profile) && !SUBSCRIPTION_GATE_BYPASS_VIEWS.has(state.view)) {
+      } else if (role === 'client' && state.profile && !hasActiveAccess(state.profile)
+          && !SUBSCRIPTION_GATE_BYPASS_VIEWS.has(state.view)
+          && !(isPausedReadOnly && READ_ONLY_PAUSE_VIEWS.has(state.view))) {
         // Paywall path: set html and fall through so post-render hooks (modal overlay, billing-success toast, etc.) still run.
         html = renderClientPaywall();
       } else {
@@ -14758,11 +14788,6 @@ function renderVaccineDueAlerts(vaccines) {
     async function initApp() {
       // Restore dark mode from localStorage before render to avoid flash
       try { if (localStorage.getItem('vetbuddies_dark_mode') === '1') { state.darkMode = true; document.documentElement.setAttribute('data-theme', 'dark'); } } catch(e) {}
-
-      // Load pricing phase (intro vs regular) before first paint so the pricing
-      // modal and subscribe card don't flash the default before the real values
-      // arrive. Fire-and-forget — safe defaults in state already cover failures.
-      loadPricingState();
 
       // Handle Stripe return redirect
       const urlParams = new URLSearchParams(window.location.search);
