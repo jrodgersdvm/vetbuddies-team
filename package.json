@@ -4,5 +4,8 @@
   "scripts": {
     "dev": "node server.js",
     "test": "node tests/utils.test.js"
+  },
+  "dependencies": {
+    "playwright": "^1.61.1"
   }
 }

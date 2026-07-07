@@ -1,0 +1,4 @@
+# Regenerable intermediates
+*.html
+fonts/google.css
+results.json
