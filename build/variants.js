@@ -13,7 +13,7 @@ const centered = {
   name: 'centered-classic',
   css: `
     .stage { display:flex; flex-direction:column; align-items:center; justify-content:center;
-             text-align:center; padding:130px 110px 300px; }
+             text-align:center; padding:120px 110px 360px; }
     .kicker { font-family:'DM Sans'; font-weight:500; font-size:23px; letter-spacing:.42em;
               text-transform:uppercase; color:${C.sage}; margin-bottom:60px; }
     .headline { font-family:'Lora'; color:${C.ink}; line-height:1.02; }
@@ -27,7 +27,7 @@ const centered = {
   `,
   body: `
     <div class="stage">
-      <div class="kicker">Rodgers Veterinary Care</div>
+      <div class="kicker">Vet Buddies</div>
       <div class="headline">
         <div class="line1">The vet visit ends.</div>
         <div class="line2">We don&rsquo;t<span class="dot">.</span></div>
@@ -36,11 +36,11 @@ const centered = {
       <div class="subhead">One dedicated Buddy who knows your pet&nbsp;&mdash;<br/>and asks <em>before you have to.</em></div>
     </div>
     <img class="logo logo-center" src="__LOGO__" alt="Vet Buddies" />
-    <div class="url url-center">rodgersvetbuddies.com</div>
+    <div class="url url-center">Create a free account<span class="u-sep">&middot;</span><span class="u-web">rodgersvetbuddies.com</span></div>
   `,
   footerCss: `
-    .logo-center { position:absolute; bottom:96px; left:50%; transform:translateX(-50%); width:128px; height:128px; }
-    .url-center { position:absolute; bottom:52px; left:50%; transform:translateX(-50%); }
+    .logo-center { position:absolute; bottom:118px; left:50%; transform:translateX(-50%); width:184px; height:184px; }
+    .url-center { position:absolute; bottom:64px; left:50%; transform:translateX(-50%); }
   `,
 };
 
@@ -64,7 +64,7 @@ const editorial = {
   `,
   body: `
     <div class="stage">
-      <div class="kicker">Rodgers Veterinary Care</div>
+      <div class="kicker">Vet Buddies</div>
       <div class="headline">
         <div class="line1">The vet visit ends.</div>
         <div class="line2">We don&rsquo;t<span class="dot">.</span></div>
@@ -72,11 +72,11 @@ const editorial = {
       <div class="subhead">One dedicated Buddy who knows your pet&nbsp;&mdash; and asks <em>before you have to.</em></div>
     </div>
     <img class="logo logo-left" src="__LOGO__" alt="Vet Buddies" />
-    <div class="url url-right">rodgersvetbuddies.com</div>
+    <div class="url url-right">Create a free account<span class="u-sep">&middot;</span><span class="u-web">rodgersvetbuddies.com</span></div>
   `,
   footerCss: `
-    .logo-left { position:absolute; bottom:88px; left:130px; width:124px; height:124px; }
-    .url-right { position:absolute; bottom:64px; right:130px; }
+    .logo-left { position:absolute; bottom:92px; left:130px; width:188px; height:188px; }
+    .url-right { position:absolute; bottom:152px; right:130px; }
   `,
 };
 
@@ -102,11 +102,11 @@ const poster = {
       <div class="subhead">One dedicated Buddy who knows your pet&nbsp;&mdash;<br/>and asks <em>before you have to.</em></div>
     </div>
     <img class="logo logo-center" src="__LOGO__" alt="Vet Buddies" />
-    <div class="url url-center">rodgersvetbuddies.com</div>
+    <div class="url url-center">Create a free account<span class="u-sep">&middot;</span><span class="u-web">rodgersvetbuddies.com</span></div>
   `,
   footerCss: `
-    .logo-center { position:absolute; bottom:80px; left:50%; transform:translateX(-50%); width:112px; height:112px; }
-    .url-center { position:absolute; bottom:44px; left:50%; transform:translateX(-50%); }
+    .logo-center { position:absolute; bottom:104px; left:50%; transform:translateX(-50%); width:172px; height:172px; }
+    .url-center { position:absolute; bottom:56px; left:50%; transform:translateX(-50%); }
   `,
 };
 
@@ -131,7 +131,7 @@ const stories = {
   `,
   body: `
     <div class="stage">
-      <div class="kicker">Rodgers Veterinary Care</div>
+      <div class="kicker">Vet Buddies</div>
       <div class="headline">
         <div class="line1">The vet visit ends.</div>
         <div class="line2">We don&rsquo;t<span class="dot">.</span></div>
@@ -139,11 +139,11 @@ const stories = {
       <div class="subhead">One dedicated Buddy who knows your pet&nbsp;&mdash; and asks <em>before you have to.</em></div>
     </div>
     <img class="logo logo-left" src="__LOGO__" alt="Vet Buddies" />
-    <div class="url url-right">rodgersvetbuddies.com</div>
+    <div class="url url-right">Create a free account<span class="u-sep">&middot;</span><span class="u-web">rodgersvetbuddies.com</span></div>
   `,
   footerCss: `
-    .logo-left { position:absolute; bottom:120px; left:120px; width:140px; height:140px; }
-    .url-right { position:absolute; bottom:150px; right:120px; }
+    .logo-left { position:absolute; bottom:110px; left:120px; width:216px; height:216px; }
+    .url-right { position:absolute; bottom:182px; right:120px; }
   `,
 };
 

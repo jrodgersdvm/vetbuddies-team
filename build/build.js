@@ -20,8 +20,10 @@ html,body { width:${w}px; height:${h}px; }
           overflow:hidden; }
 .stage { width:100%; height:100%; }
 .logo { display:block; object-fit:contain; border-radius:18px; }
-.url { font-family:'DM Sans'; font-weight:500; font-size:22px; letter-spacing:.06em;
-       color:${C.ink}; opacity:.55; }
+.url { font-family:'DM Sans'; font-weight:500; font-size:25px; letter-spacing:.005em;
+       color:${C.ink}; white-space:nowrap; }
+.url .u-sep { color:${C.burgundy}; margin:0 .5em; }
+.url .u-web { font-weight:600; color:${C.sage}; }
 ${v.css}
 ${v.footerCss}
 </style></head><body><div class="canvas">${body}</div></body></html>`;
