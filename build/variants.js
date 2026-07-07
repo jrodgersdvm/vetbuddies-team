@@ -20,7 +20,7 @@ const centered = {
     .line1 { font-weight:500; font-size:90px; letter-spacing:-.01em; white-space:nowrap; }
     .line2 { font-weight:600; font-style:italic; font-size:148px; letter-spacing:-.02em; margin-top:6px; }
     .dot { color:${C.burgundy}; }
-    .rule { width:120px; height:2px; background:${C.burgundy}; margin:56px 0 44px; border:0; }
+    .rule { width:120px; height:2px; background:${C.sage}; margin:56px 0 44px; border:0; }
     .subhead { font-family:'DM Sans'; font-weight:400; font-size:34px; line-height:1.5;
                color:${C.sage}; max-width:760px; }
     .subhead em { font-style:italic; color:${C.ink}; }
@@ -76,7 +76,7 @@ const editorial = {
   `,
   footerCss: `
     .logo-left { position:absolute; bottom:92px; left:130px; width:188px; height:188px; }
-    .url-right { position:absolute; bottom:152px; right:130px; }
+    .url-right { position:absolute; bottom:170px; right:130px; }
   `,
 };
 
@@ -116,17 +116,17 @@ const stories = {
   w: 1080, h: 1920,
   css: `
     .stage { display:flex; flex-direction:column; align-items:flex-start; justify-content:center;
-             text-align:left; padding:0 120px; height:100%; }
-    .kicker { font-family:'DM Sans'; font-weight:500; font-size:24px; letter-spacing:.4em;
-              text-transform:uppercase; color:${C.sage}; margin-bottom:64px;
+             text-align:left; padding:300px 120px 120px; height:100%; }
+    .kicker { font-family:'DM Sans'; font-weight:500; font-size:25px; letter-spacing:.4em;
+              text-transform:uppercase; color:${C.sage}; margin-bottom:72px;
               display:flex; align-items:center; gap:28px; }
     .kicker::before { content:''; width:72px; height:2px; background:${C.sage}; display:inline-block; }
     .headline { font-family:'Lora'; color:${C.ink}; line-height:1.0; }
-    .line1 { font-weight:500; font-size:104px; letter-spacing:-.015em; }
-    .line2 { font-weight:600; font-style:italic; font-size:176px; letter-spacing:-.025em; margin-top:8px; }
+    .line1 { font-weight:500; font-size:112px; letter-spacing:-.015em; }
+    .line2 { font-weight:600; font-style:italic; font-size:190px; letter-spacing:-.025em; margin-top:10px; }
     .dot { color:${C.burgundy}; }
-    .subhead { font-family:'DM Sans'; font-weight:400; font-size:38px; line-height:1.55;
-               color:${C.ink}; max-width:760px; margin-top:80px; }
+    .subhead { font-family:'DM Sans'; font-weight:400; font-size:40px; line-height:1.55;
+               color:${C.ink}; max-width:780px; margin-top:88px; }
     .subhead em { font-style:italic; color:${C.sage}; font-weight:500; }
   `,
   body: `
@@ -142,8 +142,8 @@ const stories = {
     <div class="url url-right">Create a free account<span class="u-sep">&middot;</span><span class="u-web">rodgersvetbuddies.com</span></div>
   `,
   footerCss: `
-    .logo-left { position:absolute; bottom:110px; left:120px; width:216px; height:216px; }
-    .url-right { position:absolute; bottom:182px; right:120px; }
+    .logo-left { position:absolute; bottom:150px; left:120px; width:216px; height:216px; }
+    .url-right { position:absolute; bottom:228px; right:120px; }
   `,
 };
 

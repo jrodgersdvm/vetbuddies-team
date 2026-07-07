@@ -22,7 +22,7 @@ html,body { width:${w}px; height:${h}px; }
 .logo { display:block; object-fit:contain; border-radius:18px; }
 .url { font-family:'DM Sans'; font-weight:500; font-size:25px; letter-spacing:.005em;
        color:${C.ink}; white-space:nowrap; }
-.url .u-sep { color:${C.burgundy}; margin:0 .5em; }
+.url .u-sep { color:${C.sage}; margin:0 .5em; }
 .url .u-web { font-weight:600; color:${C.sage}; }
 ${v.css}
 ${v.footerCss}
