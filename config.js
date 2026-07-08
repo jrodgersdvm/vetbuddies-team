@@ -23,17 +23,12 @@ const CONFIG = Object.freeze({
   BUDDY_PRICE_DISPLAY: '$19.99',
   BUDDY_PRICE_AMOUNT: 19.99,
   TRIAL_DURATION_DAYS: 30,
-  // ── Calm Client experience (feature-flagged, allowlist-gated) ──
-  // New 4-tab pet-owner UI (Today / Care / Visits / Buddy). Only client-role
-  // users whose email is listed below (case-insensitive) see it; every other
-  // user keeps the current client UI, and all other roles are untouched.
-  // Personal testing override (your browser only): set localStorage 'vb_calm'
-  // to '1' to force it on or '0' to force it off — beats the allowlist for you.
-  // Rollout: add yourself first, then a few real clients, then flip ENABLED
-  // for everyone once you're happy.
+  // ── Calm Client experience (GA 2026-07 · opt-in per device) ──
+  // 4-tab pet-owner UI (Today / Care / Visits / Buddy), available to every
+  // client account. Classic is the default; owners switch via the "Try Calm
+  // mode" door in the sidebar and calm's "Switch to classic view" link. The
+  // choice persists per browser (localStorage 'vb_layout'). This flag is a
+  // global kill-switch only. Personal testing override: set localStorage
+  // 'vb_calm' to '1' to force calm on or '0' to force it off.
   CALM_CLIENT_ENABLED: true,
-  CALM_CLIENT_ALLOWLIST: [
-    'jrodgersdvm@gmail.com',
-    'jsrodgers92@gmail.com',  // Percy's owner — client test account
-  ],
 });

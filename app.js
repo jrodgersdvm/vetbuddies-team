@@ -2831,7 +2831,8 @@ END:VCALENDAR`;
 
 async function generateCarePlanPDF(carePlan, currentCase) {
   try {
-    const { jsPDF } = window;
+    // jsPDF's UMD build exposes window.jspdf (namespace) — not window.jsPDF.
+    const { jsPDF } = window.jspdf || window;
     if (!jsPDF) {
       showToast('PDF library not loaded', 'error');
       return;
@@ -2909,7 +2910,8 @@ async function generateCarePlanPDF(carePlan, currentCase) {
 }
 
 async function generateVetVisitPDF(carePlan, currentCase, profile) {
-  const { jsPDF } = window;
+  // jsPDF's UMD build exposes window.jspdf (namespace) — not window.jsPDF.
+  const { jsPDF } = window.jspdf || window;
   if (!jsPDF) {
     showToast('PDF library not loaded', 'error');
     return null;
@@ -3717,14 +3719,15 @@ async function calculateBuddyScorecard(buddyId) {
     }
 
     // ════════════════════════════════════════════════════════════════════
-    // CALM CLIENT EXPERIENCE  (feature-flagged · allowlist-gated)
+    // CALM CLIENT EXPERIENCE  (opt-in per device · classic is the default)
     // ────────────────────────────────────────────────────────────────────
     // A separate 4-tab pet-owner render path: Today / Care / Visits / Buddy.
     // It binds to the SAME `sb` client, the SAME loaders, and the SAME
     // CLIENT_SAFE data the classic client dashboard already uses — RLS and the
     // client-vs-staff message split are unchanged. Internal navigation is
     // client-only UI state (state.calm*), never the global router, so every
-    // other role and view is untouched. Off by default; see isCalmClientEnabled.
+    // other role and view is untouched. Classic is the default; owners opt in
+    // per device (see useCalmLayout / the "Try Calm mode" door).
     // Build status: all four tabs plus the sub-screens (billing, bridge,
     // wellness + history, messages, profile, health, story, nudges) are wired
     // to live data. Multi-pet switching and the private meal log are in. The
@@ -3732,22 +3735,22 @@ async function calculateBuddyScorecard(buddyId) {
     // ════════════════════════════════════════════════════════════════════
     function isCalmClientEnabled(profile) {
       if (!profile || profile.role !== 'client') return false;
-      // Personal testing override (this browser only), beats the allowlist.
+      // Personal testing override (this browser only), beats everything.
       try {
         const forced = localStorage.getItem('vb_calm');
         if (forced === '1') return true;
         if (forced === '0') return false;
       } catch (e) {}
-      if (!CONFIG.CALM_CLIENT_ENABLED) return false;
-      const list = (CONFIG.CALM_CLIENT_ALLOWLIST || []).map(s => String(s).toLowerCase());
-      return list.includes(String(profile.email || '').toLowerCase());
+      // GA 2026-07: calm is available to every client account. The config
+      // flag remains as a global kill-switch only; there is no allowlist.
+      return !!CONFIG.CALM_CLIENT_ENABLED;
     }
 
     // Calm is opt-in (product direction 2026-07: Jake prefers classic).
-    // isCalmClientEnabled controls who MAY use calm; this persisted per-device
-    // choice controls who DOES. Default is classic — for allowlisted accounts
-    // too. The vb_calm testing override ('1') forces calm on regardless of the
-    // saved choice; '0' already forces classic via isCalmClientEnabled.
+    // Every client account may use calm; this persisted per-device choice
+    // controls who DOES. Default is classic. The vb_calm testing override
+    // ('1') forces calm on regardless of the saved choice; '0' already
+    // forces classic via isCalmClientEnabled.
     function useCalmLayout(profile) {
       if (!isCalmClientEnabled(profile)) return false;
       try {

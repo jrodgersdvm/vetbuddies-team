@@ -6,7 +6,7 @@ network access, or touching production data.
 
 - `supabase-stub.js` — mock of the `@supabase/supabase-js` UMD build.
   Served in place of the CDN script via Playwright request interception.
-  Fakes a calm-allowlisted **client** account (`jrodgersdvm@gmail.com`,
+  Fakes a **client** account (`jrodgersdvm@gmail.com`,
   trialing) with two pets: Percy (corgi, one active medication, a visit
   ~10 days out) and Willow (cat, empty care plan). All other tables read
   as empty; inserts echo back with generated ids.
@@ -30,9 +30,9 @@ at any local Chromium/Chrome binary.
 
 ## Choosing a layout
 
-Classic is the default for everyone — the allowlist only controls who MAY
-use calm. The stub account is calm-allowlisted, so it boots classic unless
-the persisted preference says otherwise:
+Classic is the default for everyone; calm is available to every client
+account (GA). The stub account boots classic unless the persisted
+preference says otherwise:
 
 ```js
 await page.addInitScript(() => localStorage.setItem('vb_layout', 'calm'));
