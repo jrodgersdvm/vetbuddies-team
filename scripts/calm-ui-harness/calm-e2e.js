@@ -11,19 +11,47 @@ function check(name, cond, extra) {
 
 (async () => {
   const browser = await chromium.launch({ executablePath: '/opt/pw-browsers/chromium', args: ['--no-sandbox'] });
-  const page = await browser.newPage({ viewport: { width: 390, height: 844 } });
   const errors = [];
-  page.on('pageerror', e => errors.push('pageerror: ' + e.message));
-  page.on('console', m => { if (m.type() === 'error' && !/Failed to load resource/.test(m.text())) errors.push('console: ' + m.text()); });
 
-  // Serve the stub in place of the CDN supabase UMD; block other externals quietly.
-  await page.route('**cdn.jsdelivr.net/**supabase**', r => r.fulfill({ contentType: 'application/javascript', body: STUB }));
-  await page.route(/fonts\.(googleapis|gstatic)\.com/, r => r.abort());
+  async function makePage(opts = {}) {
+    const p = await browser.newPage({ viewport: { width: opts.width || 390, height: opts.height || 844 } });
+    p.on('pageerror', e => errors.push('pageerror: ' + e.message));
+    p.on('console', m => { if (m.type() === 'error' && !/Failed to load resource/.test(m.text())) errors.push('console: ' + m.text()); });
+    // Serve the stub in place of the CDN supabase UMD; block other externals quietly.
+    await p.route('**cdn.jsdelivr.net/**supabase**', r => r.fulfill({ contentType: 'application/javascript', body: STUB }));
+    await p.route(/fonts\.(googleapis|gstatic)\.com/, r => r.abort());
+    if (opts.preferCalm) await p.addInitScript(() => localStorage.setItem('vb_layout', 'calm'));
+    await p.goto('http://localhost:3000/', { waitUntil: 'domcontentloaded' });
+    return p;
+  }
 
-  await page.goto('http://localhost:3000/', { waitUntil: 'domcontentloaded' });
+  // ── Layout preference: classic is the default, calm is a persistent choice ──
+  console.log('— Layout preference (classic by default) —');
+  const pref = await makePage();
+  await pref.waitForSelector('.topbar', { timeout: 8000 }).catch(() => {});
+  await pref.waitForTimeout(1500);
+  check('allowlisted account with no saved choice lands CLASSIC', await pref.locator('.calm-app').count() === 0 && await pref.locator('.topbar').count() === 1);
+  check('"Try Calm mode" door present in sidebar', await pref.locator('[data-action="switch-to-calm"]').count() === 1);
+  await pref.evaluate(() => document.querySelector('[data-action="switch-to-calm"]').click());
+  await pref.waitForSelector('.calm-app', { timeout: 8000 }).catch(() => {});
+  check('door opens calm', await pref.locator('.calm-app').count() === 1);
+  await pref.reload({ waitUntil: 'domcontentloaded' });
+  await pref.waitForSelector('.calm-app', { timeout: 8000 }).catch(() => {});
+  check('calm choice persists across reload', await pref.locator('.calm-app').count() === 1);
+  // DOM click: the PWA install banner overlaps the link at the bottom of Today.
+  await pref.evaluate(() => document.querySelector('[data-action="calm-classic"]').click());
+  await pref.waitForTimeout(600);
+  check('"Switch to classic view" returns to classic immediately', await pref.locator('.calm-app').count() === 0);
+  await pref.reload({ waitUntil: 'domcontentloaded' });
+  await pref.waitForTimeout(2000);
+  check('classic choice persists across reload', await pref.locator('.calm-app').count() === 0 && await pref.locator('.topbar').count() === 1);
+  await pref.close();
+
+  // ── Main calm suite (runs with the calm preference saved) ──
+  const page = await makePage({ preferCalm: true });
   await page.waitForSelector('.calm-app', { timeout: 8000 }).catch(() => {});
 
-  console.log('— Login lands on calm home —');
+  console.log('— Login lands on calm home (preference: calm) —');
   check('calm shell rendered after session restore', await page.locator('.calm-app').count() === 1);
   check('Today tab active', (await page.locator('.calm-nav-item.active .calm-nav-label').textContent().catch(() => '')) === 'Today');
 

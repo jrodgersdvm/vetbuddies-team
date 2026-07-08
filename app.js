@@ -1632,7 +1632,7 @@ Your free 30-day trial is active. No credit card on file. We'll be in touch.
             // summary dashboard hid medications/vitals/vaccines/documents/co-owners
             // and they only appeared after navigating via Messages → client-case.
             const firstCase = state.cases[state.activePetIndex || 0] || state.cases[0];
-            if (firstCase && !state.calmOptOut && isCalmClientEnabled(data)) {
+            if (firstCase && useCalmLayout(data)) {
               // Calm clients land on the calm home (view 'client-dashboard' —
               // that's the view the calm experience replaces). calmEnsureLoaded
               // lazy-loads the active case itself, so skip the classic preload
@@ -3741,6 +3741,22 @@ async function calculateBuddyScorecard(buddyId) {
       if (!CONFIG.CALM_CLIENT_ENABLED) return false;
       const list = (CONFIG.CALM_CLIENT_ALLOWLIST || []).map(s => String(s).toLowerCase());
       return list.includes(String(profile.email || '').toLowerCase());
+    }
+
+    // Calm is opt-in (product direction 2026-07: Jake prefers classic).
+    // isCalmClientEnabled controls who MAY use calm; this persisted per-device
+    // choice controls who DOES. Default is classic — for allowlisted accounts
+    // too. The vb_calm testing override ('1') forces calm on regardless of the
+    // saved choice; '0' already forces classic via isCalmClientEnabled.
+    function useCalmLayout(profile) {
+      if (!isCalmClientEnabled(profile)) return false;
+      try {
+        if (localStorage.getItem('vb_calm') === '1') return true;
+        return localStorage.getItem('vb_layout') === 'calm';
+      } catch (e) { return false; }
+    }
+    function setLayoutPreference(pref) {
+      try { localStorage.setItem('vb_layout', pref); } catch (e) {}
     }
 
     const CALM_TABS = [
@@ -9037,6 +9053,9 @@ async function calculateBuddyScorecard(buddyId) {
               <div class="sidebar-user-role" style="font-size:11px;color:var(--text-secondary);">⚙️ Edit profile</div>
             </div>
           </div>
+          ${state.profile.role === 'client' && isCalmClientEnabled(state.profile) && !useCalmLayout(state.profile)
+            ? '<button data-action="switch-to-calm" style="width:100%;margin-top:12px;padding:10px;border:1px dashed var(--border);border-radius:8px;background:none;color:var(--text-secondary);font-size:13px;cursor:pointer;">🌿 Try Calm mode</button>'
+            : ''}
           <button data-action="signout" style="width:100%;margin-top:12px;padding:10px;border:1px solid var(--border);border-radius:8px;background:none;color:var(--text-secondary);font-size:13px;cursor:pointer;">Sign Out</button>
         </div>
       `;
@@ -10483,8 +10502,9 @@ function renderVaccineDueAlerts(vaccines) {
       // send clients to the classic client-case / client-messages views. Fold
       // calm clients into the calm equivalents instead, so no entry point can
       // silently drop them out of the calm experience. Folding here at render
-      // covers every navigate() call site at once; calmOptOut still bypasses.
-      if (role === 'client' && !state.calmOptOut && isCalmClientEnabled(state.profile)
+      // covers every navigate() call site at once; only fires for owners whose
+      // saved layout preference is calm (classic is the default).
+      if (role === 'client' && useCalmLayout(state.profile)
           && (state.view === 'client-case' || state.view === 'client-messages')) {
         const di = (state.cases || []).findIndex(c => c.id === state.caseId);
         if (di >= 0) state.activePetIndex = di;
@@ -10497,12 +10517,12 @@ function renderVaccineDueAlerts(vaccines) {
         state._scrollToSection = null;
         state.view = 'client-dashboard'; // direct assignment: re-interpret the view, no history push
       }
-      if (role === 'client' && state.view === 'client-dashboard' && !state.calmOptOut && isCalmClientEnabled(state.profile)) {
-        // Calm Client experience (feature-flagged · allowlist-gated). For opted-in
-        // client accounts on their home view this renders the new 4-tab UI in place
-        // of both the classic dashboard and the hard paywall (the calm UI presents
-        // trial/subscription as soft read-only itself). All other views/roles fall
-        // through unchanged. state.calmOptOut is the in-session "switch to classic".
+      if (role === 'client' && state.view === 'client-dashboard' && useCalmLayout(state.profile)) {
+        // Calm Client experience (allowlist-gated · opt-in). For clients whose
+        // persisted layout choice is calm, the home view renders the 4-tab UI in
+        // place of both the classic dashboard and the hard paywall (the calm UI
+        // presents trial/subscription as soft read-only itself). All other
+        // views/roles fall through unchanged; classic is the default.
         html = renderCalmClient();
       } else if (role === 'client' && state.profile && !hasActiveAccess(state.profile)
           && !SUBSCRIPTION_GATE_BYPASS_VIEWS.has(state.view)
@@ -10954,7 +10974,8 @@ function renderVaccineDueAlerts(vaccines) {
           } catch (e) { showToast(e.message || 'Could not update', 'error'); }
           return;
         }
-        if (action === 'calm-classic')      { state.calmOptOut = true; showToast('Switched to classic view — refresh to return', 'info'); render(); return; }
+        if (action === 'calm-classic')      { setLayoutPreference('classic'); showToast('Switched to classic view', 'info'); render(); return; }
+        if (action === 'switch-to-calm')    { setLayoutPreference('calm'); state.sidebarOpen = false; state.calmTab = 'today'; state.calmSub = null; navigate('client-dashboard'); return; }
         if (action === 'toggle-dark-mode') { toggleDarkMode(); return; }
         if (action === 'save-bio-prompt') {
           const bio = document.querySelector('[data-field="bio-prompt-text"]')?.value.trim() || '';

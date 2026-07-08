@@ -28,18 +28,20 @@ Chromium: the script uses `executablePath: '/opt/pw-browsers/chromium'`
 Playwright's browsers and drop the `executablePath` override, or point it
 at any local Chromium/Chrome binary.
 
-## Viewing the classic layout with the same data
+## Choosing a layout
 
-The stub account is calm-allowlisted, so the app boots into the calm UI.
-To compare against the classic layout with identical data, force the
-per-browser override before the page loads:
+Classic is the default for everyone — the allowlist only controls who MAY
+use calm. The stub account is calm-allowlisted, so it boots classic unless
+the persisted preference says otherwise:
 
 ```js
-await page.addInitScript(() => localStorage.setItem('vb_calm', '0'));
+await page.addInitScript(() => localStorage.setItem('vb_layout', 'calm'));
 ```
 
-(`vb_calm` is read by `isCalmClientEnabled` — '0' forces classic,
-'1' forces calm, unset falls back to the config allowlist.)
+(`vb_layout` ∈ 'classic' | 'calm' is the user's saved choice, set by the
+"Try Calm mode" / "Switch to classic view" doors. The `vb_calm` testing
+override still exists: '1' forces calm regardless of choice or allowlist,
+'0' forces classic.)
 
 ## Notes
 
