@@ -4681,6 +4681,13 @@
     .calm-bell { position:relative; width:38px; height:38px; border-radius:50%; border:1px solid var(--c-border); background:#fff; cursor:pointer; font-size:16px; }
     .calm-bell-dot { position:absolute; top:8px; right:9px; width:8px; height:8px; border-radius:50%; background: var(--c-burgundy); }
 
+    /* Multi-pet switcher — quiet chips, only rendered when the owner has >1 pet */
+    .calm-pets { display:flex; gap:8px; overflow-x:auto; margin-bottom:16px; padding-bottom:2px; scrollbar-width:none; }
+    .calm-pets::-webkit-scrollbar { display:none; }
+    .calm-pet-chip { display:flex; align-items:center; gap:7px; padding:5px 13px 5px 6px; border-radius:999px; border:1px solid var(--c-border); background:var(--c-card); color:var(--c-text); font-size:13px; font-weight:600; cursor:pointer; white-space:nowrap; flex-shrink:0; }
+    .calm-pet-chip.active { border-color:var(--c-sage); background:var(--c-tint); color:var(--c-tint-text); }
+    .calm-pet-chip-av { width:26px; height:26px; border-radius:50%; object-fit:cover; font-size:14px; }
+
     .calm-greet { display:flex; align-items:center; gap:12px; margin-bottom:22px; }
     .calm-greet-avatar { width:46px; height:46px; border-radius:50%; object-fit:cover; font-size:22px; }
     .calm-greet-line { font-size:14px; color: var(--c-text); font-weight:500; }
