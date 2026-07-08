@@ -3813,6 +3813,29 @@ async function calculateBuddyScorecard(buddyId) {
       dates = dates.filter(d => d >= cutoff).sort();
       try { localStorage.setItem('vb_calm_meals_' + petId, JSON.stringify(dates)); } catch (e) {}
     }
+    // ── Bridge share state (device-only, per case) ───────────────────────
+    // "Shared with my vet" is pinned to the visit it was approved for: it
+    // stays confirmed while that upcoming appointment stands, and resets when
+    // the visit passes or is rescheduled. With no visit on file it stays
+    // fresh for a week.
+    function calmNextApptISO(caseId) {
+      const now = Date.now();
+      const next = (state.appointments || [])
+        .filter(a => a.case_id === caseId && a.scheduled_at && new Date(a.scheduled_at).getTime() >= now)
+        .sort((a, b) => new Date(a.scheduled_at) - new Date(b.scheduled_at))[0];
+      return next ? next.scheduled_at : null;
+    }
+    function calmMarkShared(caseId) {
+      try { localStorage.setItem('vb_calm_shared_' + caseId, JSON.stringify({ at: calmDayStr(), visit: calmNextApptISO(caseId) })); } catch (e) {}
+    }
+    function calmIsShared(caseId) {
+      try {
+        const v = JSON.parse(localStorage.getItem('vb_calm_shared_' + caseId) || 'null');
+        if (!v) return false;
+        if (v.visit) return v.visit === calmNextApptISO(caseId);
+        return v.at >= calmDayStr(7);
+      } catch (e) { return false; }
+    }
     // Lazily load the active case's care plan + meds + vaccines, then re-render.
     // Tracks the loaded case id so it runs once per pet and never loops.
     function calmEnsureLoaded(petCase) {
@@ -3820,7 +3843,6 @@ async function calculateBuddyScorecard(buddyId) {
       const key = petCase.id;
       if (state._calmLoadedFor === key || state._calmLoadingFor === key) return;
       state._calmLoadingFor = key;
-      state.calmShared = false; // bridge confirmation is per pet/visit, never carried over
       state.messageThread = 'client'; // clients only ever load/send the client thread
       const petId = petCase.pets?.id;
       Promise.all([
@@ -4225,7 +4247,7 @@ async function calculateBuddyScorecard(buddyId) {
           const dx = (state.diagnoses || [])[0];
           const medsLine = meds.length ? meds.map(m => esc(m.name)).join(', ') : 'No active medications recorded';
           const reason = (dx && dx.condition_name) || (cp && cp.summary) || 'Wellness / follow-up';
-          const shared = !!state.calmShared;
+          const shared = calmIsShared(ctx.petCase.id);
           return `
             ${head('What your Buddy shares')}
             <section class="calm-card calm-doc">
@@ -10457,6 +10479,24 @@ function renderVaccineDueAlerts(vaccines) {
       ]);
       const isPausedReadOnly = role === 'client' && state.profile &&
         (isTrialExpired(state.profile) || state.profile.subscription_status === 'canceled');
+      // Deep links (push-notification taps, upload flows, legacy nav actions)
+      // send clients to the classic client-case / client-messages views. Fold
+      // calm clients into the calm equivalents instead, so no entry point can
+      // silently drop them out of the calm experience. Folding here at render
+      // covers every navigate() call site at once; calmOptOut still bypasses.
+      if (role === 'client' && !state.calmOptOut && isCalmClientEnabled(state.profile)
+          && (state.view === 'client-case' || state.view === 'client-messages')) {
+        const di = (state.cases || []).findIndex(c => c.id === state.caseId);
+        if (di >= 0) state.activePetIndex = di;
+        if (state.view === 'client-messages' || state._scrollToSection === 'messages') {
+          state.calmSub = 'message';
+        } else {
+          state.calmTab = 'care';
+          state.calmSub = null;
+        }
+        state._scrollToSection = null;
+        state.view = 'client-dashboard'; // direct assignment: re-interpret the view, no history push
+      }
       if (role === 'client' && state.view === 'client-dashboard' && !state.calmOptOut && isCalmClientEnabled(state.profile)) {
         // Calm Client experience (feature-flagged · allowlist-gated). For opted-in
         // client accounts on their home view this renders the new 4-tab UI in place
@@ -10851,9 +10891,36 @@ function renderVaccineDueAlerts(vaccines) {
           }
           return;
         }
-        // Bridge "share with my vet" — visual confirmation only for now (a real
-        // provider/partner-clinic push is a later enhancement); kept owner-explicit.
-        if (action === 'calm-toggle-share') { state.calmShared = true; showToast('Shared with Dr. Rodgers', 'success'); render(); return; }
+        // Bridge "share with my vet" — the owner's explicit approval goes into
+        // the client thread as their own message, so the Buddy sees it and
+        // follows through with Dr. Rodgers. (A direct provider/partner-clinic
+        // push is a later enhancement.) Confirmation is pinned to the upcoming
+        // visit via calmMarkShared/calmIsShared.
+        if (action === 'calm-toggle-share') {
+          if (!hasWriteAccess(state.profile)) { showToast('Subscribe to a plan to share with your vet.', 'error'); return; }
+          if (!state.caseId) return;
+          target.disabled = true;
+          try {
+            const { data: newMsg, error } = await sb.from('messages').insert({
+              case_id: state.caseId,
+              sender_id: state.profile.id,
+              content: '✓ I reviewed the visit prep and it looks right — please share it with Dr. Rodgers.',
+              sender_role: state.profile.role,
+              thread_type: 'client',
+              is_urgent: false,
+              created_at: new Date().toISOString(),
+            }).select('id, case_id, sender_id, content, sender_role, thread_type, created_at').single();
+            if (error) throw error;
+            state.messages.push({ ...newMsg, sender: { id: state.profile.id, name: state.profile.name, role: state.profile.role, avatar_initials: state.profile.avatar_initials, avatar_color: state.profile.avatar_color } });
+            calmMarkShared(state.caseId);
+            logAudit('create', 'message', newMsg.id, { case_id: state.caseId, role: state.profile.role });
+            showToast('Shared with Dr. Rodgers', 'success');
+          } catch (e) {
+            showToast(e.message || 'Could not share — please try again', 'error');
+          } finally { target.disabled = false; }
+          render();
+          return;
+        }
         // Care Story (minimal): prose lives in pets.care_story, memorial in pets.legacy_mode.
         if (action === 'calm-edit-story')   { state.calmStoryEdit = true; render(); return; }
         if (action === 'calm-cancel-story') { state.calmStoryEdit = false; render(); return; }
