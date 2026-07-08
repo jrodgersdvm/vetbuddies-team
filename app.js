@@ -2975,7 +2975,14 @@ async function generateVetVisitPDF(carePlan, currentCase, profile) {
     if (y + needed > H - 22) { doc.addPage(); y = 20; }
   };
   const hairline = (yy) => { doc.setDrawColor(...RULE); doc.setLineWidth(0.2); doc.line(M, yy, W - M, yy); };
+  // This document is emailed to the clinic and attached to the medical
+  // record ahead of the visit — a briefing, not a worksheet. Sections with
+  // nothing to report are omitted entirely: on a record attachment,
+  // "None recorded" reads as an affirmative clinical claim the app can't
+  // make, and blank write-in lines are dead ink in an email.
+  let sectionCount = 0;
   const section = (label) => {
+    sectionCount++;
     ensureRoom(16);
     y += 4;
     doc.setFont('helvetica', 'bold');
@@ -2984,23 +2991,6 @@ async function generateVetVisitPDF(carePlan, currentCase, profile) {
     doc.text(label.toUpperCase(), M, y);
     hairline(y + 1.8);
     y += 8;
-  };
-  const emptyLine = (text) => {
-    ensureRoom(6);
-    doc.setFont('helvetica', 'italic');
-    doc.setFontSize(9.5);
-    doc.setTextColor(...SOFT);
-    doc.text(text, M, y);
-    y += 6;
-  };
-  const ruledLines = (n) => {
-    for (let i = 0; i < n; i++) {
-      ensureRoom(9);
-      doc.setDrawColor(...RULE);
-      doc.setLineWidth(0.2);
-      doc.line(M, y + 4, W - M, y + 4);
-      y += 9;
-    }
   };
 
   // ── Header band ──
@@ -3021,7 +3011,8 @@ async function generateVetVisitPDF(carePlan, currentCase, profile) {
   // ── Identity block ──
   y = 40;
   const speciesLabel = pet.species ? String(pet.species).charAt(0).toUpperCase() + String(pet.species).slice(1) : '';
-  const idBits = [speciesLabel, pet.breed, petAge, latestWeight ? String(latestWeight.weight) : (pet.weight ? String(pet.weight) : '')].filter(Boolean);
+  // DOB is included verbatim so the clinic can match this to their record.
+  const idBits = [speciesLabel, pet.breed, petAge, pet.dob ? 'DOB ' + fmtDate(pet.dob) : '', latestWeight ? String(latestWeight.weight) : (pet.weight ? String(pet.weight) : '')].filter(Boolean);
   doc.setFont('helvetica', 'bold');
   doc.setFontSize(15);
   doc.setTextColor(...INK);
@@ -3039,11 +3030,18 @@ async function generateVetVisitPDF(carePlan, currentCase, profile) {
   doc.setTextColor(...SOFT);
   const teamLine = [
     ownerName ? 'Owner: ' + ownerName : '',
+    profile?.email ? profile.email : '',
     buddyName ? 'Vet Buddy: ' + buddyName : '',
     'Supervised by Dr. Rodgers, Rodgers Veterinary Care',
   ].filter(Boolean).join('   ·   ');
-  doc.text(doc.splitTextToSize(teamLine, CW), M, y);
-  y += 8;
+  const teamLines = doc.splitTextToSize(teamLine, CW);
+  doc.text(teamLines, M, y);
+  y += teamLines.length * 4.3 + 1.7;
+  doc.setFont('helvetica', 'italic');
+  doc.setFontSize(8);
+  doc.setTextColor(...SOFT);
+  doc.text('Owner-reported information from the Vet Buddies care app — verify against clinic records.', M, y);
+  y += 7;
 
   // ── This visit ──
   if (nextAppt) {
@@ -3062,11 +3060,8 @@ async function generateVetVisitPDF(carePlan, currentCase, profile) {
   }
 
   // ── 1. Questions from the owner ──
-  section('Questions from the owner');
-  if (questions.length === 0) {
-    emptyLine('No saved questions yet — jot any down here.');
-    ruledLines(3);
-  } else {
+  if (questions.length > 0) {
+    section('Questions from the owner');
     questions.forEach((q, i) => {
       const qLines = doc.splitTextToSize((i + 1) + '.  ' + (q.question || ''), CW);
       ensureRoom(qLines.length * 5.5 + 6);
@@ -3089,11 +3084,10 @@ async function generateVetVisitPDF(carePlan, currentCase, profile) {
   }
 
   // ── 2. Current medications ──
-  section('Current medications');
   const medsFallback = lp?.medications || (typeof cpRaw.medications === 'string' ? cpRaw.medications : '');
-  if (meds.length === 0 && !(medsFallback && medsFallback.trim())) {
-    emptyLine('None recorded.');
-  } else if (meds.length === 0) {
+  if (meds.length > 0 || (medsFallback && medsFallback.trim())) {
+  section('Current medications');
+  if (meds.length === 0) {
     doc.setFont('helvetica', 'normal');
     doc.setFontSize(10);
     doc.setTextColor(...INK);
@@ -3126,12 +3120,11 @@ async function generateVetVisitPDF(carePlan, currentCase, profile) {
     });
     y += 2;
   }
+  }
 
   // ── 3. Vaccines ──
-  section('Vaccines');
-  if (vaccines.length === 0) {
-    emptyLine('None recorded.');
-  } else {
+  if (vaccines.length > 0) {
+    section('Vaccines');
     const DAY = 86400000;
     vaccines.forEach((v, i) => {
       ensureRoom(12);
@@ -3166,11 +3159,9 @@ async function generateVetVisitPDF(carePlan, currentCase, profile) {
   }
 
   // ── 4. Known conditions ──
-  section('Known conditions');
   const allergies = lp?.allergies || cpRaw.allergies;
-  if (dxList.length === 0 && !(allergies && String(allergies).trim()) && !(cpRaw.diagnoses && String(cpRaw.diagnoses).trim())) {
-    emptyLine('None recorded.');
-  } else {
+  if (dxList.length > 0 || (allergies && String(allergies).trim()) || (cpRaw.diagnoses && String(cpRaw.diagnoses).trim())) {
+    section('Known conditions');
     dxList.forEach((d) => {
       ensureRoom(6);
       doc.setFont('helvetica', 'bold');
@@ -3210,12 +3201,11 @@ async function generateVetVisitPDF(carePlan, currentCase, profile) {
   }
 
   // ── 5. Recent activity ──
-  section('Recent activity');
   const lastSummary = lp?.last_appointment_summary || cpRaw.last_appointment_summary;
   const lastAt = lp?.last_appointment_at || cpRaw.last_appointment_at;
-  let hasRecent = false;
+  if (lastSummary || latestWeight) {
+  section('Recent activity');
   if (lastSummary) {
-    hasRecent = true;
     if (lastAt) {
       ensureRoom(5);
       doc.setFont('helvetica', 'bold');
@@ -3233,7 +3223,6 @@ async function generateVetVisitPDF(carePlan, currentCase, profile) {
     y += sLines.length * 5 + 2;
   }
   if (latestWeight) {
-    hasRecent = true;
     ensureRoom(6);
     doc.setFont('helvetica', 'normal');
     doc.setFontSize(9.5);
@@ -3241,11 +3230,17 @@ async function generateVetVisitPDF(carePlan, currentCase, profile) {
     doc.text('Latest weight: ' + latestWeight.weight + (latestWeight.recorded_at ? '  (' + fmtDate(latestWeight.recorded_at) + ')' : ''), M, y);
     y += 6;
   }
-  if (!hasRecent) emptyLine('No recent appointment summary on file.');
+  }
 
-  // ── 6. Notes during the visit ──
-  section('Notes during the visit');
-  ruledLines(4);
+  // Sparse accounts: with every content section empty, say so once rather
+  // than sending the clinic a header with nothing under it.
+  if (sectionCount === 0) {
+    y += 6;
+    doc.setFont('helvetica', 'italic');
+    doc.setFontSize(9.5);
+    doc.setTextColor(...SOFT);
+    doc.text('No owner-reported updates on file for this visit.', M, y);
+  }
 
   // ── Footer on every page ──
   const pages = doc.getNumberOfPages();
