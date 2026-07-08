@@ -43,11 +43,13 @@
     { id: 'w1', pet_id: 'p1', weight: '28 lb', recorded_at: dayISO(-20) },
   ];
   let insertSeq = 0;
+  const insertedRows = {}; // table -> rows written this session, so inserts read back
 
   function resultFor(q) {
     const t = q._table;
     if (q._insert) {
       const row = Object.assign({ id: 'ins-' + (++insertSeq) }, Array.isArray(q._insert) ? q._insert[0] : q._insert);
+      (insertedRows[t] = insertedRows[t] || []).push(row);
       return q._single ? { data: row, error: null } : { data: [row], error: null };
     }
     let rows = [];
@@ -62,7 +64,10 @@
     else if (t === 'care_plan_diagnoses') rows = DIAGNOSES.filter(r => r.care_plan_id === q._eqs['care_plan_id']);
     else if (t === 'pet_vaccines') rows = VACCINES.filter(r => r.pet_id === q._eqs['pet_id']);
     else if (t === 'pet_vitals') rows = VITALS.filter(r => r.pet_id === q._eqs['pet_id']);
-    // everything else: empty
+    // everything else: rows inserted this session (matching any eq filters), else empty
+    if (!rows.length && insertedRows[t]) {
+      rows = insertedRows[t].filter(r => Object.entries(q._eqs).every(([k, v]) => r[k] === v));
+    }
     if (q._single === 'single') return { data: rows[0] || null, error: rows[0] ? null : { message: 'Row not found', code: 'PGRST116' } };
     if (q._single === 'maybe') return { data: rows[0] || null, error: null };
     return { data: rows, error: null, count: rows.length };

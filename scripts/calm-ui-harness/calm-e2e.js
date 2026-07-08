@@ -45,6 +45,25 @@ function check(name, cond, extra) {
   await pref.reload({ waitUntil: 'domcontentloaded' });
   await pref.waitForTimeout(2000);
   check('classic choice persists across reload', await pref.locator('.calm-app').count() === 0 && await pref.locator('.topbar').count() === 1);
+
+  // ── Care Team page (replaced the client "Share Vet Buddies" nav entry) ──
+  console.log('— Care Team page —');
+  check('client nav has Care Team, not Share Vet Buddies',
+    await pref.locator('[data-action="nav-care-team"]').count() >= 1 &&
+    await pref.locator('.sidebar-nav [data-action="nav-referral-dashboard"], .bottom-nav [data-action="nav-referral-dashboard"]').count() === 0);
+  await pref.locator('.bottom-nav-item', { hasText: 'Care Team' }).click();
+  await pref.waitForTimeout(600);
+  check('page shows pet care team heading', ((await pref.locator('h1').first().textContent().catch(() => '')) || '').includes("Percy's Care Team"));
+  check('owner and buddy listed', (await pref.locator('.card', { hasText: 'On the team' }).textContent().catch(() => '')).includes('Maya Chen'));
+  check('invite button present', await pref.locator('[data-action="open-care-team-invite"]').count() === 1);
+  await pref.evaluate(() => document.querySelector('[data-action="open-care-team-invite"]').click());
+  await pref.waitForTimeout(300);
+  await pref.fill('[data-field="ct-invite-name"]', 'Sam Sitter');
+  await pref.fill('[data-field="ct-invite-email"]', 'sam@example.com');
+  await pref.evaluate(() => document.querySelector('[data-action="send-care-team-invite"]').click());
+  await pref.waitForTimeout(600);
+  check('sent invite appears in Waiting to join', (await pref.locator('.card', { hasText: 'Waiting to join' }).textContent().catch(() => '')).includes('sam@example.com'));
+  check('referral dashboard still reachable via quiet link', await pref.locator('[data-action="nav-referral-dashboard"]').count() === 1);
   await pref.close();
 
   // ── Main calm suite (runs with the calm preference saved) ──

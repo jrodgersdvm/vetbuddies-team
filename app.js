@@ -1902,6 +1902,24 @@ Your free 30-day trial is active. No credit card on file. We'll be in touch.
       } catch (err) { console.error(err); }
     }
 
+    // Outstanding care-team invites for a case. loadPetCareProfile used to own
+    // this before it was stubbed out with the gamification removal — since
+    // then, sent invites never loaded back, so the Pending/Resend rows could
+    // never render. The Care Team page needs them, so load them directly.
+    async function loadCareTeamInvites(caseId) {
+      if (!caseId) { state._pendingCareTeamInvites = []; return; }
+      try {
+        const { data, error } = await sb.from('pending_invites')
+          .select('id, email, first_name, last_name, created_at')
+          .eq('case_id', caseId)
+          .eq('invite_source', 'care_team')
+          .is('used_at', null)
+          .order('created_at', { ascending: false });
+        if (error) throw error;
+        state._pendingCareTeamInvites = data || [];
+      } catch (err) { console.warn('loadCareTeamInvites failed:', err); state._pendingCareTeamInvites = []; }
+    }
+
     async function loadPendingCoOwnerInvites() {
       if (!state.user) return;
       try {
@@ -9172,7 +9190,7 @@ async function calculateBuddyScorecard(buddyId) {
           { label: 'Messages', icon: '💬', action: 'nav-client-messages', badge: state.clientUnreadCount || 0 },
           { label: 'Knowledge Base', icon: '📚', action: 'nav-knowledge-base' },
           { label: 'Health Timeline', icon: '📊', action: 'nav-health-timeline' },
-          { label: 'Share Vet Buddies', icon: '🎁', action: 'nav-referral-dashboard' },
+          { label: 'Care Team', icon: '👥', action: 'nav-care-team' },
         ],
         vet_buddy: [
           { label: 'Dashboard', icon: '⭐', action: 'nav-buddy-dashboard' },
@@ -9266,7 +9284,7 @@ async function calculateBuddyScorecard(buddyId) {
           { label: 'Messages', icon: '💬', action: 'nav-client-messages', badge: state.clientUnreadCount || state.unreadCount },
           { label: 'Knowledge Base', icon: '📚', action: 'nav-knowledge-base' },
           { label: 'Health Timeline', icon: '📊', action: 'nav-health-timeline' },
-          { label: 'Share Vet Buddies', icon: '🎁', action: 'nav-referral-dashboard' },
+          { label: 'Care Team', icon: '👥', action: 'nav-care-team' },
         ],
         vet_buddy: [
           { label: 'Dashboard', icon: '⭐', action: 'nav-buddy-dashboard' },
@@ -9748,6 +9766,93 @@ function renderHandoffNotesTab() {
       `)}
     </div>
   `;
+}
+
+// Care Team page — the client nav destination that replaced the referral
+// "Share Vet Buddies" entry (2026-07): sharing the app now means inviting
+// people onto your pet's care team, with access to the record. The referral
+// dashboard remains reachable from the quiet link at the bottom.
+function renderCareTeamPage() {
+  if (!state.cases || state.cases.length === 0) {
+    return renderLayout(`
+      <div class="card" style="text-align:center;padding:40px;">
+        <div style="font-size:40px;">🐾</div>
+        <h2 style="font-family:'Fraunces',serif;color:#336026;margin:10px 0 6px;">Build your pet's care team</h2>
+        <p style="color:var(--text-secondary);">Add your pet first — then invite the people who help care for them.</p>
+        <button class="btn btn-primary" data-action="nav-add-pet" style="margin-top:16px;">Add Your Pet</button>
+      </div>`);
+  }
+  const idx = Math.min(state.activePetIndex || 0, state.cases.length - 1);
+  const petCase = state.cases[idx];
+  const pet = petCase.pets || {};
+  const petName = pet.name || 'your pet';
+  const buddy = petCase.assigned_buddy || null;
+  const coOwners = state.petCoOwners || [];
+  const pending = state._pendingCareTeamInvites || [];
+
+  const memberRow = (avatar, name, roleChip, roleClass, sub) => `
+    <div style="display:flex;align-items:center;gap:12px;padding:10px 0;border-bottom:1px solid var(--border);">
+      ${avatar}
+      <div style="flex:1;min-width:0;">
+        <div style="font-weight:600;font-size:14px;">${name}</div>
+        ${sub ? `<div style="font-size:12px;color:var(--text-secondary);">${sub}</div>` : ''}
+      </div>
+      <span class="care-team-role-chip ${roleClass}" style="font-size:10px;flex-shrink:0;">${roleChip}</span>
+    </div>`;
+
+  let members = memberRow(
+    renderAvatar(state.profile?.avatar_initials, state.profile?.avatar_color || '#888', 'sm'),
+    esc(state.profile?.name || 'You'), 'Owner', 'role-owner', 'Full access');
+  if (buddy) {
+    members += memberRow(
+      renderAvatar(buddy.avatar_initials, buddy.avatar_color || '#336026', 'sm'),
+      esc(buddy.name), 'Vet Buddy', 'role-buddy', 'Keeps the plan current · supervised by Dr. Rodgers');
+  }
+  members += coOwners.map(co => memberRow(
+    `<div class="avatar-circle" style="background:#888;width:28px;height:28px;font-size:11px;">${esc((co.user?.name || co.invited_email || '?').charAt(0).toUpperCase())}</div>`,
+    esc(co.user?.name || co.invited_email || 'Co-owner'),
+    co.status === 'accepted' ? 'Co-owner' : 'Invited', 'role-owner',
+    co.status === 'accepted' ? 'Full record access' : 'Hasn’t joined yet')).join('');
+
+  const pendingHtml = pending.length ? `
+    <div class="card" style="margin-bottom:12px;">
+      <div class="card-title" style="margin-bottom:6px;">Waiting to join</div>
+      ${pending.map(inv => `
+        <div style="display:flex;align-items:center;gap:8px;padding:8px 0;border-bottom:1px solid var(--border);font-size:14px;">
+          <span style="flex:1;min-width:0;">${esc(inv.first_name || inv.email)}${inv.last_name ? ' ' + esc(inv.last_name) : ''}<span style="color:var(--text-secondary);font-size:12px;"> · ${esc(inv.email)}</span></span>
+          <button class="btn btn-secondary btn-small" data-action="resend-care-team-invite" data-invite-id="${inv.id}" data-email="${esc(inv.email)}">Resend</button>
+        </div>`).join('')}
+    </div>` : '';
+
+  return renderLayout(`
+    <div style="max-width:720px;margin:0 auto;">
+      <h1 style="font-family:'Fraunces',serif;font-size:28px;font-weight:700;color:var(--dark);margin-bottom:4px;">${esc(petName)}'s Care Team</h1>
+      <p style="color:var(--text-secondary);font-size:14px;margin-bottom:14px;">The people who help care for ${esc(petName)} — with access to the record, so everyone works from the same plan.</p>
+      ${state.cases.length > 1 ? renderPetSwitcher(state.cases.map(c => c.pets)) : ''}
+      <div class="card" style="border-left:4px solid var(--primary);margin-bottom:12px;">
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;">
+          <div style="flex:1;min-width:200px;">
+            <div class="card-title" style="margin:0 0 4px;">Invite someone</div>
+            <div style="font-size:13px;color:var(--text-secondary);">Family, sitters, walkers — anyone who helps with ${esc(petName)}.</div>
+          </div>
+          <button class="btn btn-primary" data-action="open-care-team-invite" data-case-id="${petCase.id}" data-pet-id="${pet.id}" data-pet-name="${esc(petName)}" data-pet-breed="${esc(pet.breed || '')}" data-owner-name="${esc(state.profile?.name || '')}">+ Invite to care team</button>
+        </div>
+      </div>
+      <div class="card" style="margin-bottom:12px;">
+        <div class="card-title" style="margin-bottom:6px;">On the team</div>
+        ${members}
+      </div>
+      ${pendingHtml}
+      <div class="card" style="background:var(--beige);border:none;margin-bottom:12px;">
+        <div class="card-title" style="margin-bottom:6px;">What your care team can see</div>
+        <div style="font-size:13px;color:var(--text-secondary);line-height:1.7;">
+          ${esc(petName)}'s care plan, medications, vaccines, appointments, and updates — so they can help keep it current.<br>
+          They can't see your billing, or your private check-ins.
+        </div>
+      </div>
+      <button data-action="nav-referral-dashboard" style="background:none;border:none;color:var(--text-secondary);font-size:12px;cursor:pointer;text-decoration:underline;padding:4px 0;">Looking for your referral code?</button>
+    </div>
+  `);
 }
 
 function renderReferralDashboard() {
@@ -10852,6 +10957,9 @@ function renderVaccineDueAlerts(vaccines) {
             ensureReferralCode().then(function(){ return loadReferralStats(); }).then(function(){ app.innerHTML = renderReferralDashboard(); attachEventListeners(); }).catch(function(err){ console.error('referral-dashboard load failed:', err); app.innerHTML = renderLayout(renderLoadError('referral dashboard')); attachEventListeners(); });
             app.innerHTML = renderLayout('<div style="text-align:center;padding:40px;"><div class="spinner"></div></div>');
             attachEventListeners(); return;
+          case 'care-team':
+            html = renderCareTeamPage();
+            break;
           case 'health-timeline':
             if (state.cases.length > 0) {
               var htPet = state.cases[state.activePetIndex]?.pets;
@@ -11714,9 +11822,9 @@ function renderVaccineDueAlerts(vaccines) {
               closeModal();
               showToast(`Invite sent to ${ctFirst}. You'll earn referral credit when they join.`, 'success');
               try { await awardCareXP(ctPetId2, 'team_member_invited'); } catch(_) {}
-              // Reload care profile to refresh pending invites
-              const activePetId = state.cases[state.activePetIndex || 0]?.pets?.id;
-              if (activePetId) await loadPetCareProfile(activePetId);
+              // Refresh the pending list directly — loadPetCareProfile is a
+              // stub since the gamification removal and would just clear it.
+              await loadCareTeamInvites(ctCaseId2);
               render();
             } catch(err) {
               console.error('Care team invite failed:', err);
@@ -12289,7 +12397,9 @@ function renderVaccineDueAlerts(vaccines) {
             break;
           }
           case 'switch-active-pet': {
-            const newIdx = parseInt(target.dataset.idx || '0');
+            // Emitters are split between data-idx (dashboard) and data-index
+            // (renderPetSwitcher) — the latter always resolved to 0 before.
+            const newIdx = parseInt(target.dataset.idx || target.dataset.index || '0');
             state.activePetIndex = Math.max(0, Math.min(newIdx, state.cases.length - 1));
             const switchedCase = state.cases[state.activePetIndex];
             if (switchedCase) {
@@ -12309,6 +12419,9 @@ function renderVaccineDueAlerts(vaccines) {
                 loadPetCareProfile(switchedCase.pets?.id),
                 loadTimeline(switchedCase.id),
                 loadMessages(switchedCase.id),
+                // Keep the Care Team page in sync when switching pets on it.
+                state.view === 'care-team' && switchedCase.pets?.id ? loadPetCoOwners(switchedCase.pets.id) : Promise.resolve(),
+                state.view === 'care-team' ? loadCareTeamInvites(switchedCase.id) : Promise.resolve(),
               ]);
               render();
             }
@@ -12352,6 +12465,19 @@ function renderVaccineDueAlerts(vaccines) {
           case 'nav-referral-dashboard':
             if (!hasFeatureAccess('referral_dashboard')) { showToast('The referral dashboard isn\'t available on your current plan yet', 'info'); break; }
             navigate('referral-dashboard'); break;
+          case 'nav-care-team': {
+            const ctNavCase = state.cases[state.activePetIndex || 0] || state.cases[0];
+            if (ctNavCase) {
+              try {
+                await Promise.all([
+                  ctNavCase.pets?.id ? loadPetCoOwners(ctNavCase.pets.id) : Promise.resolve(),
+                  loadCareTeamInvites(ctNavCase.id),
+                ]);
+              } catch (_) {}
+            }
+            navigate('care-team');
+            break;
+          }
           case 'nav-health-timeline':
             if (!hasFeatureAccess('health_timeline')) { showToast('The health timeline isn\'t available on your current plan yet', 'info'); break; }
             navigate('health-timeline'); break;
