@@ -5150,6 +5150,7 @@ async function calculateBuddyScorecard(buddyId) {
           endpoint: subJson.endpoint,
           p256dh: subJson.keys?.p256dh || '',
           auth: subJson.keys?.auth || '',
+          user_agent: navigator.userAgent || null,
           created_at: new Date().toISOString(),
         }, { onConflict: 'endpoint' });
       } catch (e) {
