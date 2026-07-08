@@ -12419,6 +12419,13 @@ function renderVaccineDueAlerts(vaccines) {
                 loadPetCareProfile(switchedCase.pets?.id),
                 loadTimeline(switchedCase.id),
                 loadMessages(switchedCase.id),
+                // Health-record tables must follow the switch too: the visit-prep
+                // PDF (and the client-case sections) read these live tables, and
+                // stale ones would put the previous pet's meds/vaccines/weight
+                // into the new pet's document.
+                switchedCase.pets?.id ? loadPetMedications(switchedCase.pets.id) : Promise.resolve(),
+                switchedCase.pets?.id ? loadPetVaccines(switchedCase.pets.id) : Promise.resolve(),
+                switchedCase.pets?.id ? loadPetVitals(switchedCase.pets.id) : Promise.resolve(),
                 // Keep the Care Team page in sync when switching pets on it.
                 state.view === 'care-team' && switchedCase.pets?.id ? loadPetCoOwners(switchedCase.pets.id) : Promise.resolve(),
                 state.view === 'care-team' ? loadCareTeamInvites(switchedCase.id) : Promise.resolve(),
