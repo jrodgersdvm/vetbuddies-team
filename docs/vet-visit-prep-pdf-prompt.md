@@ -71,6 +71,27 @@ invented content. Colors: forest #336026, sage #689562, ink #2D2A26,
 soft gray #7A7268, rules #C8BFAF — the brand palette, print-safe on
 white.
 
+## Revision (2026-07-08, same day): it's an emailed record attachment
+
+Jake's framing: this document is emailed to the clinic and linked to the
+pet's medical record ahead of the appointment. It is a **briefing, not a
+worksheet**, which changes three things:
+
+- **No write-in affordances.** The "Notes during the visit" ruled lines
+  and the empty-questions write-in lines are dead ink in an email — cut.
+- **Empty sections are omitted, not apologized for.** On a record
+  attachment, "None recorded" under Medications reads as an affirmative
+  clinical claim ("this pet takes no medications") that the app cannot
+  make — omission asserts nothing. Sections render only with content;
+  order stays fixed for scan consistency. A fully sparse account prints
+  one quiet line ("No owner-reported updates on file for this visit")
+  instead of a header over nothing.
+- **Record-matching and provenance.** The identity line carries the DOB
+  verbatim and the team line carries the owner's email so the clinic can
+  match client and patient; a standing italic caveat under the header —
+  "Owner-reported information from the Vet Buddies care app — verify
+  against clinic records" — sets the document's evidentiary weight.
+
 ## Integration notes
 
 - Keep the signature and call site (`download-vet-visit-pdf` handler)
