@@ -56,7 +56,9 @@
     if (t === 'users') rows = [PROFILE];
     else if (t === 'care_plans') rows = q._eqs['case_id'] === 'c1'
       ? [{ id: 'cp1', case_id: 'c1', summary: 'Managing early arthritis', diet_notes: 'Joint-support kibble', pet_profile: 'Sweet corgi, food-motivated' }]
-      : [];
+      : q._eqs['case_id'] === 'c2'
+        ? [{ id: 'cp2', case_id: 'c2', summary: 'Routine wellness', pet_profile: 'Shy but sweet tabby' }]
+        : [];
     else if (t === 'cases') rows = q._eqs['id'] ? CASES.filter(c => c.id === q._eqs['id']) : CASES;
     else if (t === 'pet_medications') rows = MEDS[q._eqs['pet_id']] || [];
     else if (t === 'appointments') rows = APPTS.filter(a => !q._eqs['case_id'] || a.case_id === q._eqs['case_id']);
