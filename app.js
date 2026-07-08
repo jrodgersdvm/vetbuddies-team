@@ -7185,8 +7185,12 @@ async function calculateBuddyScorecard(buddyId) {
           // Three-tier launch pricing: Buddy $19.99 / Buddy+ $29.99 / VIP $279.
           const tierRevenue = { 'Buddy': 19.99, 'Buddy+': 29.99, 'Buddy VIP': 279 };
           const activeCases = state.cases.filter(c => c.status === 'Active' || c.status === 'pending_assignment');
-          const mrr = activeCases.reduce((sum, c) => sum + (tierRevenue[c.subscription_tier] || 0), 0);
+          // Trial accounts (users.subscription_status === 'trialing') aren't being billed yet —
+          // exclude them from revenue so MRR/ARPU reflect actual paying subscribers.
+          const payingCases = activeCases.filter(c => c.pets?.owner?.subscription_status !== 'trialing');
+          const mrr = payingCases.reduce((sum, c) => sum + (tierRevenue[c.subscription_tier] || 0), 0);
           const arpu = activeCases.length > 0 ? (mrr / activeCases.length) : 0;
+          const trialCount = activeCases.length - payingCases.length;
           const tierCounts = {};
           for (const c of activeCases) { const t = c.subscription_tier || 'None'; tierCounts[t] = (tierCounts[t] || 0) + 1; }
           return `<div style="margin-bottom:16px;">
@@ -7199,6 +7203,7 @@ async function calculateBuddyScorecard(buddyId) {
               <div style="margin-top:12px;display:flex;gap:16px;font-size:12px;opacity:0.8;">
                 <span>Buddy: ${tierCounts['Buddy'] || 0}</span>
                 ${(tierCounts['Buddy+'] || tierCounts['Buddy VIP']) ? `<span style="opacity:0.6;">Legacy: ${(tierCounts['Buddy+'] || 0) + (tierCounts['Buddy VIP'] || 0)}</span>` : ''}
+                ${trialCount > 0 ? `<span style="opacity:0.6;">🎉 Free Trial: ${trialCount} (excluded from revenue)</span>` : ''}
               </div>
             </div>
           </div>`;
