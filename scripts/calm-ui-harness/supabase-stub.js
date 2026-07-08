@@ -26,6 +26,22 @@
     // like a real backend would.
     { id: 'a1', case_id: 'c1', title: 'Recheck', scheduled_at: new Date((Math.floor(Date.now() / 864e5) + 10) * 864e5).toISOString() },
   ];
+  const dayISO = (offset) => new Date((Math.floor(Date.now() / 864e5) + offset) * 864e5).toISOString().slice(0, 10);
+  const OPEN_QUESTIONS = [
+    { id: 'q1', care_plan_id: 'cp1', question: 'Is it ok to give Percy salmon as a treat?', context: 'I already do — am I causing issues?', status: 'open' },
+    { id: 'q2', care_plan_id: 'cp1', question: "Is Percy's weight where it should be?", status: 'open' },
+  ];
+  const DIAGNOSES = [
+    { id: 'd1', care_plan_id: 'cp1', condition_name: 'Early arthritis', diagnosed_on: dayISO(-120) },
+  ];
+  const VACCINES = [
+    { id: 'v1', pet_id: 'p1', name: 'Rabies Vaccination', administered_date: dayISO(-425), due_date: dayISO(-60) },
+    { id: 'v2', pet_id: 'p1', name: 'DA2PP Vaccination', administered_date: dayISO(-351), due_date: dayISO(14) },
+    { id: 'v3', pet_id: 'p1', name: 'Bordetella Vaccination', administered_date: dayISO(-125), due_date: dayISO(240) },
+  ];
+  const VITALS = [
+    { id: 'w1', pet_id: 'p1', weight: '28 lb', recorded_at: dayISO(-20) },
+  ];
   let insertSeq = 0;
 
   function resultFor(q) {
@@ -42,6 +58,10 @@
     else if (t === 'cases') rows = q._eqs['id'] ? CASES.filter(c => c.id === q._eqs['id']) : CASES;
     else if (t === 'pet_medications') rows = MEDS[q._eqs['pet_id']] || [];
     else if (t === 'appointments') rows = APPTS.filter(a => !q._eqs['case_id'] || a.case_id === q._eqs['case_id']);
+    else if (t === 'care_plan_open_questions') rows = OPEN_QUESTIONS.filter(r => r.care_plan_id === q._eqs['care_plan_id']);
+    else if (t === 'care_plan_diagnoses') rows = DIAGNOSES.filter(r => r.care_plan_id === q._eqs['care_plan_id']);
+    else if (t === 'pet_vaccines') rows = VACCINES.filter(r => r.pet_id === q._eqs['pet_id']);
+    else if (t === 'pet_vitals') rows = VITALS.filter(r => r.pet_id === q._eqs['pet_id']);
     // everything else: empty
     if (q._single === 'single') return { data: rows[0] || null, error: rows[0] ? null : { message: 'Row not found', code: 'PGRST116' } };
     if (q._single === 'maybe') return { data: rows[0] || null, error: null };

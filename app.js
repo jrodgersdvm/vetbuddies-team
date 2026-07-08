@@ -2917,161 +2917,347 @@ async function generateVetVisitPDF(carePlan, currentCase, profile) {
     return null;
   }
 
+  // Branded one-pager per docs/vet-visit-prep-pdf-prompt.md. Reads the live
+  // tables (open questions, meds, vaccines, diagnoses, appointments, vitals)
+  // — the care-plan text fields are fallbacks only. Core PDF fonts can't
+  // render emoji, so the design is type + rules + color, no icons.
   const doc = new jsPDF();
-  const pageWidth = doc.internal.pageSize.getWidth();
-  const pageHeight = doc.internal.pageSize.getHeight();
-  const margin = 20;
-  const contentWidth = pageWidth - 2 * margin;
-  let y = 20;
-
-  const ensureRoom = (needed) => {
-    if (y + needed > pageHeight - 20) {
-      doc.addPage();
-      y = 20;
-    }
-  };
-
-  const writeBlock = (text, opts = {}) => {
-    const fontSize = opts.size || 10;
-    const color = opts.color || 50;
-    const lineHeight = opts.lineHeight || 5;
-    doc.setFontSize(fontSize);
-    doc.setTextColor(color);
-    const lines = doc.splitTextToSize(text || '', contentWidth);
-    ensureRoom(lines.length * lineHeight + 4);
-    doc.text(lines, margin, y);
-    y += lines.length * lineHeight;
-  };
-
-  const heading = (text) => {
-    ensureRoom(14);
-    doc.setFontSize(13);
-    doc.setTextColor(51, 96, 38);
-    doc.text(text, margin, y);
-    y += 8;
-  };
+  const W = doc.internal.pageSize.getWidth();
+  const H = doc.internal.pageSize.getHeight();
+  const M = 18;
+  const CW = W - 2 * M;
+  const FOREST = [51, 96, 38], SAGE = [104, 149, 98], INK = [45, 42, 38],
+        SOFT = [122, 114, 104], RULE = [200, 191, 175],
+        AMBER = [176, 122, 33], BRICK = [79, 21, 47], TINT = [228, 236, 223];
+  let y = 0;
 
   const pet = currentCase?.pets || {};
-  const ownerName = profile?.name || pet.owner?.name || '';
   const petName = pet.name || 'Pet';
+  const caseId = currentCase?.id;
+  const ownerName = profile?.name || pet.owner?.name || '';
+  const buddyName = currentCase?.assigned_buddy?.name || '';
+  const today = new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
 
-  doc.setFontSize(22);
-  doc.setTextColor(51, 96, 38);
-  doc.text('Vet Visit Prep', margin, y);
-  y += 9;
-  doc.setFontSize(10);
-  doc.setTextColor(120);
-  doc.text(`For ${petName} — ${new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' })}`, margin, y);
-  y += 12;
-
-  const petMeta = [
-    ['Pet', petName],
-    ['Species', pet.species || ''],
-    ['Breed', pet.breed || ''],
-    ['Date of birth', pet.dob || ''],
-    ['Weight', pet.weight || ''],
-    ['Owner', ownerName],
-  ].filter(([, v]) => v);
-  doc.setFontSize(10);
-  doc.setTextColor(50);
-  for (const [label, val] of petMeta) {
-    ensureRoom(6);
-    doc.setFont(undefined, 'bold');
-    doc.text(`${label}: `, margin, y);
-    const labelWidth = doc.getTextWidth(`${label}: `);
-    doc.setFont(undefined, 'normal');
-    doc.text(String(val), margin + labelWidth, y);
-    y += 5;
-  }
-  y += 6;
-
+  const nowMs = Date.now();
+  const meds = (state.petMedications || []).filter(m => m.is_active !== false);
+  const vaccines = state.petVaccines || [];
+  const questions = (state.openQuestions || []).filter(q => (q.status || 'open') !== 'resolved');
+  const dxList = state.diagnoses || [];
+  const nextAppt = (state.appointments || [])
+    .filter(a => a.case_id === caseId && a.scheduled_at && new Date(a.scheduled_at).getTime() >= nowMs)
+    .sort((a, b) => new Date(a.scheduled_at) - new Date(b.scheduled_at))[0];
+  const latestWeight = (state.petVitals || []).find(v => v.weight);
   const lp = carePlan?.living_plan || null;
   const cpRaw = carePlan || {};
-  const openQuestionsRaw = lp?.open_questions || cpRaw.open_questions || [];
-  const openQuestions = Array.isArray(openQuestionsRaw)
-    ? openQuestionsRaw.map(q => typeof q === 'string' ? q : (q?.question || q?.text || '')).filter(Boolean)
-    : (typeof openQuestionsRaw === 'string' ? [openQuestionsRaw] : []);
 
-  heading('Questions to ask the vet');
-  if (openQuestions.length === 0) {
-    writeBlock('No saved questions yet — write any here before you go.', { color: 130 });
-    for (let i = 0; i < 4; i++) {
-      ensureRoom(8);
-      doc.setDrawColor(180);
-      doc.line(margin, y + 2, pageWidth - margin, y + 2);
-      y += 8;
+  const fmtDate = (d) => { try { return new Date(d).toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' }); } catch (e) { return String(d || ''); } };
+  const fmtDateTime = (d) => {
+    try {
+      const t = new Date(d);
+      const day = t.toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
+      // Date-only appointments land on midnight — showing "12:00 AM" reads as
+      // a real time, so omit the clock in that case.
+      return (t.getHours() === 0 && t.getMinutes() === 0) ? day : day + ' at ' + t.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
+    } catch (e) { return String(d || ''); }
+  };
+  const petAge = (() => {
+    if (!pet.dob) return '';
+    try {
+      const b = new Date(pet.dob), n = new Date();
+      let yrs = n.getFullYear() - b.getFullYear();
+      const m = n.getMonth() - b.getMonth();
+      if (m < 0 || (m === 0 && n.getDate() < b.getDate())) yrs--;
+      return yrs < 1 ? 'under 1 yr' : yrs + ' yr' + (yrs === 1 ? '' : 's');
+    } catch (e) { return ''; }
+  })();
+
+  const ensureRoom = (needed) => {
+    if (y + needed > H - 22) { doc.addPage(); y = 20; }
+  };
+  const hairline = (yy) => { doc.setDrawColor(...RULE); doc.setLineWidth(0.2); doc.line(M, yy, W - M, yy); };
+  const section = (label) => {
+    ensureRoom(16);
+    y += 4;
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(9);
+    doc.setTextColor(...SAGE);
+    doc.text(label.toUpperCase(), M, y);
+    hairline(y + 1.8);
+    y += 8;
+  };
+  const emptyLine = (text) => {
+    ensureRoom(6);
+    doc.setFont('helvetica', 'italic');
+    doc.setFontSize(9.5);
+    doc.setTextColor(...SOFT);
+    doc.text(text, M, y);
+    y += 6;
+  };
+  const ruledLines = (n) => {
+    for (let i = 0; i < n; i++) {
+      ensureRoom(9);
+      doc.setDrawColor(...RULE);
+      doc.setLineWidth(0.2);
+      doc.line(M, y + 4, W - M, y + 4);
+      y += 9;
     }
-  } else {
-    for (let i = 0; i < openQuestions.length; i++) {
-      writeBlock(`${i + 1}. ${openQuestions[i]}`, { size: 11, color: 30, lineHeight: 6 });
-      y += 2;
-    }
+  };
+
+  // ── Header band ──
+  doc.setFillColor(...FOREST);
+  doc.rect(0, 0, W, 30, 'F');
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(8.5);
+  doc.setTextColor(200, 216, 194);
+  doc.text('V E T   B U D D I E S', M, 11);
+  doc.setFontSize(20);
+  doc.setTextColor(255, 255, 255);
+  doc.text('Vet Visit Prep', M, 21.5);
+  doc.setFont('helvetica', 'normal');
+  doc.setFontSize(9);
+  doc.setTextColor(200, 216, 194);
+  doc.text(today, W - M, 21.5, { align: 'right' });
+
+  // ── Identity block ──
+  y = 40;
+  const speciesLabel = pet.species ? String(pet.species).charAt(0).toUpperCase() + String(pet.species).slice(1) : '';
+  const idBits = [speciesLabel, pet.breed, petAge, latestWeight ? String(latestWeight.weight) : (pet.weight ? String(pet.weight) : '')].filter(Boolean);
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(15);
+  doc.setTextColor(...INK);
+  doc.text(petName + (idBits.length ? '   ' : ''), M, y);
+  if (idBits.length) {
+    const nameW = doc.getTextWidth(petName + '   ');
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(10.5);
+    doc.setTextColor(...SOFT);
+    doc.text(idBits.join('  ·  '), M + nameW, y);
   }
-  y += 6;
+  y += 6.5;
+  doc.setFont('helvetica', 'normal');
+  doc.setFontSize(9);
+  doc.setTextColor(...SOFT);
+  const teamLine = [
+    ownerName ? 'Owner: ' + ownerName : '',
+    buddyName ? 'Vet Buddy: ' + buddyName : '',
+    'Supervised by Dr. Rodgers, Rodgers Veterinary Care',
+  ].filter(Boolean).join('   ·   ');
+  doc.text(doc.splitTextToSize(teamLine, CW), M, y);
+  y += 8;
 
-  heading('Current concerns');
-  const concerns = [
-    ['Active diagnoses', lp?.diagnoses || cpRaw.diagnoses],
-    ['Allergies', lp?.allergies || cpRaw.allergies],
-    ['Diet notes', lp?.diet_notes || cpRaw.diet_notes],
-    ['Lifestyle notes', lp?.lifestyle_notes || cpRaw.lifestyle_notes],
-  ].filter(([, v]) => v && String(v).trim());
-  if (concerns.length === 0) {
-    writeBlock('No active concerns recorded.', { color: 130 });
+  // ── This visit ──
+  if (nextAppt) {
+    ensureRoom(18);
+    doc.setFillColor(...TINT);
+    doc.roundedRect(M, y - 1, CW, 14, 2, 2, 'F');
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(8);
+    doc.setTextColor(...FOREST);
+    doc.text('THIS VISIT', M + 5, y + 4.5);
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(10);
+    doc.setTextColor(...INK);
+    doc.text((nextAppt.title ? nextAppt.title + '  —  ' : '') + fmtDateTime(nextAppt.scheduled_at), M + 5, y + 9.8);
+    y += 18;
+  }
+
+  // ── 1. Questions from the owner ──
+  section('Questions from the owner');
+  if (questions.length === 0) {
+    emptyLine('No saved questions yet — jot any down here.');
+    ruledLines(3);
   } else {
-    for (const [label, val] of concerns) {
-      doc.setFontSize(10);
-      doc.setTextColor(80);
-      doc.setFont(undefined, 'bold');
-      ensureRoom(6);
-      doc.text(label, margin, y);
-      y += 5;
-      doc.setFont(undefined, 'normal');
-      writeBlock(String(val), { color: 50 });
+    questions.forEach((q, i) => {
+      const qLines = doc.splitTextToSize((i + 1) + '.  ' + (q.question || ''), CW);
+      ensureRoom(qLines.length * 5.5 + 6);
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(11);
+      doc.setTextColor(...INK);
+      doc.text(qLines, M, y);
+      y += qLines.length * 5.5;
+      if (q.context) {
+        const cLines = doc.splitTextToSize(q.context, CW - 7);
+        ensureRoom(cLines.length * 4.5 + 3);
+        doc.setFont('helvetica', 'normal');
+        doc.setFontSize(9);
+        doc.setTextColor(...SOFT);
+        doc.text(cLines, M + 7, y);
+        y += cLines.length * 4.5;
+      }
       y += 3;
-    }
+    });
   }
-  y += 4;
 
-  heading('Current medications');
-  const medsText = lp?.medications
-    || (Array.isArray(cpRaw.medications)
-      ? cpRaw.medications.map(m => typeof m === 'string' ? m : (m?.name || '')).filter(Boolean).join('\n')
-      : cpRaw.medications);
-  if (medsText && String(medsText).trim()) {
-    writeBlock(String(medsText));
+  // ── 2. Current medications ──
+  section('Current medications');
+  const medsFallback = lp?.medications || (typeof cpRaw.medications === 'string' ? cpRaw.medications : '');
+  if (meds.length === 0 && !(medsFallback && medsFallback.trim())) {
+    emptyLine('None recorded.');
+  } else if (meds.length === 0) {
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(10);
+    doc.setTextColor(...INK);
+    const fLines = doc.splitTextToSize(medsFallback, CW);
+    ensureRoom(fLines.length * 5 + 4);
+    doc.text(fLines, M, y);
+    y += fLines.length * 5 + 2;
   } else {
-    writeBlock('No medications recorded.', { color: 130 });
+    meds.forEach((m, i) => {
+      ensureRoom(11);
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(10.5);
+      doc.setTextColor(...INK);
+      doc.text([m.name, m.dose].filter(Boolean).join('  ·  '), M, y);
+      if (m.frequency) {
+        doc.setFont('helvetica', 'normal');
+        doc.setFontSize(9.5);
+        doc.setTextColor(...SOFT);
+        doc.text(String(m.frequency), W - M, y, { align: 'right' });
+      }
+      y += 4.5;
+      if (m.start_date) {
+        doc.setFont('helvetica', 'normal');
+        doc.setFontSize(8.5);
+        doc.setTextColor(...SOFT);
+        doc.text('Since ' + fmtDate(m.start_date), M, y);
+        y += 4;
+      }
+      if (i < meds.length - 1) { hairline(y); y += 4.5; }
+    });
+    y += 2;
   }
-  y += 4;
 
-  heading('Recent activity');
+  // ── 3. Vaccines ──
+  section('Vaccines');
+  if (vaccines.length === 0) {
+    emptyLine('None recorded.');
+  } else {
+    const DAY = 86400000;
+    vaccines.forEach((v, i) => {
+      ensureRoom(12);
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(10.5);
+      doc.setTextColor(...INK);
+      doc.text(String(v.name || 'Vaccine'), M, y);
+      if (v.due_date) {
+        const dueMs = new Date(v.due_date).getTime();
+        let status, color;
+        if (dueMs < nowMs) { status = 'Overdue'; color = BRICK; }
+        else if (dueMs <= nowMs + 30 * DAY) { status = 'Due soon'; color = AMBER; }
+        else { status = 'Current'; color = SAGE; }
+        doc.setFont('helvetica', 'bold');
+        doc.setFontSize(9);
+        doc.setTextColor(...color);
+        doc.text(status, W - M, y, { align: 'right' });
+      }
+      y += 4.5;
+      const given = v.administered_date ? 'Given ' + fmtDate(v.administered_date) : '';
+      const due = v.due_date ? 'Due ' + fmtDate(v.due_date) : '';
+      if (given || due) {
+        doc.setFont('helvetica', 'normal');
+        doc.setFontSize(8.5);
+        doc.setTextColor(...SOFT);
+        doc.text([given, due].filter(Boolean).join('  ·  '), M, y);
+        y += 4;
+      }
+      if (i < vaccines.length - 1) { hairline(y); y += 4.5; }
+    });
+    y += 2;
+  }
+
+  // ── 4. Known conditions ──
+  section('Known conditions');
+  const allergies = lp?.allergies || cpRaw.allergies;
+  if (dxList.length === 0 && !(allergies && String(allergies).trim()) && !(cpRaw.diagnoses && String(cpRaw.diagnoses).trim())) {
+    emptyLine('None recorded.');
+  } else {
+    dxList.forEach((d) => {
+      ensureRoom(6);
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(10.5);
+      doc.setTextColor(...INK);
+      doc.text(String(d.condition_name || ''), M, y);
+      if (d.diagnosed_on) {
+        doc.setFont('helvetica', 'normal');
+        doc.setFontSize(8.5);
+        doc.setTextColor(...SOFT);
+        doc.text('since ' + fmtDate(d.diagnosed_on), W - M, y, { align: 'right' });
+      }
+      y += 5.5;
+    });
+    if (dxList.length === 0 && cpRaw.diagnoses && String(cpRaw.diagnoses).trim()) {
+      const dLines = doc.splitTextToSize(String(cpRaw.diagnoses), CW);
+      ensureRoom(dLines.length * 5);
+      doc.setFont('helvetica', 'normal');
+      doc.setFontSize(10);
+      doc.setTextColor(...INK);
+      doc.text(dLines, M, y);
+      y += dLines.length * 5;
+    }
+    if (allergies && String(allergies).trim()) {
+      ensureRoom(6);
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(9);
+      doc.setTextColor(...SOFT);
+      doc.text('Allergies:  ', M, y);
+      const aw = doc.getTextWidth('Allergies:  ');
+      doc.setFont('helvetica', 'normal');
+      doc.setTextColor(...INK);
+      doc.text(String(allergies), M + aw, y);
+      y += 5.5;
+    }
+    y += 1;
+  }
+
+  // ── 5. Recent activity ──
+  section('Recent activity');
   const lastSummary = lp?.last_appointment_summary || cpRaw.last_appointment_summary;
   const lastAt = lp?.last_appointment_at || cpRaw.last_appointment_at;
+  let hasRecent = false;
   if (lastSummary) {
+    hasRecent = true;
     if (lastAt) {
-      doc.setFontSize(9);
-      doc.setTextColor(120);
-      ensureRoom(6);
-      doc.text(`Last appointment: ${new Date(lastAt).toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' })}`, margin, y);
-      y += 5;
+      ensureRoom(5);
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(8.5);
+      doc.setTextColor(...SOFT);
+      doc.text('Last appointment · ' + fmtDate(lastAt), M, y);
+      y += 4.5;
     }
-    writeBlock(String(lastSummary));
-  } else {
-    writeBlock('No recent appointment summary on file.', { color: 130 });
+    const sLines = doc.splitTextToSize(String(lastSummary), CW);
+    ensureRoom(sLines.length * 5 + 3);
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(10);
+    doc.setTextColor(...INK);
+    doc.text(sLines, M, y);
+    y += sLines.length * 5 + 2;
   }
-  y += 4;
-
-  const nextSteps = lp?.next_steps || cpRaw.next_steps;
-  if (nextSteps && String(nextSteps).trim()) {
-    heading('Next steps from the care team');
-    writeBlock(String(nextSteps));
-    y += 4;
+  if (latestWeight) {
+    hasRecent = true;
+    ensureRoom(6);
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(9.5);
+    doc.setTextColor(...INK);
+    doc.text('Latest weight: ' + latestWeight.weight + (latestWeight.recorded_at ? '  (' + fmtDate(latestWeight.recorded_at) + ')' : ''), M, y);
+    y += 6;
   }
+  if (!hasRecent) emptyLine('No recent appointment summary on file.');
 
-  doc.setFontSize(8);
-  doc.setTextColor(160);
-  doc.text(`Generated by Vet Buddies on ${new Date().toLocaleDateString()} — share with your vet during the visit.`, margin, pageHeight - 12);
+  // ── 6. Notes during the visit ──
+  section('Notes during the visit');
+  ruledLines(4);
+
+  // ── Footer on every page ──
+  const pages = doc.getNumberOfPages();
+  for (let p = 1; p <= pages; p++) {
+    doc.setPage(p);
+    hairline(H - 14);
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(8);
+    doc.setTextColor(...SOFT);
+    doc.text('Prepared with Vet Buddies for ' + petName + '  ·  ' + today, M, H - 9);
+    doc.text('Page ' + p + ' of ' + pages, W - M, H - 9, { align: 'right' });
+  }
 
   return doc.output('blob');
 }
