@@ -7000,7 +7000,7 @@ async function calculateBuddyScorecard(buddyId) {
       html += `<div style="display:flex;justify-content:flex-end;gap:8px;margin-bottom:12px;flex-wrap:wrap;">
         ${canEdit ? `<button class="btn btn-secondary btn-small" data-action="refresh-care-plan-from-activity" title="Let AI scan recent messages, notes, appointments, and escalations for this case and suggest updates to the care plan" ${state.aiExtractionInProgress ? 'disabled' : ''}>${state.aiExtractionInProgress ? '⏳ Refreshing…' : '🔄 Refresh from activity'}</button>` : ''}
         <button class="btn btn-primary btn-small" data-action="prepare-for-visit" title="Generate a focused one-page summary to bring to your vet appointment">📋 Prepare for Visit</button>
-        <button class="btn btn-secondary btn-small" onclick="window.print()" title="Print the full care plan or save as PDF">🖨️ Print Full Plan</button>
+        <button class="btn btn-secondary btn-small" data-action="print-full-plan" title="Print the full care plan or save as PDF">🖨️ Print Full Plan</button>
         <button class="btn btn-secondary btn-small" data-action="export-care-plan" title="Export the Living Care Plan as text">📤 Share</button>
       </div>`;
 
@@ -7777,6 +7777,311 @@ async function calculateBuddyScorecard(buddyId) {
         }
       }
       return html;
+    }
+
+    // ── Printable documents (Prepare for Visit + Print Full Plan) ──────────
+    // Injects a hidden print-only node plus a stylesheet that suppresses the
+    // rest of the page, opens the print dialog, and cleans up afterwards.
+    function openPrintableDocument(printableHtml, docTitle) {
+      const styleEl = document.createElement('style');
+      styleEl.id = 'vb-print-style';
+      styleEl.textContent = `
+        #vb-printable { display: none; }
+        @media print {
+          body > *:not(#vb-printable) { display: none !important; }
+          #vb-printable { display: block !important; }
+          @page { margin: 0.5in; }
+        }
+      `;
+      const wrap = document.createElement('div');
+      wrap.innerHTML = printableHtml;
+      const printableNode = wrap.firstElementChild;
+      printableNode.id = 'vb-printable';
+      document.head.appendChild(styleEl);
+      document.body.appendChild(printableNode);
+
+      const origTitle = document.title;
+      document.title = docTitle;
+
+      const cleanup = () => {
+        printableNode.remove();
+        styleEl.remove();
+        document.title = origTitle;
+        window.removeEventListener('afterprint', cleanup);
+      };
+      window.addEventListener('afterprint', cleanup);
+
+      // Small delay so the browser commits the new DOM before opening the print dialog.
+      setTimeout(() => window.print(), 100);
+      // Safety cleanup in case afterprint never fires (Safari quirk).
+      setTimeout(() => { if (document.getElementById('vb-printable')) cleanup(); }, 60000);
+    }
+
+    // Full care plan as a shareable print document. A printout's audience is
+    // unknowable once it leaves the printer, so this contains exactly what a
+    // client may see on screen: staff-only sections (Owner Context, Owner
+    // Wellness, Handoff Notes, DVM Clinical Notes, Internal Notes), check-in
+    // quotas, and the conversation thread never print. Sections render only
+    // when they have content — omission asserts nothing, placeholders assert
+    // too much. See docs/careplan-printout-review-prompt.md.
+    function buildFullPlanPrintableHtml() {
+      const pet = state.currentCase?.pets || {};
+      const owner = pet.owner || {};
+      const buddy = state.currentCase?.assigned_buddy;
+      const lp = state.carePlan?.living_plan || emptyLivingCarePlan();
+      const now = new Date();
+
+      const _fmtDate = (s) => s ? new Date(s).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' }) : '';
+      const _fmtDateTime = (s) => s ? new Date(s).toLocaleString(undefined, { year: 'numeric', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) : '';
+      const _ageFromDob = (dob) => {
+        if (!dob) return '';
+        const d = new Date(dob);
+        const years = now.getFullYear() - d.getFullYear() - ((now.getMonth() < d.getMonth() || (now.getMonth() === d.getMonth() && now.getDate() < d.getDate())) ? 1 : 0);
+        return years > 0 ? `${years} yr${years === 1 ? '' : 's'}` : '< 1 yr';
+      };
+      const H2 = 'font-size:14px;color:#336026;margin:0 0 8px 0;border-bottom:1px solid #ddd;padding-bottom:4px;';
+      const ROW = 'padding:6px 0;border-bottom:1px solid #eee;font-size:13px;page-break-inside:avoid;';
+      const MUTED = 'color:#666;font-size:12px;';
+      const section = (title, body) => body ? `<section style="margin-bottom:18px;"><h2 style="${H2}">${title}</h2>${body}</section>` : '';
+      const statusChip = (label) => `<span style="font-size:11px;color:#555;border:1px solid #ccc;border-radius:10px;padding:1px 8px;white-space:nowrap;">${esc(label)}</span>`;
+
+      // ── Header ──
+      const identityLine = [
+        esc(pet.species || ''),
+        pet.breed ? esc(pet.breed) : '',
+        pet.dob ? `${_ageFromDob(pet.dob)} (DOB ${_fmtDate(pet.dob)})` : '',
+        pet.weight ? esc(String(pet.weight)) : '',
+      ].filter(Boolean).join(' · ');
+      const lcpStatus = ({ active: 'Active', paused: 'Paused', archived: 'Archived' })[state.carePlan?.lcp_status || 'active'] || 'Active';
+      const tier = state.currentCase?.subscription_tier || 'Buddy';
+      const headerBlock = `
+        <header style="border-bottom:2px solid #336026;padding-bottom:12px;margin-bottom:16px;">
+          <div style="display:flex;justify-content:space-between;align-items:flex-end;gap:16px;">
+            <div>
+              <div style="font-size:11px;color:#666;letter-spacing:1px;text-transform:uppercase;">Vet Buddies · Living Care Plan</div>
+              <h1 style="margin:4px 0 0 0;font-size:24px;color:#336026;">${esc(pet.name || 'Pet')}</h1>
+              ${identityLine ? `<div style="font-size:13px;color:#444;margin-top:4px;">${identityLine}</div>` : ''}
+              <div style="font-size:12px;color:#555;margin-top:4px;">
+                Owner: ${esc(owner.name || 'Unknown')}${owner.email ? ' · ' + esc(owner.email) : ''}
+              </div>
+              <div style="font-size:12px;color:#555;margin-top:2px;">
+                ${buddy?.name ? `Vet Buddy: ${esc(buddy.name)} · ` : ''}Supervised by Dr. Jake Rodgers, DVM
+              </div>
+            </div>
+            <div style="text-align:right;font-size:11px;color:#666;">
+              <div>Plan: ${esc(lcpStatus)} · ${esc(tier)}</div>
+              <div style="margin-top:2px;">Printed ${_fmtDate(now.toISOString())}</div>
+            </div>
+          </div>
+          <div style="font-size:11px;color:#888;font-style:italic;margin-top:8px;">
+            Owner-reported information from the Vet Buddies care app — verify against clinic records.
+          </div>
+        </header>`;
+
+      // ── Next appointment ──
+      const upcoming = (state.appointments || [])
+        .filter(a => a.status !== 'cancelled' && new Date(a.scheduled_at) >= now)
+        .sort((a, b) => new Date(a.scheduled_at) - new Date(b.scheduled_at));
+      const nextApptBlock = upcoming.length ? `
+        <section style="margin-bottom:18px;background:#f0f7f4;border-left:3px solid #336026;padding:10px 14px;page-break-inside:avoid;">
+          <div style="font-size:11px;color:#666;letter-spacing:1px;text-transform:uppercase;margin-bottom:2px;">Next Appointment</div>
+          <div style="font-size:15px;font-weight:600;color:#222;">${esc(upcoming[0].title || 'Visit')}</div>
+          <div style="font-size:13px;color:#444;margin-top:2px;">${_fmtDateTime(upcoming[0].scheduled_at)}${upcoming[0].type ? ' · ' + esc(upcoming[0].type) : ''}</div>
+        </section>` : '';
+
+      // ── Pet profile ──
+      const profileBlock = section('Pet profile', lp.pet_profile
+        ? `<div style="font-size:13px;line-height:1.6;white-space:pre-wrap;">${esc(lp.pet_profile)}</div>` : '');
+
+      // ── Active care goals ──
+      const goalsList = (state.goals && state.goals.length > 0) ? state.goals : (lp.active_care_goals || []);
+      const goalsBlock = section('Care goals', goalsList.length ? goalsList.map(g => `
+        <div style="${ROW}display:flex;justify-content:space-between;gap:10px;align-items:flex-start;">
+          <div style="flex:1;">
+            <div style="font-weight:600;">${esc(g.goal_text || '')}</div>
+            <div style="${MUTED}margin-top:2px;">${g.set_by_owner ? 'Set by owner' : 'Set by Buddy'}${g.created_at ? ' · ' + _fmtDate(g.created_at) : ''}${g.dvm_reviewed ? ' · Reviewed by Dr. Rodgers' : ''}</div>
+          </div>
+          ${statusChip(g.status || 'active')}
+        </div>`).join('') : '');
+
+      // ── Diagnoses ──
+      const dxBlock = section('Diagnoses', (state.diagnoses || []).length ? state.diagnoses.map(dx => `
+        <div style="${ROW}">
+          <div style="display:flex;justify-content:space-between;gap:10px;align-items:flex-start;">
+            <div style="font-weight:600;">${esc(dx.condition_name || '')}</div>
+            ${statusChip(dx.status || 'active')}
+          </div>
+          ${(dx.diagnosing_vet || dx.diagnosed_on) ? `<div style="${MUTED}margin-top:2px;">${dx.diagnosing_vet ? 'As recorded from ' + esc(dx.diagnosing_vet) : 'Recorded'}${dx.diagnosed_on ? ' · ' + _fmtDate(dx.diagnosed_on) : ''}</div>` : ''}
+          ${dx.notes ? `<div style="font-size:12px;color:#555;margin-top:2px;white-space:pre-wrap;">${esc(dx.notes)}</div>` : ''}
+        </div>`).join('') : '');
+
+      // ── Medications: active as a table, past compact ──
+      const activeMeds = (state.petMedications || []).filter(m => m.is_active);
+      const pastMeds = (state.petMedications || []).filter(m => !m.is_active);
+      let medsBody = '';
+      if (activeMeds.length) {
+        medsBody += `<table style="width:100%;border-collapse:collapse;font-size:13px;">
+          <thead>
+            <tr style="border-bottom:1px solid #ccc;text-align:left;color:#666;">
+              <th style="padding:4px 8px 4px 0;font-weight:600;">Active medication</th>
+              <th style="padding:4px 8px;font-weight:600;">Dose</th>
+              <th style="padding:4px 8px;font-weight:600;">Frequency</th>
+              <th style="padding:4px 8px;font-weight:600;">Started</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${activeMeds.map(m => `<tr style="border-bottom:1px solid #eee;page-break-inside:avoid;">
+              <td style="padding:6px 8px 6px 0;font-weight:600;">${esc(m.name || '')}</td>
+              <td style="padding:6px 8px;">${esc(m.dose || '') || '—'}</td>
+              <td style="padding:6px 8px;">${esc(m.frequency || '') || '—'}</td>
+              <td style="padding:6px 8px;color:#666;">${_fmtDate(m.start_date) || '—'}</td>
+            </tr>`).join('')}
+          </tbody>
+        </table>`;
+      }
+      if (pastMeds.length) {
+        medsBody += `<div style="${MUTED}margin-top:${activeMeds.length ? '10px' : '0'};">
+          <span style="font-weight:600;">Past:</span>
+          ${pastMeds.map(m => esc([m.name, m.dose].filter(Boolean).join(' '))).join('; ')}
+        </div>`;
+      }
+      const medsBlock = section('Medications', medsBody);
+
+      // ── Vaccines ──
+      const thirtyDays = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000);
+      const vaxBlock = section('Vaccines', (state.petVaccines || []).length ? state.petVaccines.map(v => {
+        const due = v.due_date ? new Date(v.due_date) : null;
+        const status = due && due < now ? ['Overdue', '#c62828']
+          : due && due < thirtyDays ? ['Due soon', '#d68910']
+          : ['Current', '#2e7d32'];
+        return `<div style="${ROW}display:flex;justify-content:space-between;gap:10px;">
+          <div>
+            <span style="font-weight:600;">${esc(v.name || '')}</span>
+            <span style="${MUTED}margin-left:8px;">${v.administered_date ? 'Given ' + _fmtDate(v.administered_date) : ''}${v.due_date ? (v.administered_date ? ' · ' : '') + 'Due ' + _fmtDate(v.due_date) : ''}</span>
+          </div>
+          <span style="font-size:12px;font-weight:600;color:${status[1]};">${status[0]}</span>
+        </div>`;
+      }).join('') : '');
+
+      // ── Vitals: five most recent entries ──
+      const vitals = (state.petVitals || []).slice(0, 5);
+      const vitalsBlock = section('Vitals', vitals.length ? vitals.map(v => `
+        <div style="${ROW}">
+          <span style="${MUTED}display:inline-block;min-width:100px;">${_fmtDate(v.recorded_at)}</span>
+          ${v.weight ? `<span style="font-weight:600;">Weight ${esc(String(v.weight))}</span>` : ''}
+          ${v.weight && v.temperature ? ' · ' : ''}
+          ${v.temperature ? `<span>Temp ${esc(String(v.temperature))}°F</span>` : ''}
+          ${v.notes ? `<div style="${MUTED}margin-top:2px;">${esc(v.notes)}</div>` : ''}
+        </div>`).join('') + ((state.petVitals || []).length > 5 ? `<div style="${MUTED}margin-top:4px;">…and ${state.petVitals.length - 5} earlier entries</div>` : '') : '');
+
+      // ── Open questions for the vet (unresolved only) ──
+      const priorityRank = { urgent: 0, normal: 1, whenever: 2 };
+      const openQs = (state.openQuestions || [])
+        .filter(q => q.status !== 'answered' && q.status !== 'moot')
+        .sort((a, b) => (priorityRank[a.priority] ?? 1) - (priorityRank[b.priority] ?? 1));
+      const questionsBlock = section('Open questions for the vet', openQs.length ? `
+        <ol style="margin:0;padding-left:20px;font-size:13px;line-height:1.7;">
+          ${openQs.map(q => `<li style="margin-bottom:6px;page-break-inside:avoid;">
+            ${q.priority === 'urgent' ? '<span style="background:#fdecea;color:#c62828;font-size:10px;font-weight:700;padding:1px 6px;border-radius:3px;letter-spacing:0.5px;margin-right:6px;">URGENT</span>' : ''}
+            <strong>${esc(q.question || '')}</strong>
+            ${q.context ? `<div style="color:#555;margin-top:2px;font-size:12px;">${esc(q.context)}</div>` : ''}
+          </li>`).join('')}
+        </ol>` : '');
+
+      // ── Appointments — once: all upcoming, five most recent past ──
+      const pastAppts = (state.appointments || [])
+        .filter(a => a.status !== 'cancelled' && new Date(a.scheduled_at) < now)
+        .sort((a, b) => new Date(b.scheduled_at) - new Date(a.scheduled_at));
+      const apptLine = (a, done) => `<div style="${ROW}display:flex;justify-content:space-between;gap:10px;">
+        <div><span style="font-weight:600;">${esc(a.title || 'Appointment')}</span>${a.type ? ` <span style="${MUTED}">· ${esc(a.type)}</span>` : ''}${done ? ` ${statusChip('Completed')}` : ''}</div>
+        <span style="${MUTED}white-space:nowrap;">${_fmtDateTime(a.scheduled_at)}</span>
+      </div>`;
+      let apptsBody = '';
+      if (upcoming.length) apptsBody += upcoming.map(a => apptLine(a, false)).join('');
+      if (pastAppts.length) apptsBody += pastAppts.slice(0, 5).map(a => apptLine(a, true)).join('');
+      if (pastAppts.length > 5) apptsBody += `<div style="${MUTED}margin-top:4px;">…and ${pastAppts.length - 5} earlier appointments</div>`;
+      const apptsBlock = section('Appointments', apptsBody);
+
+      // ── Milestones & wins ──
+      const winsBlock = section('Milestones & wins', (lp.milestones_and_wins || []).length ? lp.milestones_and_wins.map(m => `
+        <div style="${ROW}">
+          <div style="font-weight:600;">${esc(m.title || '')}</div>
+          ${m.description ? `<div style="font-size:12px;color:#555;margin-top:2px;">${esc(m.description)}</div>` : ''}
+          <div style="${MUTED}margin-top:2px;">${esc((!m.created_by || m.created_by === 'system') ? 'Care team' : m.created_by)}${m.created_at ? ' · ' + _fmtDate(m.created_at) : ''}</div>
+        </div>`).join('') : '');
+
+      // ── Recent activity: engagement log + client-visible timeline, newest first, capped ──
+      const activity = [
+        ...(lp.engagement_log || []).map(e => ({ content: e.entry_text || '', author: e.created_by || 'Buddy', date: e.created_at || null })),
+        ...(state.timelineEntries || []).filter(e => e.is_client_visible !== false).map(e => ({ content: e.content || '', author: e.author?.name || 'Unknown', date: e.created_at || null })),
+      ].sort((a, b) => new Date(b.date) - new Date(a.date));
+      const activityBlock = section('Recent activity', activity.length ? activity.slice(0, 10).map(e => `
+        <div style="${ROW}">
+          <div style="line-height:1.5;">${esc(e.content)}</div>
+          <div style="${MUTED}margin-top:2px;">${esc(e.author)}${e.date ? ' · ' + _fmtDate(e.date) : ''}</div>
+        </div>`).join('') + (activity.length > 10 ? `<div style="${MUTED}margin-top:4px;">…and ${activity.length - 10} earlier entries</div>` : '') : '');
+
+      // ── Genetic insights (already client-visible) ──
+      const insights = (state.geneticInsights || []).filter(g => g.case_id === state.caseId);
+      const geneticBlock = section('Genetic insights', insights.length ? insights.map(g => `
+        <div style="${ROW}">
+          <div style="font-weight:600;">${esc(g.title || '')}</div>
+          ${g.content ? `<div style="font-size:12px;color:#555;margin-top:2px;white-space:pre-wrap;">${esc(g.content)}</div>` : ''}
+          ${(g.breed_risk_flags || []).length ? `<div style="${MUTED}margin-top:4px;"><span style="font-weight:600;">Risk flags:</span> ${g.breed_risk_flags.map(esc).join('; ')}</div>` : ''}
+          ${(g.recommendations || []).length ? `<ul style="margin:4px 0 0 0;padding-left:18px;font-size:12px;color:#555;">${g.recommendations.map(r => `<li>${esc(r)}</li>`).join('')}</ul>` : ''}
+        </div>`).join('') : '');
+
+      // ── People & providers (owner and Buddy already live in the header) ──
+      const people = [];
+      for (const co of (state.petCoOwners || []).filter(c => c.status === 'accepted')) {
+        people.push(`${esc(co.user?.name || co.invited_email || 'Co-owner')} <span style="${MUTED}">(Co-owner)</span>`);
+      }
+      for (const m of (state._careTeamMembers || [])) {
+        people.push(`${esc(m.display_name || 'Helper')} <span style="${MUTED}">(Helper)</span>`);
+      }
+      const providers = (state.careProviders && state.careProviders.length > 0)
+        ? state.careProviders.map(p => ({ name: p.provider_name, role: p.role, clinic: p.clinic_name, phone: p.phone, email: p.email }))
+        : (lp.care_team || []);
+      let teamBody = '';
+      if (people.length) teamBody += `<div style="font-size:13px;line-height:1.7;margin-bottom:${providers.length ? '8px' : '0'};">${people.join(' · ')}</div>`;
+      if (providers.length) {
+        teamBody += `<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;font-size:13px;">
+          ${providers.map(p => `<div style="padding:6px 8px;border:1px solid #eee;border-radius:4px;page-break-inside:avoid;">
+            <div style="font-weight:600;">${esc(p.name || p.clinic || 'Provider')}</div>
+            ${p.role ? `<div style="color:#555;font-size:12px;">${esc(p.role)}</div>` : ''}
+            ${p.clinic && p.name ? `<div style="color:#555;font-size:12px;">${esc(p.clinic)}</div>` : ''}
+            ${p.phone ? `<div style="color:#555;font-size:12px;">${esc(p.phone)}</div>` : ''}
+            ${p.email ? `<div style="color:#555;font-size:12px;">${esc(p.email)}</div>` : ''}
+          </div>`).join('')}
+        </div>`;
+      }
+      const teamBlock = section('People & providers', teamBody);
+
+      // ── Documents on file ──
+      const docsBlock = section('Documents on file', (state.documents || []).length ? state.documents.map(d => `
+        <div style="${ROW}display:flex;justify-content:space-between;gap:10px;">
+          <div style="min-width:0;">${esc(d.name || 'Document')}</div>
+          <span style="${MUTED}white-space:nowrap;">${d.record_date ? 'Service ' + _fmtDate(d.record_date) : 'Uploaded ' + _fmtDate(d.created_at)}${d.uploaded_by_user?.name ? ' · ' + esc(d.uploaded_by_user.name) : ''}</span>
+        </div>`).join('') : '');
+
+      const sections = [nextApptBlock, profileBlock, goalsBlock, dxBlock, medsBlock, vaxBlock, vitalsBlock,
+        questionsBlock, apptsBlock, winsBlock, activityBlock, geneticBlock, teamBlock, docsBlock];
+      const body = sections.join('') || `
+        <div style="text-align:center;color:#666;font-size:13px;padding:40px 20px;">
+          Nothing recorded on this care plan yet.
+        </div>`;
+
+      const footerBlock = `
+        <footer style="border-top:1px solid #ddd;padding-top:10px;margin-top:24px;font-size:11px;color:#888;text-align:center;">
+          Prepared with Vet Buddies for ${esc(pet.name || 'this pet')} · printed ${_fmtDate(now.toISOString())}
+        </footer>`;
+
+      return `
+        <div style="font-family:Georgia,serif;color:#222;padding:32px 36px;max-width:780px;margin:0 auto;background:white;">
+          ${headerBlock}
+          ${body}
+          ${footerBlock}
+        </div>`;
     }
 
     // ── Notification panel overlay (rendered into topbar area) ─────────────
@@ -13829,7 +14134,7 @@ function renderVaccineDueAlerts(vaccines) {
               </div>` : '';
 
             const printableHtml = `
-              <div id="visit-prep-printable" style="font-family:Georgia,serif;color:#222;padding:32px 36px;max-width:780px;margin:0 auto;background:white;">
+              <div style="font-family:Georgia,serif;color:#222;padding:32px 36px;max-width:780px;margin:0 auto;background:white;">
                 ${headerBlock}
                 ${nextApptBlock}
                 ${dxBlock}
@@ -13840,38 +14145,12 @@ function renderVaccineDueAlerts(vaccines) {
                 ${footerBlock}
               </div>`;
 
-            // Inject the printable view + a stylesheet that hides everything else when printing.
-            const styleEl = document.createElement('style');
-            styleEl.id = 'visit-prep-style';
-            styleEl.textContent = `
-              #visit-prep-printable { display: none; }
-              @media print {
-                body > *:not(#visit-prep-printable) { display: none !important; }
-                #visit-prep-printable { display: block !important; }
-                @page { margin: 0.5in; }
-              }
-            `;
-            const wrap = document.createElement('div');
-            wrap.innerHTML = printableHtml;
-            const printableNode = wrap.firstElementChild;
-            document.head.appendChild(styleEl);
-            document.body.appendChild(printableNode);
-
-            const origTitle = document.title;
-            document.title = `${pet.name || 'Pet'} - Vet Visit Prep - ${new Date().toISOString().slice(0,10)}`;
-
-            const cleanup = () => {
-              printableNode.remove();
-              styleEl.remove();
-              document.title = origTitle;
-              window.removeEventListener('afterprint', cleanup);
-            };
-            window.addEventListener('afterprint', cleanup);
-
-            // Small delay so the browser commits the new DOM before opening the print dialog.
-            setTimeout(() => window.print(), 100);
-            // Safety cleanup in case afterprint never fires (Safari quirk).
-            setTimeout(() => { if (document.getElementById('visit-prep-printable')) cleanup(); }, 60000);
+            openPrintableDocument(printableHtml, `${pet.name || 'Pet'} - Vet Visit Prep - ${new Date().toISOString().slice(0,10)}`);
+            break;
+          }
+          case 'print-full-plan': {
+            const petName = state.currentCase?.pets?.name || 'Pet';
+            openPrintableDocument(buildFullPlanPrintableHtml(), `${petName} - Living Care Plan - ${new Date().toISOString().slice(0,10)}`);
             break;
           }
           case 'export-care-plan': {
