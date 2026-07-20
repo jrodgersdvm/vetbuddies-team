@@ -3275,6 +3275,377 @@ async function generateVetVisitPDF(carePlan, currentCase, profile) {
   return doc.output('blob');
 }
 
+async function generateCareHandoffPDF(carePlan, currentCase, profile) {
+  // jsPDF's UMD build exposes window.jspdf (namespace) — not window.jsPDF.
+  const { jsPDF } = window.jspdf || window;
+  if (!jsPDF) { showToast('PDF library not loaded', 'error'); return null; }
+
+  // A clinical handoff for a receiving vet who has never seen the patient.
+  // Reorganizes the living care plan + structured tables (meds, vaccines,
+  // diagnoses, questions, appointments, vitals, documents) into the order a
+  // clinician reads: snapshot → signalment → problems → timeline → vitals →
+  // current meds → prior meds → vaccines → next steps → team + source records.
+  // Empty sections are omitted (no blank headers), and missing key signalment
+  // fields are flagged "not recorded" rather than hidden. Core PDF fonts can't
+  // render emoji — the design is type + rules + color only.
+  const doc = new jsPDF();
+  const W = doc.internal.pageSize.getWidth();
+  const H = doc.internal.pageSize.getHeight();
+  const M = 16;
+  const CW = W - 2 * M;
+  const FOREST = [51, 96, 38], SAGE = [104, 149, 98], INK = [45, 42, 38],
+        SOFT = [122, 114, 104], RULE = [200, 191, 175],
+        AMBER = [176, 122, 33], BRICK = [79, 21, 47], TINT = [228, 236, 223];
+  let y = 0;
+
+  const pet = currentCase?.pets || {};
+  const petName = pet.name || 'Pet';
+  const caseId = currentCase?.id;
+  const ownerName = pet.owner?.name || '';
+  const buddyName = currentCase?.assigned_buddy?.name || '';
+  const cp = carePlan || {};
+  const lp = carePlan?.living_plan || {};
+  const today = new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
+  const nowMs = Date.now();
+  const DAY = 86400000;
+
+  // Date-only values (YYYY-MM-DD — e.g. DATE columns like start_date, record_date,
+  // due_date, dob) parse as UTC midnight, which renders a day earlier in a
+  // negative-offset timezone. Parse those as local so the calendar day is exact;
+  // full timestamps fall through to normal Date parsing.
+  const parseD = (d) => {
+    if (typeof d === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(d)) { const p = d.split('-').map(Number); return new Date(p[0], p[1] - 1, p[2]); }
+    return new Date(d);
+  };
+  const fmtDate = (d) => { try { return parseD(d).toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' }); } catch (e) { return String(d || ''); } };
+  const fmtDateTime = (d) => {
+    try {
+      const t = parseD(d);
+      const day = t.toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' });
+      return (t.getHours() === 0 && t.getMinutes() === 0) ? day : day + ' · ' + t.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
+    } catch (e) { return String(d || ''); }
+  };
+  const toMs = (d) => { const t = parseD(d).getTime(); return isNaN(t) ? 0 : t; };
+  const petAge = (() => {
+    if (!pet.dob) return '';
+    try {
+      const b = parseD(pet.dob), n = new Date();
+      let yr = n.getFullYear() - b.getFullYear();
+      const m = n.getMonth() - b.getMonth();
+      if (m < 0 || (m === 0 && n.getDate() < b.getDate())) yr--;
+      return yr < 1 ? 'under 1 yr' : yr + ' yr' + (yr === 1 ? '' : 's');
+    } catch (e) { return ''; }
+  })();
+
+  // ── Live data ──
+  const allMeds = state.petMedications || [];
+  const activeMeds = allMeds.filter(m => m.is_active !== false);
+  const pastMeds = allMeds.filter(m => m.is_active === false);
+  const vaccines = state.petVaccines || [];
+  const vitals = (state.petVitals || []).filter(v => v.weight || v.temperature || v.notes);
+  const latestWeight = (state.petVitals || []).find(v => v.weight);
+  const weightStr = latestWeight ? String(latestWeight.weight) : (pet.weight ? String(pet.weight) : '');
+  const questions = (state.openQuestions || []).filter(q => { const s = q.status || 'open'; return s !== 'answered' && s !== 'moot' && s !== 'resolved'; });
+  const dxList = state.diagnoses || [];
+  const providers = state.careProviders || [];
+  const documents = state.documents || [];
+  const appts = (state.appointments || []).filter(a => (!caseId || a.case_id === caseId) && a.status !== 'cancelled' && a.scheduled_at);
+  const pastAppts = appts.filter(a => new Date(a.scheduled_at).getTime() < nowMs);
+  const upcomingAppts = appts.filter(a => new Date(a.scheduled_at).getTime() >= nowMs).sort((a, b) => new Date(a.scheduled_at) - new Date(b.scheduled_at));
+  const goals = (lp.active_care_goals || []).filter(g => (g.goal_text || '').trim() && (g.status || 'active') !== 'completed');
+  const milestones = lp.milestones_and_wins || [];
+  const engLog = lp.engagement_log || [];
+  const timelineEntries = state.timelineEntries || [];
+  const snapshotText = (cp.summary && String(cp.summary).trim()) || (cp.last_appointment_summary && String(cp.last_appointment_summary).trim()) || '';
+  const nextStepsText = (cp.next_steps && String(cp.next_steps).trim()) || '';
+
+  // ── Layout helpers ──
+  const ensureRoom = (need) => { if (y + need > H - 18) { doc.addPage(); y = 18; } };
+  const hairline = (yy) => { doc.setDrawColor(...RULE); doc.setLineWidth(0.2); doc.line(M, yy, W - M, yy); };
+  let sectionCount = 0;
+  const section = (label) => {
+    sectionCount++;
+    ensureRoom(16); y += 5;
+    doc.setFont('helvetica', 'bold'); doc.setFontSize(9); doc.setTextColor(...SAGE);
+    doc.text(label.toUpperCase(), M, y);
+    hairline(y + 1.8); y += 7.5;
+  };
+  const paragraph = (text, size, color, indent) => {
+    const lines = doc.splitTextToSize(String(text), CW - (indent || 0));
+    ensureRoom(lines.length * (size * 0.5) + 2);
+    doc.setFont('helvetica', 'normal'); doc.setFontSize(size); doc.setTextColor(...(color || INK));
+    doc.text(lines, M + (indent || 0), y);
+    y += lines.length * (size * 0.5) + 1.5;
+  };
+  const bulletRow = (head, meta, tag, tagColor) => {
+    doc.setFont('helvetica', 'bold'); doc.setFontSize(10);
+    const headLines = doc.splitTextToSize(String(head), CW - 6 - (tag ? 24 : 0));
+    ensureRoom(headLines.length * 5 + (meta ? 4.4 : 0) + 2.5);
+    doc.setTextColor(...SAGE); doc.text('•', M, y);
+    doc.setTextColor(...INK); doc.text(headLines, M + 5, y);
+    if (tag) { doc.setFont('helvetica', 'bold'); doc.setFontSize(8); doc.setTextColor(...(tagColor || SAGE)); doc.text(String(tag), W - M, y, { align: 'right' }); }
+    y += headLines.length * 5;
+    if (meta) { doc.setFont('helvetica', 'normal'); doc.setFontSize(8.5); doc.setTextColor(...SOFT); const mLines = doc.splitTextToSize(String(meta), CW - 5); doc.text(mLines, M + 5, y); y += mLines.length * 4.2; }
+    y += 2.5;
+  };
+  const DATECOL = 25;
+  const timelineRow = (dateStr, head, body) => {
+    const primary = head || body || '';
+    const secondary = head ? body : '';
+    doc.setFont('helvetica', head ? 'bold' : 'normal'); doc.setFontSize(9.2);
+    const pLines = doc.splitTextToSize(String(primary), CW - DATECOL);
+    const sLines = secondary ? doc.splitTextToSize(String(secondary), CW - DATECOL) : [];
+    ensureRoom(pLines.length * 4.6 + sLines.length * 4.2 + 3.4);
+    doc.setFont('helvetica', 'bold'); doc.setFontSize(7.8); doc.setTextColor(...SAGE);
+    doc.text(dateStr || '—', M, y + 0.1);
+    doc.setFont('helvetica', head ? 'bold' : 'normal'); doc.setFontSize(9.2); doc.setTextColor(...INK);
+    doc.text(pLines, M + DATECOL, y);
+    y += pLines.length * 4.6;
+    if (sLines.length) { doc.setFont('helvetica', 'normal'); doc.setFontSize(8.7); doc.setTextColor(...SOFT); doc.text(sLines, M + DATECOL, y); y += sLines.length * 4.2; }
+    y += 3.4;
+  };
+  const labelValue = (label, value, dim) => {
+    ensureRoom(5.5);
+    doc.setFont('helvetica', 'bold'); doc.setFontSize(9); doc.setTextColor(...SOFT);
+    doc.text(label + ':', M, y);
+    const kw = doc.getTextWidth(label + ':  ');
+    doc.setFont('helvetica', 'normal'); doc.setTextColor(...(dim ? SOFT : INK));
+    doc.text(String(value), M + kw, y);
+    y += 5;
+  };
+
+  // ── Header band ──
+  doc.setFillColor(...FOREST); doc.rect(0, 0, W, 30, 'F');
+  doc.setFont('helvetica', 'bold'); doc.setFontSize(8.5); doc.setTextColor(200, 216, 194);
+  doc.text('V E T   B U D D I E S', M, 11);
+  doc.setFontSize(19); doc.setTextColor(255, 255, 255);
+  doc.text('Care Plan — Clinical Handoff', M, 21.5);
+  doc.setFont('helvetica', 'normal'); doc.setFontSize(9); doc.setTextColor(200, 216, 194);
+  doc.text(today, W - M, 21.5, { align: 'right' });
+
+  // ── Identity block ──
+  y = 39;
+  const speciesLabel = pet.species ? String(pet.species).charAt(0).toUpperCase() + String(pet.species).slice(1) : '';
+  doc.setFont('helvetica', 'bold'); doc.setFontSize(16); doc.setTextColor(...INK);
+  doc.text(petName, M, y);
+  y += 6;
+  doc.setFont('helvetica', 'normal'); doc.setFontSize(9); doc.setTextColor(...SOFT);
+  const teamLine = [
+    ownerName ? 'Owner: ' + ownerName : '',
+    buddyName ? 'Vet Buddy: ' + buddyName : '',
+    'Supervised by Dr. Rodgers, Rodgers Veterinary Care',
+  ].filter(Boolean).join('   ·   ');
+  const teamLines = doc.splitTextToSize(teamLine, CW);
+  doc.text(teamLines, M, y); y += teamLines.length * 4.3 + 1.5;
+  doc.setFont('helvetica', 'italic'); doc.setFontSize(7.8); doc.setTextColor(...SOFT);
+  doc.text('Prepared for a receiving veterinarian. Owner-reported information compiled from the Vet Buddies care app — verify against clinic records.', M, y);
+  y += 6;
+
+  // ── Snapshot ──
+  {
+    const parts = [];
+    const sig = [speciesLabel || null, pet.breed || null, petAge || null, weightStr || null].filter(Boolean).join(', ');
+    if (sig) parts.push(sig + (ownerName ? " — " + ownerName + "'s pet." : '.'));
+    if (snapshotText) parts.push(snapshotText);
+    else if (goals.length) parts.push('Active focus: ' + goals.map(g => g.goal_text).join('; ') + '.');
+    const flat = parts.join('  ');
+    if (flat.trim()) {
+      doc.setFont('helvetica', 'normal'); doc.setFontSize(9.5);
+      const lines = doc.splitTextToSize(flat, CW - 10);
+      const boxH = lines.length * 4.8 + 13;
+      ensureRoom(boxH + 2);
+      doc.setFillColor(...TINT); doc.roundedRect(M, y, CW, boxH, 2, 2, 'F');
+      doc.setFont('helvetica', 'bold'); doc.setFontSize(7.5); doc.setTextColor(...FOREST);
+      doc.text('SNAPSHOT', M + 5, y + 6);
+      doc.setFont('helvetica', 'normal'); doc.setFontSize(9.5); doc.setTextColor(...INK);
+      doc.text(lines, M + 5, y + 11.5);
+      y += boxH + 3;
+    }
+  }
+
+  // ── Signalment & background ──
+  {
+    section('Signalment & background');
+    const rows = [
+      ['Species', speciesLabel || 'not recorded', !speciesLabel],
+      ['Breed', pet.breed || 'not recorded', !pet.breed],
+      ['Sex', 'not recorded', true],
+      ['Age', petAge || 'not recorded', !petAge],
+      ['Weight', weightStr || 'not recorded', !weightStr],
+      ['DOB', pet.dob ? fmtDate(pet.dob) : 'not recorded', !pet.dob],
+    ];
+    const colW = CW / 2;
+    doc.setFontSize(9.5);
+    for (let i = 0; i < rows.length; i += 2) {
+      ensureRoom(6);
+      const cell = (r, x) => {
+        if (!r) return;
+        doc.setFont('helvetica', 'bold'); doc.setFontSize(9); doc.setTextColor(...SOFT);
+        doc.text(r[0] + ':', x, y);
+        const kw = doc.getTextWidth(r[0] + ':  ');
+        doc.setFont('helvetica', 'normal'); doc.setTextColor(...(r[2] ? SOFT : INK));
+        doc.text(String(r[1]), x + kw, y);
+      };
+      cell(rows[i], M);
+      cell(rows[i + 1], M + colW);
+      y += 5.4;
+    }
+    y += 1;
+    if (lp.pet_profile && String(lp.pet_profile).trim()) {
+      ensureRoom(6);
+      doc.setFont('helvetica', 'bold'); doc.setFontSize(8.5); doc.setTextColor(...SOFT);
+      doc.text('Background', M, y); y += 4.6;
+      paragraph(lp.pet_profile, 9.5, INK, 0);
+    }
+  }
+
+  // ── Active problem list ──
+  if (dxList.length || goals.length || (cp.diagnoses && String(cp.diagnoses).trim())) {
+    section('Active problem list');
+    dxList.forEach(d => bulletRow(String(d.condition_name || 'Condition'), d.notes ? String(d.notes) : '', (d.status || 'active'), (d.status === 'resolved' ? SAGE : AMBER)));
+    if (!dxList.length && cp.diagnoses && String(cp.diagnoses).trim()) paragraph(cp.diagnoses, 9.5, INK, 0);
+    goals.forEach(g => bulletRow(String(g.goal_text || ''), '', 'active', AMBER));
+    if (cp.allergies && String(cp.allergies).trim()) {
+      ensureRoom(6);
+      doc.setFont('helvetica', 'bold'); doc.setFontSize(9); doc.setTextColor(...BRICK);
+      doc.text('Allergies: ', M, y);
+      const aw = doc.getTextWidth('Allergies: ');
+      doc.setFont('helvetica', 'normal'); doc.setTextColor(...INK);
+      doc.text(String(cp.allergies), M + aw, y); y += 6;
+    }
+  }
+
+  // ── Clinical timeline (appointments + notes + milestones, chronological) ──
+  {
+    const items = [];
+    pastAppts.forEach(a => items.push({ ts: toMs(a.scheduled_at), date: fmtDate(a.scheduled_at), head: (a.title || 'Appointment') + (a.type ? '  (' + a.type + ')' : ''), body: a.notes || '' }));
+    engLog.forEach(e => { if (e.entry_text && String(e.entry_text).trim()) items.push({ ts: e.created_at ? toMs(e.created_at) : 0, date: e.created_at ? fmtDate(e.created_at) : '', head: '', body: String(e.entry_text) }); });
+    milestones.forEach(m => { if (m.title) items.push({ ts: m.created_at ? toMs(m.created_at) : 0, date: m.created_at ? fmtDate(m.created_at) : '', head: 'Milestone: ' + String(m.title), body: m.description || '' }); });
+    timelineEntries.forEach(t => { const ty = t.type || 'note'; if (ty === 'message' || ty === 'appointment') return; if (!t.content || !String(t.content).trim()) return; items.push({ ts: t.created_at ? toMs(t.created_at) : 0, date: t.created_at ? fmtDate(t.created_at) : '', head: '', body: String(t.content) }); });
+    if (items.length) {
+      items.sort((a, b) => a.ts - b.ts);
+      section('Clinical timeline');
+      items.forEach(it => timelineRow(it.date, it.head, it.body));
+    }
+  }
+
+  // ── Vitals & measurements ──
+  if (vitals.length) {
+    section('Vitals & measurements');
+    vitals.slice(0, 12).forEach(v => {
+      const bits = [v.weight ? 'Wt ' + v.weight : '', v.temperature ? 'Temp ' + v.temperature + '°F' : '', v.notes ? String(v.notes) : ''].filter(Boolean).join('   ·   ');
+      const vLines = doc.splitTextToSize(bits, CW - DATECOL);
+      ensureRoom(vLines.length * 4.4 + 2);
+      doc.setFont('helvetica', 'bold'); doc.setFontSize(7.8); doc.setTextColor(...SAGE);
+      doc.text(v.recorded_at ? fmtDate(v.recorded_at) : '—', M, y + 0.1);
+      doc.setFont('helvetica', 'normal'); doc.setFontSize(9); doc.setTextColor(...INK);
+      doc.text(vLines, M + DATECOL, y); y += vLines.length * 4.4 + 1.6;
+    });
+    y += 1;
+  }
+
+  // ── Current medications ──
+  if (activeMeds.length) {
+    section('Current medications');
+    activeMeds.forEach((m, i) => {
+      ensureRoom(11);
+      doc.setFont('helvetica', 'bold'); doc.setFontSize(10.3); doc.setTextColor(...INK);
+      doc.text([m.name, m.dose].filter(Boolean).join('  ·  '), M, y);
+      if (m.frequency) { doc.setFont('helvetica', 'normal'); doc.setFontSize(9.3); doc.setTextColor(...SOFT); doc.text(String(m.frequency), W - M, y, { align: 'right' }); }
+      y += 4.6;
+      const sub = [m.start_date ? 'Since ' + fmtDate(m.start_date) : '', !m.dose ? 'dose not recorded' : '', !m.frequency ? 'frequency not recorded' : ''].filter(Boolean).join('   ·   ');
+      if (sub) { doc.setFont('helvetica', 'normal'); doc.setFontSize(8.3); doc.setTextColor(...SOFT); doc.text(sub, M, y); y += 4; }
+      if (i < activeMeds.length - 1) { hairline(y); y += 4.4; }
+    });
+    y += 2;
+  }
+
+  // ── Prior treatments & medications ──
+  if (pastMeds.length) {
+    section('Prior treatments & medications');
+    doc.setFontSize(9);
+    pastMeds.forEach(m => {
+      const t = '•  ' + [m.name, [m.dose, m.frequency].filter(Boolean).join(' ')].filter(Boolean).join(' — ');
+      const lines = doc.splitTextToSize(t, CW - 3);
+      ensureRoom(lines.length * 4.4 + 1.5);
+      doc.setFont('helvetica', 'normal'); doc.setFontSize(9); doc.setTextColor(...INK);
+      doc.text(lines, M, y); y += lines.length * 4.4 + 1.2;
+    });
+    y += 1.5;
+  }
+
+  // ── Preventive status (vaccines) ──
+  if (vaccines.length) {
+    section('Preventive status');
+    vaccines.forEach((v, i) => {
+      ensureRoom(10);
+      doc.setFont('helvetica', 'bold'); doc.setFontSize(10.3); doc.setTextColor(...INK);
+      doc.text(String(v.name || 'Vaccine'), M, y);
+      let s = 'Up to date', c = SAGE;
+      if (v.due_date) { const dueMs = new Date(v.due_date).getTime(); if (dueMs < nowMs) { s = 'Overdue'; c = BRICK; } else if (dueMs <= nowMs + 30 * DAY) { s = 'Due soon'; c = AMBER; } else { s = 'Current'; c = SAGE; } }
+      doc.setFont('helvetica', 'bold'); doc.setFontSize(9); doc.setTextColor(...c); doc.text(s, W - M, y, { align: 'right' });
+      y += 4.5;
+      const gd = [v.administered_date ? 'Given ' + fmtDate(v.administered_date) : '', v.due_date ? 'Due ' + fmtDate(v.due_date) : '', v.notes ? String(v.notes) : ''].filter(Boolean).join('   ·   ');
+      if (gd) { doc.setFont('helvetica', 'normal'); doc.setFontSize(8.3); doc.setTextColor(...SOFT); doc.text(gd, M, y); y += 4; }
+      if (i < vaccines.length - 1) { hairline(y); y += 4.4; }
+    });
+    y += 2;
+  }
+
+  // ── Open questions & next steps ──
+  if (questions.length || nextStepsText || upcomingAppts.length) {
+    section('Open questions & next steps');
+    upcomingAppts.forEach(a => bulletRow('Scheduled: ' + (a.title || 'Appointment') + ' — ' + fmtDateTime(a.scheduled_at), a.notes || '', a.type || '', SAGE));
+    questions.forEach(q => bulletRow(String(q.question || ''), q.context ? String(q.context) : '', q.target_visit_date ? 'for ' + fmtDate(q.target_visit_date) : '', AMBER));
+    if (nextStepsText) paragraph(nextStepsText, 9.5, INK, 0);
+  }
+
+  // ── Care team & source records ──
+  {
+    section('Care team & source records');
+    if (ownerName) labelValue('Owner', ownerName);
+    if (buddyName) labelValue('Vet Buddy', buddyName);
+    labelValue('Supervising DVM', 'Dr. Rodgers, Rodgers Veterinary Care');
+    if (providers.length) {
+      y += 1; ensureRoom(6);
+      doc.setFont('helvetica', 'bold'); doc.setFontSize(8.5); doc.setTextColor(...SOFT);
+      doc.text('External providers', M, y); y += 4.6;
+      providers.forEach(pr => {
+        const t = '•  ' + [pr.provider_name, pr.role, pr.clinic_name, pr.phone].filter(Boolean).join(' · ');
+        const lines = doc.splitTextToSize(t, CW - 3);
+        ensureRoom(lines.length * 4.4 + 1);
+        doc.setFont('helvetica', 'normal'); doc.setFontSize(9); doc.setTextColor(...INK);
+        doc.text(lines, M, y); y += lines.length * 4.4 + 1;
+      });
+    }
+    if (documents.length) {
+      y += 1.5; ensureRoom(6);
+      doc.setFont('helvetica', 'bold'); doc.setFontSize(8.5); doc.setTextColor(...SOFT);
+      doc.text('Source records on file (' + documents.length + ')', M, y); y += 4.6;
+      documents.forEach(d => {
+        const meta = [d.record_date ? 'svc ' + fmtDate(d.record_date) : (d.created_at ? 'uploaded ' + fmtDate(d.created_at) : ''), d.uploaded_by_user?.name || ''].filter(Boolean).join(' · ');
+        const t = '•  ' + (d.file_name || 'Document') + (meta ? '   (' + meta + ')' : '');
+        const lines = doc.splitTextToSize(t, CW - 3);
+        ensureRoom(lines.length * 4.2 + 1);
+        doc.setFont('helvetica', 'normal'); doc.setFontSize(8.6); doc.setTextColor(...INK);
+        doc.text(lines, M, y); y += lines.length * 4.2 + 1;
+      });
+    }
+  }
+
+  // ── Footer on every page ──
+  const pages = doc.getNumberOfPages();
+  for (let p = 1; p <= pages; p++) {
+    doc.setPage(p);
+    hairline(H - 13);
+    doc.setFont('helvetica', 'normal'); doc.setFontSize(7.8); doc.setTextColor(...SOFT);
+    doc.text('Clinical handoff · ' + petName + ' · ' + today, M, H - 8);
+    doc.text('Page ' + p + ' of ' + pages, W - M, H - 8, { align: 'right' });
+  }
+
+  return doc.output('blob');
+}
+
 function checkMedicationRefills(medications) {
   const today = new Date();
   const sevenDaysFromNow = new Date(today.getTime() + 7 * 24 * 60 * 60 * 1000);
@@ -7000,7 +7371,7 @@ async function calculateBuddyScorecard(buddyId) {
       html += `<div style="display:flex;justify-content:flex-end;gap:8px;margin-bottom:12px;flex-wrap:wrap;">
         ${canEdit ? `<button class="btn btn-secondary btn-small" data-action="refresh-care-plan-from-activity" title="Let AI scan recent messages, notes, appointments, and escalations for this case and suggest updates to the care plan" ${state.aiExtractionInProgress ? 'disabled' : ''}>${state.aiExtractionInProgress ? '⏳ Refreshing…' : '🔄 Refresh from activity'}</button>` : ''}
         <button class="btn btn-primary btn-small" data-action="prepare-for-visit" title="Generate a focused one-page summary to bring to your vet appointment">📋 Prepare for Visit</button>
-        <button class="btn btn-secondary btn-small" onclick="window.print()" title="Print the full care plan or save as PDF">🖨️ Print Full Plan</button>
+        <button class="btn btn-secondary btn-small" data-action="download-care-handoff-pdf" title="Download a clinical handoff PDF — a receiving vet can get caught up on the whole case at a glance">🖨️ Print Full Plan</button>
         <button class="btn btn-secondary btn-small" data-action="export-care-plan" title="Export the Living Care Plan as text">📤 Share</button>
       </div>`;
 
@@ -11528,6 +11899,25 @@ function renderVaccineDueAlerts(vaccines) {
               dl.href = url;
               const petSlug = (state.currentCase.pets?.name || 'pet').replace(/[^a-z0-9]+/gi, '-').toLowerCase();
               dl.download = `${petSlug}-vet-visit-prep.pdf`;
+              dl.click();
+              URL.revokeObjectURL(url);
+              showToast('Ready — check your downloads', 'success');
+            })
+            .catch(err => { console.error(err); showToast('Could not build the PDF', 'error'); });
+          return;
+        }
+        if (action === 'download-care-handoff-pdf') {
+          if (!state.currentCase) { showToast('Care plan not loaded yet — try again in a moment', 'info'); return; }
+          showToast('Building clinical handoff…', 'info');
+          ensureJsPDF()
+            .then(() => generateCareHandoffPDF(state.carePlan, state.currentCase, state.profile))
+            .then(blob => {
+              if (!blob) return;
+              const url = URL.createObjectURL(blob);
+              const dl = document.createElement('a');
+              dl.href = url;
+              const petSlug = (state.currentCase.pets?.name || 'pet').replace(/[^a-z0-9]+/gi, '-').toLowerCase();
+              dl.download = `${petSlug}-clinical-handoff.pdf`;
               dl.click();
               URL.revokeObjectURL(url);
               showToast('Ready — check your downloads', 'success');
