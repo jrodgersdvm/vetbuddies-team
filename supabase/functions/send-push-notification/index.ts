@@ -184,18 +184,23 @@ Deno.serve(async (req: Request) => {
       });
     }
 
-    let recipientIds: string[] = [];
+    const recipientSet = new Set<string>();
     const petName = (caseData as any).pets?.name || "your pet";
 
     if (sender_role === "client") {
-      if (caseData.assigned_buddy_id) recipientIds.push(caseData.assigned_buddy_id);
+      if (caseData.assigned_buddy_id) recipientSet.add(caseData.assigned_buddy_id);
+      // Admins see every client message in-app (Message Monitor / is_read_by_staff),
+      // regardless of case assignment, so they get push parity with that view.
+      const { data: admins } = await sb.from("users").select("id").eq("role", "admin");
+      for (const a of (admins || [])) recipientSet.add(a.id);
     } else {
       const ownerId = (caseData as any).pets?.owner_id;
-      if (ownerId) recipientIds.push(ownerId);
+      if (ownerId) recipientSet.add(ownerId);
     }
 
     // Don't push to the sender themselves.
-    recipientIds = recipientIds.filter((id) => id !== sender_id);
+    recipientSet.delete(sender_id);
+    let recipientIds: string[] = Array.from(recipientSet);
 
     console.log(`[push] recipients(pre-filter)=${JSON.stringify(recipientIds)} petName=${petName}`);
 

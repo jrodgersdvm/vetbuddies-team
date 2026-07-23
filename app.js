@@ -1576,17 +1576,22 @@ Your free 30-day trial is active. No credit card on file. We'll be in touch.
           // Auto-prompt for permission once per session if the user has push
           // enabled in their prefs (default true post-2026-05-20) but hasn't
           // granted browser permission yet. Don't badger — sessionStorage flag.
+          //
+          // This shows the toast/Enable-button banner rather than calling
+          // Notification.requestPermission() directly: Safari (macOS and iOS)
+          // only shows the permission dialog when requestPermission() runs
+          // synchronously inside a user-gesture handler. Calling it from a
+          // bare setTimeout silently no-ops on Safari, so the request must
+          // wait for an actual tap on the banner's Enable button.
           else if (Notification.permission === 'default'
               && state.notificationSettings?.push_enabled
               && !sessionStorage.getItem('vb_push_prompted')) {
             try { sessionStorage.setItem('vb_push_prompted', '1'); } catch (_) {}
             setTimeout(() => {
-              try {
-                Notification.requestPermission().then((p) => {
-                  state.notificationPermission = p;
-                  if (p === 'granted') subscribeToPush();
-                });
-              } catch (_) {}
+              state.pushPromptReason = 'login';
+              state.showPushPromptBanner = true;
+              state.showPushPromptInPanel = true;
+              render();
             }, 1500);
           }
         }
@@ -5800,16 +5805,18 @@ async function calculateBuddyScorecard(buddyId) {
       if (!navigator.serviceWorker || !state.profile || VAPID_PUBLIC_KEY === 'YOUR_VAPID_PUBLIC_KEY_HERE') return;
       try {
         const reg = await navigator.serviceWorker.ready;
-        const existing = await reg.pushManager.getSubscription();
-        if (existing) return; // already subscribed
-        const applicationServerKey = urlBase64ToUint8Array(VAPID_PUBLIC_KEY);
-        const subscription = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey });
+        let subscription = await reg.pushManager.getSubscription();
+        if (!subscription) {
+          const applicationServerKey = urlBase64ToUint8Array(VAPID_PUBLIC_KEY);
+          subscription = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey });
+        }
         const subJson = subscription.toJSON();
         await sb.from('push_subscriptions').upsert({
           user_id: state.profile.id,
           endpoint: subJson.endpoint,
           p256dh: subJson.keys?.p256dh || '',
           auth: subJson.keys?.auth || '',
+          user_agent: navigator.userAgent || null,
           created_at: new Date().toISOString(),
         }, { onConflict: 'endpoint' });
       } catch (e) {
@@ -6097,6 +6104,7 @@ async function calculateBuddyScorecard(buddyId) {
 
           // Contextual push prompt — show on first real incoming message
           if (('Notification' in window) && Notification.permission === 'default' && !localStorage.getItem('vb_push_prompted')) {
+            state.pushPromptReason = 'message';
             state.showPushPromptBanner = true;
             state.showPushPromptInPanel = true;
             localStorage.setItem('vb_push_prompted', '1');
@@ -11505,7 +11513,7 @@ function renderVaccineDueAlerts(vaccines) {
         if(state.show2FA&&typeof render2FASetup==='function')mh+=render2FASetup();
         if(state.showAiReviewModal&&typeof renderAiReviewModal==='function')mh+=renderAiReviewModal();
         if(state.showBioPrompt&&typeof renderBioPromptModal==='function')mh+=renderBioPromptModal();
-        if(state.showPushPromptBanner)mh+=`<div style="position:fixed;top:16px;left:50%;transform:translateX(-50%);z-index:1100;background:linear-gradient(135deg,#336026,#689562);color:white;border-radius:12px;padding:14px 20px;box-shadow:0 8px 32px rgba(0,0,0,0.2);display:flex;align-items:center;gap:12px;max-width:480px;width:90%;animation:notifSlideIn 0.3s ease-out;"><span style="font-size:20px;">🔔</span><div style="flex:1;"><div style="font-weight:600;font-size:14px;">Your Buddy just sent a message!</div><div style="font-size:12px;opacity:0.9;margin-top:2px;">Enable notifications so you never miss one.</div></div><button data-action="enable-push-from-toast" style="background:white;color:#336026;border:none;border-radius:6px;padding:6px 14px;font-size:12px;font-weight:700;cursor:pointer;white-space:nowrap;">Enable</button><button data-action="dismiss-push-toast" style="background:none;border:none;color:rgba(255,255,255,0.7);font-size:18px;cursor:pointer;padding:0 4px;">×</button></div>`;
+        if(state.showPushPromptBanner){var pushPromptTitle=state.pushPromptReason==='login'?'Turn on notifications':'Your Buddy just sent a message!';mh+=`<div style="position:fixed;top:16px;left:50%;transform:translateX(-50%);z-index:1100;background:linear-gradient(135deg,#336026,#689562);color:white;border-radius:12px;padding:14px 20px;box-shadow:0 8px 32px rgba(0,0,0,0.2);display:flex;align-items:center;gap:12px;max-width:480px;width:90%;animation:notifSlideIn 0.3s ease-out;"><span style="font-size:20px;">🔔</span><div style="flex:1;"><div style="font-weight:600;font-size:14px;">${esc(pushPromptTitle)}</div><div style="font-size:12px;opacity:0.9;margin-top:2px;">Enable notifications so you never miss one.</div></div><button data-action="enable-push-from-toast" style="background:white;color:#336026;border:none;border-radius:6px;padding:6px 14px;font-size:12px;font-weight:700;cursor:pointer;white-space:nowrap;">Enable</button><button data-action="dismiss-push-toast" style="background:none;border:none;color:rgba(255,255,255,0.7);font-size:18px;cursor:pointer;padding:0 4px;">×</button></div>`;}
         if(state._showChangePassword)mh+=`<div class="broadcast-overlay" data-action="close-change-password"><div class="broadcast-card" style="max-width:420px;"><div style="font-family:'Fraunces',serif;font-size:20px;font-weight:600;margin-bottom:6px;">Change password</div><div style="font-size:13px;color:var(--text-secondary);margin-bottom:20px;">Enter your current password and choose a new one.</div><div class="form-group"><label>Current Password</label><input type="password" data-field="change-current-password" placeholder="Current password" style="width:100%;" autocomplete="current-password"></div><div class="form-group"><label>New Password</label><input type="password" data-field="change-new-password" placeholder="At least 8 characters" style="width:100%;" autocomplete="new-password"></div><div class="form-group"><label>Confirm New Password</label><input type="password" data-field="change-confirm-password" placeholder="Confirm new password" style="width:100%;" autocomplete="new-password"></div><div style="display:flex;gap:10px;margin-top:8px;"><button class="btn btn-primary" data-action="save-change-password" style="flex:1;">Update Password</button><button class="btn btn-secondary" data-action="close-change-password">Cancel</button></div></div></div>`;
         if(state._showPasswordReset)mh+=`<div class="broadcast-overlay" data-action="close-password-reset"><div class="broadcast-card" style="max-width:420px;"><div style="font-family:'Fraunces',serif;font-size:20px;font-weight:600;margin-bottom:6px;">Set a password</div><div style="font-size:13px;color:var(--text-secondary);margin-bottom:20px;">You signed in with a magic link. Set a password so you can log in with your email and password next time too.</div><div class="form-group"><label>New Password</label><input type="password" data-field="reset-new-password" placeholder="At least 8 characters" style="width:100%;" autocomplete="new-password"></div><div class="form-group"><label>Confirm Password</label><input type="password" data-field="reset-confirm-password" placeholder="Confirm new password" style="width:100%;" autocomplete="new-password"></div><div style="display:flex;gap:10px;margin-top:8px;"><button class="btn btn-primary" data-action="save-new-password" style="flex:1;">Set Password</button><button class="btn btn-secondary" data-action="close-password-reset">Skip for now</button></div></div></div>`;
         if(state._reengagementModal){var rm=state._reengagementModal;var draft=esc(rm.draft||'');mh+=`<div class="broadcast-overlay" data-action="close-reengagement-modal"><div class="broadcast-card" style="max-width:480px;"><div style="font-family:'Fraunces',serif;font-size:20px;font-weight:600;margin-bottom:4px;">📢 Send re-engagement message</div><div style="font-size:13px;color:var(--text-secondary);margin-bottom:14px;">To <strong>${esc(rm.ownerName||'')}</strong> about <strong>${esc(rm.petName||'')}</strong>. They'll get an email and (if their app is installed) a push notification.</div><div class="form-group"><textarea data-field="reengagement-message" placeholder="Type your re-engagement message…" style="width:100%;height:120px;">${draft}</textarea></div><div style="display:flex;gap:10px;margin-top:6px;"><button class="btn btn-primary" data-action="send-reengagement-message" data-case-id="${esc(rm.caseId||'')}" style="flex:1;">Send</button><button class="btn btn-secondary" data-action="close-reengagement-modal">Cancel</button></div></div></div>`;}

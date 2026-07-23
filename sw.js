@@ -80,24 +80,30 @@ self.addEventListener('fetch', event => {
 });
 
 // Push notifications
+// Always show a notification, even on a data-less or malformed push. Chrome
+// (and other browsers) treat a push event that doesn't result in a shown
+// notification as a "silent push" and will penalize/revoke the subscription
+// after repeated offenses, so this must never just return without showing one.
 self.addEventListener('push', event => {
-  if (!event.data) return;
-  try {
-    const payload = event.data.json();
-    const title = payload.title || 'Vet Buddies';
-    const options = {
-      body: payload.body || '',
-      icon: '/icon-192.png',
-      badge: '/icon-192.png',
-      vibrate: [200, 100, 200],
-      tag: payload.tag || 'vetbuddies-push-' + Date.now(),
-      renotify: true,
-      data: { url: payload.url || '/', caseId: payload.caseId || null },
-    };
-    event.waitUntil(self.registration.showNotification(title, options));
-  } catch (e) {
-    console.warn('Push event parse error:', e);
+  let payload = {};
+  if (event.data) {
+    try {
+      payload = event.data.json();
+    } catch (e) {
+      console.warn('Push event parse error:', e);
+    }
   }
+  const title = payload.title || 'Vet Buddies';
+  const options = {
+    body: payload.body || 'You have a new notification.',
+    icon: '/icon-192.png',
+    badge: '/icon-192.png',
+    vibrate: [200, 100, 200],
+    tag: payload.tag || 'vetbuddies-push-' + Date.now(),
+    renotify: true,
+    data: { url: payload.url || '/', caseId: payload.caseId || null },
+  };
+  event.waitUntil(self.registration.showNotification(title, options));
 });
 
 self.addEventListener('notificationclick', event => {
