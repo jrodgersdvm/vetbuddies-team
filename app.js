@@ -4901,7 +4901,10 @@ async function calculateBuddyScorecard(buddyId) {
                 </div>
               </div>
             </div>
-            <div id="messages-list" class="calm-thread">${bubbles}</div>
+            <div class="messages-scroll-wrap">
+              <div id="messages-list" class="calm-thread">${bubbles}</div>
+              <button id="scroll-to-bottom-btn" class="scroll-to-bottom-btn" data-action="scroll-messages-bottom" aria-label="Jump to latest messages" style="display:none;">↓</button>
+            </div>
             <div id="typing-indicator" class="calm-typing" style="display:none;"></div>
             ${composer}`;
         }
@@ -7420,6 +7423,7 @@ async function calculateBuddyScorecard(buddyId) {
         return (m.thread_type || 'client') === state.messageThread;
       });
 
+      html += '<div class="messages-scroll-wrap">';
       html += '<div id="messages-list" style="overflow-y: auto; max-height: 420px; display: flex; flex-direction: column; gap: 4px; padding-bottom: 8px;">';
       if (visibleMsgs.length === 0) {
         html += `<div class="empty-state"><div class="empty-state-text">💬 ${state.messageThread === 'staff' ? 'No internal staff messages yet.' : 'This is where your conversation with your Buddy will live. They\'ll reach out within 48 hours.'}</div></div>`;
@@ -7462,6 +7466,8 @@ async function calculateBuddyScorecard(buddyId) {
           `;
         }
       }
+      html += '</div>';
+      html += '<button id="scroll-to-bottom-btn" class="scroll-to-bottom-btn" data-action="scroll-messages-bottom" aria-label="Jump to latest messages" style="display:none;">↓</button>';
       html += '</div>';
 
       if (canMessage) {
@@ -11425,6 +11431,19 @@ function renderVaccineDueAlerts(vaccines) {
         });
       }
 
+      // Message thread — the floating "jump to latest" button only shows once the
+      // user has scrolled up far enough that the newest messages are off-screen.
+      const _msgList = document.getElementById('messages-list');
+      const _jumpBtn = document.getElementById('scroll-to-bottom-btn');
+      if (_msgList && _jumpBtn) {
+        const _updateJumpBtn = () => {
+          const distanceFromBottom = _msgList.scrollHeight - _msgList.scrollTop - _msgList.clientHeight;
+          _jumpBtn.style.display = distanceFromBottom > 150 ? 'flex' : 'none';
+        };
+        _msgList.addEventListener('scroll', _updateJumpBtn, { passive: true });
+        _updateJumpBtn();
+      }
+
       // KB chat — scroll to bottom after re-render
       if (state.view === 'knowledge-base') { scrollKbToBottom(); }
 
@@ -15238,6 +15257,12 @@ function renderVaccineDueAlerts(vaccines) {
             window._pendingAttachment = null;
             render();
             break;
+
+          case 'scroll-messages-bottom': {
+            const msgList = document.getElementById('messages-list');
+            if (msgList) msgList.scrollTo({ top: msgList.scrollHeight, behavior: 'smooth' });
+            break;
+          }
 
           // SEND MESSAGE — updated to include thread_type
           case 'send-message': {
